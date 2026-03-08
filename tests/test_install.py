@@ -7,6 +7,7 @@ from bedrock_pack_installer.install import (
     check_dependencies,
     do_install,
     extract_nested_archives,
+    find_packs_on_disk,
     move_to_installed,
     pack_exists_on_disk,
     process_entry,
@@ -71,6 +72,105 @@ def test_process_pack_skips_when_registered_and_already_on_disk(tmp_path):
     assert len(copied_manifests) == 1
     assert stats == {"installed": 0, "skipped": 1, "errors": 0}
     assert len(json.loads(world_json.read_text(encoding="utf-8"))) == 1
+
+
+def test_process_pack_replaces_existing_uuid_with_new_version_by_default(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+
+    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
+    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
+    source_pack = tmp_path / "source" / "test_pack"
+    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
+
+    world_json = world_dir / "world_behavior_packs.json"
+    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(source_pack, stats, world_dir, paths, state)
+
+    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
+    assert len(installed_packs) == 1
+    assert installed_packs[0]["version"] == [2, 0, 0]
+    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [2, 0, 0]}]
+    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
+
+
+def test_process_pack_skip_mode_keeps_existing_uuid_version(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+
+    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
+    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
+    source_pack = tmp_path / "source" / "test_pack"
+    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
+
+    world_json = world_dir / "world_behavior_packs.json"
+    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(source_pack, stats, world_dir, paths, state, duplicate_mode="skip")
+
+    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
+    assert len(installed_packs) == 1
+    assert installed_packs[0]["version"] == [1, 0, 0]
+    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [1, 0, 0]}]
+    assert stats == {"installed": 0, "skipped": 1, "errors": 0}
+
+
+def test_process_pack_keep_both_mode_preserves_existing_uuid_copy(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+
+    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
+    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
+    source_pack = tmp_path / "source" / "test_pack"
+    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
+
+    world_json = world_dir / "world_behavior_packs.json"
+    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(source_pack, stats, world_dir, paths, state, duplicate_mode="keep-both")
+
+    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
+    assert len(installed_packs) == 2
+    assert sorted(pack["version"] for pack in installed_packs) == [[1, 0, 0], [2, 0, 0]]
+    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [2, 0, 0]}]
+    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
+
+
+def test_process_pack_registers_existing_matching_uuid_without_copying(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+
+    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
+    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
+    source_pack = tmp_path / "source" / "test_pack"
+    write_manifest(source_pack, version=[1, 0, 0], name="Existing Pack")
+
+    world_json = world_dir / "world_behavior_packs.json"
+    write_world_json(world_json, [])
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(source_pack, stats, world_dir, paths, state)
+
+    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
+    assert len(installed_packs) == 1
+    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [1, 0, 0]}]
+    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
 
 
 def test_process_entry_warns_for_unknown_file_type(tmp_path):

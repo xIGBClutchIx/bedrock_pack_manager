@@ -4,11 +4,139 @@ from datetime import datetime
 from pathlib import Path
 
 from .console import AppState, C, error, info, print_warnings, section, warn
-from .install import do_install
-from .manifests import get_pack_info, read_manifest
+from .install import DuplicateMode, do_install
+from .manifests import get_pack_dependencies, get_pack_info, read_manifest
 from .nbt import enable_beta_apis
 from .paths import ProjectPaths
-from .worlds import save_world_json
+from .worlds import load_world_json, save_world_json
+
+
+def _load_registered_ids(world_json: Path) -> set[str]:
+    if not world_json.exists():
+        return set()
+    return {entry.get("pack_id", "") for entry in load_world_json(world_json)}
+
+
+def _scan_installed_packs(pack_dir: Path, label: str, state: AppState) -> list[dict]:
+    packs = []
+    if not pack_dir.exists():
+        warn(state, f"{pack_dir.name}/ does not exist")
+        return packs
+
+    for subfolder in sorted(pack_dir.iterdir()):
+        if not subfolder.is_dir():
+            continue
+        manifest_path = subfolder / "manifest.json"
+        if not manifest_path.exists():
+            warn(state, f"{pack_dir.name}/{subfolder.name} has no manifest.json - skipping")
+            continue
+        manifest = read_manifest(manifest_path)
+        if not manifest:
+            continue
+        uuid, version, name = get_pack_info(manifest)
+        if not uuid:
+            warn(state, f"{pack_dir.name}/{subfolder.name} has no UUID - skipping")
+            continue
+        packs.append(
+            {
+                "uuid": uuid,
+                "version": version,
+                "name": name,
+                "dependencies": get_pack_dependencies(manifest),
+                "path": subfolder,
+                "label": label,
+            }
+        )
+    return packs
+
+
+def _pack_map(packs: list[dict]) -> dict[str, list[dict]]:
+    mapping: dict[str, list[dict]] = {}
+    for pack in packs:
+        mapping.setdefault(pack["uuid"], []).append(pack)
+    return mapping
+
+
+def _audit_world_json(world_json: Path, label: str, installed_map: dict[str, list[dict]], state: AppState) -> int:
+    if not world_json.exists():
+        warn(state, f"{world_json.name} does not exist")
+        return 0
+
+    count = 0
+    for entry in load_world_json(world_json):
+        count += 1
+        pack_id = entry.get("pack_id", "")
+        version = entry.get("version", [])
+        if not pack_id:
+            warn(state, f"{world_json.name} contains an entry with no pack_id")
+            continue
+        installed_versions = installed_map.get(pack_id, [])
+        if not installed_versions:
+            warn(state, f"{label} UUID {pack_id} is registered in {world_json.name} but missing on disk")
+            continue
+        if version and not any(pack["version"] == version for pack in installed_versions):
+            warn(
+                state,
+                f"{label} UUID {pack_id} is registered in {world_json.name} at v{'.'.join(str(v) for v in version)} but that version is not installed on disk",
+            )
+    return count
+
+
+def do_doctor(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
+    section("Audit World And Installed Packs")
+
+    behavior_packs = _scan_installed_packs(paths.behavior_packs_dir, "Behavior Pack", state)
+    resource_packs = _scan_installed_packs(paths.resource_packs_dir, "Resource Pack", state)
+    all_packs = behavior_packs + resource_packs
+
+    state.installed_packs = [
+        {
+            "uuid": pack["uuid"],
+            "name": pack["name"],
+            "type": "bp" if pack["label"] == "Behavior Pack" else "rp",
+            "version": pack["version"],
+            "dependencies": pack["dependencies"],
+            "source": pack["path"].name,
+        }
+        for pack in all_packs
+    ]
+
+    behavior_map = _pack_map(behavior_packs)
+    resource_map = _pack_map(resource_packs)
+
+    registered_bp_count = _audit_world_json(world_dir / "world_behavior_packs.json", "Behavior Pack", behavior_map, state)
+    registered_rp_count = _audit_world_json(world_dir / "world_resource_packs.json", "Resource Pack", resource_map, state)
+
+    registered_bp_ids = _load_registered_ids(world_dir / "world_behavior_packs.json")
+    registered_rp_ids = _load_registered_ids(world_dir / "world_resource_packs.json")
+
+    for pack in behavior_packs:
+        if pack["uuid"] not in registered_bp_ids:
+            warn(state, f"Behavior Pack '{pack['name']}' is installed on disk but not registered in world_behavior_packs.json")
+    for pack in resource_packs:
+        if pack["uuid"] not in registered_rp_ids:
+            warn(state, f"Resource Pack '{pack['name']}' is installed on disk but not registered in world_resource_packs.json")
+
+    installed_ids = {installed_pack["uuid"] for installed_pack in state.installed_packs}
+    dep_warnings = {
+        (
+            f"'{pack['name']}' depends on UUID {dep.get('uuid', '')} "
+            f"(v{dep.get('version', '?')}) which is NOT installed - "
+            "it may not work correctly! Make sure the matching pack is also installed."
+        )
+        for pack in state.installed_packs
+        for dep in pack["dependencies"]
+        if dep.get("uuid") and dep.get("uuid") != pack["uuid"] and dep.get("uuid") not in installed_ids
+    }
+    for dep_warning in dep_warnings:
+        state.warnings.append(dep_warning)
+
+    print(f"  Installed on disk: {C.CYAN}{len(behavior_packs)}{C.RESET} BP, {C.CYAN}{len(resource_packs)}{C.RESET} RP")
+    print(f"  Registered in world: {C.CYAN}{registered_bp_count}{C.RESET} BP, {C.CYAN}{registered_rp_count}{C.RESET} RP")
+
+    if not state.warnings:
+        print(f"  {C.GREEN}Audit clean.{C.RESET}")
+    print_warnings(state.warnings)
 
 
 def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
@@ -118,10 +246,13 @@ def do_beta(world_dir: Path) -> None:
     print(f"\n  {C.GREEN}Done!{C.RESET} Beta APIs enabled for '{C.CYAN}{world_dir.name}{C.RESET}'")
 
 
-def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: AppState) -> None:
+def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
     if not flags:
-        do_install(world_dir, paths, state)
+        do_install(world_dir, paths, state, duplicate_mode=duplicate_mode)
         return
+
+    if "--doctor" in flags:
+        do_doctor(world_dir, paths, state)
 
     if "--rebuild" in flags:
         do_rebuild(world_dir, paths, state)

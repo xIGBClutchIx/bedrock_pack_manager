@@ -2,17 +2,19 @@ import os
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Literal
 
 from .console import AppState, C, display_path, info, ok, print_warnings, section, warn
 from .constants import ARCHIVE_EXTS
 from .manifests import classify_pack, get_pack_dependencies, get_pack_info, read_manifest
 from .paths import ProjectPaths
 from .worlds import (
-    is_already_registered,
     load_world_json,
-    register_pack,
     save_world_json,
+    upsert_pack,
 )
+
+DuplicateMode = Literal["skip", "replace", "keep-both"]
 
 
 def extract_archive(archive_path: Path, dest: Path) -> Path:
@@ -67,10 +69,11 @@ def move_pack(pack_folder: Path, dest_dir: Path, pack_name: str, pack_type: str)
     return target
 
 
-def pack_exists_on_disk(dest_dir: Path, uuid: str) -> bool:
+def find_packs_on_disk(dest_dir: Path, uuid: str) -> list[dict]:
     if not dest_dir.exists():
-        return False
+        return []
 
+    matches = []
     for subfolder in dest_dir.iterdir():
         if not subfolder.is_dir():
             continue
@@ -80,11 +83,55 @@ def pack_exists_on_disk(dest_dir: Path, uuid: str) -> bool:
         manifest = read_manifest(manifest_path)
         if not manifest:
             continue
-        existing_uuid, _version, _name = get_pack_info(manifest)
-        if existing_uuid == uuid:
-            return True
+        existing_uuid, existing_version, existing_name = get_pack_info(manifest)
+        if existing_uuid != uuid:
+            continue
+        matches.append({"path": subfolder, "version": existing_version, "name": existing_name})
 
-    return False
+    return sorted(matches, key=lambda match: match["path"].name.lower())
+
+
+def pack_exists_on_disk(dest_dir: Path, uuid: str) -> bool:
+    return bool(find_packs_on_disk(dest_dir, uuid))
+
+
+def _format_version(version: list) -> str:
+    return ".".join(str(value) for value in version)
+
+
+def _record_installed_pack(
+    state: AppState,
+    uuid: str,
+    name: str,
+    pack_type: str,
+    version: list,
+    deps: list[dict],
+    source_name: str,
+) -> None:
+    state.installed_packs.append(
+        {
+            "uuid": uuid,
+            "name": name,
+            "type": pack_type,
+            "version": version,
+            "dependencies": deps,
+            "source": source_name,
+        }
+    )
+
+
+def _sync_world_registration(world_json: Path, uuid: str, version: list) -> str:
+    action = upsert_pack(world_json, uuid, version)
+    if action == "added":
+        ok(f"Registered in {world_json.name}")
+    elif action == "updated":
+        info(f"Updated {world_json.name} to v{_format_version(version)}")
+    return action
+
+
+def _remove_existing_packs(existing_packs: list[dict]) -> None:
+    for existing_pack in existing_packs:
+        shutil.rmtree(existing_pack["path"])
 
 
 def process_pack(
@@ -93,6 +140,7 @@ def process_pack(
     world_dir: Path,
     paths: ProjectPaths,
     state: AppState,
+    duplicate_mode: DuplicateMode = "replace",
     source_name: str = "",
 ) -> None:
     manifest_path = pack_folder / "manifest.json"
@@ -136,41 +184,53 @@ def process_pack(
     world_json = world_dir / (
         "world_behavior_packs.json" if pack_type == "bp" else "world_resource_packs.json"
     )
-    ver_str = ".".join(str(value) for value in version)
+    ver_str = _format_version(version)
 
     print(f"\n    {C.BOLD}[{type_label}]{C.RESET} {name} (v{ver_str})")
     print(f"    UUID: {C.DIM}{uuid}{C.RESET}")
 
-    world_packs = load_world_json(world_json)
-    is_registered = is_already_registered(world_packs, uuid)
-    is_on_disk = pack_exists_on_disk(dest_dir, uuid)
+    existing_packs = find_packs_on_disk(dest_dir, uuid)
+    matching_version_packs = [existing_pack for existing_pack in existing_packs if existing_pack["version"] == version]
 
-    if is_registered and is_on_disk:
-        info("Already registered in world - skipping")
+    if matching_version_packs:
+        registration_action = _sync_world_registration(world_json, uuid, version)
+        if registration_action == "added":
+            info("Matching pack already installed on disk - registered without copying")
+            stats["installed"] += 1
+            _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
+            return
+        if registration_action == "updated":
+            info("Matching pack already installed on disk - updated registration without copying")
+            stats["installed"] += 1
+            _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
+            return
+        info("Matching UUID and version already installed - skipping")
         stats["skipped"] += 1
         return
 
+    if existing_packs and duplicate_mode == "skip":
+        existing_versions = ", ".join(_format_version(existing_pack["version"]) for existing_pack in existing_packs)
+        warn(
+            state,
+            f"Pack '{name}' already exists on disk with UUID {uuid} (installed: {existing_versions}) - skipping incoming v{ver_str}",
+        )
+        stats["skipped"] += 1
+        return
+
+    if existing_packs and duplicate_mode == "replace":
+        info(f"Replacing {len(existing_packs)} existing pack copy/copies for UUID {uuid}")
+        _remove_existing_packs(existing_packs)
+    elif existing_packs and duplicate_mode == "keep-both":
+        info(f"Keeping {len(existing_packs)} existing pack copy/copies for UUID {uuid}")
+
     final_path = move_pack(pack_folder, dest_dir, name, pack_type)
     ok(f"Copied to {final_path.relative_to(paths.base_dir)}")
-
-    if is_registered:
-        info(f"Already registered in {world_json.name} - restored missing pack files")
-    else:
-        register_pack(world_json, uuid, version)
-        ok(f"Registered in {world_json.name}")
+    registration_action = _sync_world_registration(world_json, uuid, version)
+    if existing_packs and registration_action == "unchanged":
+        info(f"{world_json.name} already references v{ver_str}")
 
     stats["installed"] += 1
-
-    state.installed_packs.append(
-        {
-            "uuid": uuid,
-            "name": name,
-            "type": pack_type,
-            "version": version,
-            "dependencies": deps,
-            "source": source_name,
-        }
-    )
+    _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
 
 
 def move_to_installed(entry: Path, paths: ProjectPaths) -> None:
@@ -186,7 +246,14 @@ def move_to_installed(entry: Path, paths: ProjectPaths) -> None:
     shutil.move(str(entry), str(target))
 
 
-def process_entry(entry: Path, stats: dict, world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
+def process_entry(
+    entry: Path,
+    stats: dict,
+    world_dir: Path,
+    paths: ProjectPaths,
+    state: AppState,
+    duplicate_mode: DuplicateMode = "replace",
+) -> None:
     print(f"\n{C.BOLD}>> {entry.name}{C.RESET}")
 
     if entry.is_file() and entry.suffix.lower() not in ARCHIVE_EXTS:
@@ -240,7 +307,7 @@ def process_entry(entry: Path, stats: dict, world_dir: Path, paths: ProjectPaths
                 )
 
         for pack in packs:
-            process_pack(pack, stats, world_dir, paths, state, source_name=entry.name)
+            process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
 
         shutil.rmtree(extracted, ignore_errors=True)
         move_to_installed(entry, paths)
@@ -254,11 +321,11 @@ def process_entry(entry: Path, stats: dict, world_dir: Path, paths: ProjectPaths
             return
 
         if len(packs) == 1 and packs[0] == entry:
-            process_pack(entry, stats, world_dir, paths, state, source_name=entry.name)
+            process_pack(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
         else:
             info(f"Found {len(packs)} pack(s) inside folder")
             for pack in packs:
-                process_pack(pack, stats, world_dir, paths, state, source_name=entry.name)
+                process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
 
         move_to_installed(entry, paths)
 
@@ -298,7 +365,7 @@ def check_dependencies(world_dir: Path, paths: ProjectPaths, state: AppState) ->
     return dep_warnings
 
 
-def do_install(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
+def do_install(world_dir: Path, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
     section("Install Packs")
 
     for directory in [paths.install_dir, paths.behavior_packs_dir, paths.resource_packs_dir]:
@@ -326,7 +393,7 @@ def do_install(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
 
     stats = {"installed": 0, "skipped": 0, "errors": 0}
     for entry in entries:
-        process_entry(entry, stats, world_dir, paths, state)
+        process_entry(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode)
 
     for dep_warning in check_dependencies(world_dir, paths, state):
         state.warnings.append(dep_warning)

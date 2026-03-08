@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+_active_log_mirror = None
 
 
 class TeeStream:
@@ -42,13 +43,22 @@ def _prune_old_logs(logs_dir: Path, keep: int) -> None:
         old_log.unlink(missing_ok=True)
 
 
+def log_only(text: str) -> None:
+    if _active_log_mirror is None:
+        return
+    _active_log_mirror.write(text)
+
+
 @contextmanager
 def capture_run_logs(logs_dir: Path):
+    global _active_log_mirror
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     buffer = io.StringIO()
     original_stdout = sys.stdout
     original_stderr = sys.stderr
+    previous_mirror = _active_log_mirror
+    _active_log_mirror = buffer
     sys.stdout = TeeStream(original_stdout, buffer)
     sys.stderr = TeeStream(original_stderr, buffer)
 
@@ -59,6 +69,7 @@ def capture_run_logs(logs_dir: Path):
         sys.stderr.flush()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+        _active_log_mirror = previous_mirror
 
         log_text = _strip_ansi(buffer.getvalue())
         latest_path = logs_dir / "latest.txt"

@@ -1,4 +1,4 @@
-from bedrock_pack_installer.logger import _prune_old_logs, _strip_ansi, capture_run_logs
+from bedrock_pack_installer.logger import _prune_old_logs, _strip_ansi, capture_run_logs, log_only
 
 
 def test_strip_ansi_removes_color_codes():
@@ -18,6 +18,16 @@ def test_capture_run_logs_writes_latest_and_timestamped_log(tmp_path):
     assert latest_path.read_text(encoding="utf-8").strip() == "Hello"
     assert len(dated_logs) == 1
     assert dated_logs[0].read_text(encoding="utf-8").strip() == "Hello"
+
+
+def test_log_only_writes_to_log_without_console_output(tmp_path, capsys):
+    logs_dir = tmp_path / "logs"
+
+    with capture_run_logs(logs_dir):
+        log_only("hidden\n")
+
+    assert capsys.readouterr().out == ""
+    assert "hidden" in (logs_dir / "latest.txt").read_text(encoding="utf-8")
 
 
 def test_prune_old_logs_keeps_latest_file_and_five_timestamped_logs(tmp_path):

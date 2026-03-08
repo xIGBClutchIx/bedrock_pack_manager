@@ -1,12 +1,13 @@
+import json
 import sys
 import types
 import zipfile
 
 import bedrock_pack_installer.commands as commands
-from bedrock_pack_installer.commands import do_beta, do_rebuild, do_zip
+from bedrock_pack_installer.commands import do_beta, do_doctor, do_rebuild, do_zip
 from bedrock_pack_installer.console import AppState
 from bedrock_pack_installer.paths import build_paths
-from tests.helpers import PACK_VERSION, write_manifest
+from tests.helpers import PACK_UUID, PACK_VERSION, write_manifest, write_world_json
 
 
 def test_do_zip_creates_archive_with_run_contents(tmp_path):
@@ -139,12 +140,61 @@ def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
     state = AppState()
     calls = []
 
+    monkeypatch.setattr(commands, "do_doctor", lambda *_args: calls.append("doctor"))
     monkeypatch.setattr(commands, "do_rebuild", lambda *_args: calls.append("rebuild"))
     monkeypatch.setattr(commands, "do_beta", lambda *_args: calls.append("beta"))
     monkeypatch.setattr(commands, "do_zip", lambda *_args: calls.append("zip"))
-    monkeypatch.setattr(commands, "do_install", lambda *_args: calls.append("install"))
+    monkeypatch.setattr(commands, "do_install", lambda *_args, **_kwargs: calls.append("install"))
 
-    commands.run(set(), world_dir, paths, state)
-    commands.run({"--beta", "--zip", "--rebuild"}, world_dir, paths, state)
+    commands.run(set(), world_dir, paths, state, duplicate_mode="keep-both")
+    commands.run({"--beta", "--zip", "--rebuild", "--doctor"}, world_dir, paths, state)
 
-    assert calls == ["install", "rebuild", "beta", "zip"]
+    assert calls == ["install", "doctor", "rebuild", "beta", "zip"]
+
+
+def test_do_doctor_reports_clean_state(tmp_path, capsys):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    write_manifest(paths.behavior_packs_dir / "BP One-BP", uuid="bp-uuid", version=PACK_VERSION, name="BP One")
+    write_manifest(paths.resource_packs_dir / "RP One-RP", uuid="rp-uuid", version=PACK_VERSION, name="RP One", module_type="resources")
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
+    write_world_json(world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
+
+    state = AppState()
+    do_doctor(world_dir, paths, state)
+
+    output = capsys.readouterr().out
+    assert "Audit clean." in output
+    assert not state.warnings
+
+
+def test_do_doctor_reports_registration_and_dependency_problems(tmp_path, capsys):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    write_manifest(paths.behavior_packs_dir / "BP One-BP", uuid=PACK_UUID, version=PACK_VERSION, name="BP One")
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "missing-bp", "version": PACK_VERSION}])
+    write_world_json(world_dir / "world_resource_packs.json", [])
+
+    dep_manifest_dir = paths.resource_packs_dir / "RP One-RP"
+    write_manifest(dep_manifest_dir, uuid="rp-uuid", version=PACK_VERSION, name="RP One", module_type="resources")
+    dep_manifest_dir.joinpath("manifest.json").write_text(
+        json.dumps(
+            {
+                "format_version": 2,
+                "header": {"name": "RP One", "uuid": "rp-uuid", "version": [1, 0, 0]},
+                "modules": [{"type": "resources", "uuid": "module-rp", "version": [1, 0, 0]}],
+                "dependencies": [{"uuid": "missing-dep", "version": [1, 0, 0]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = AppState()
+    do_doctor(world_dir, paths, state)
+
+    output = capsys.readouterr().out
+    assert "missing on disk" in output
+    assert "not registered" in output
+    assert "depends on UUID missing-dep" in output

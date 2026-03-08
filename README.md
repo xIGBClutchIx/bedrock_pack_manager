@@ -94,18 +94,31 @@ python bedrock_pack_installer.py
 python bedrock_pack_installer.py --rebuild
 python bedrock_pack_installer.py --zip
 python bedrock_pack_installer.py --beta
+python bedrock_pack_installer.py --doctor
+python bedrock_pack_installer.py --duplicate-mode replace
 python bedrock_pack_installer.py --rebuild --beta
+python bedrock_pack_installer.py --rebuild --beta --zip
 ```
 
-When launched without flags in an interactive terminal, the app now shows a keyboard-driven selection menu:
+When launched without flags in an interactive terminal, the app now shows a two-step keyboard-driven prompt:
 
+- first choose `Install Packs` or `Audit World And Installed Packs`
+- if you choose install, a second menu lets you toggle `Rebuild World Pack JSONs`, `Enable Beta APIs`, and `Zip Pack Folders`
 - use `Up` and `Down` to move
-- press `Space` to toggle an option
+- press `Space` to toggle install options in the second menu
 - press `Enter` to continue
 - press `Q` or `Ctrl+C` to quit
-- leave everything unchecked to continue with normal install mode
+- leave all install options unchecked to continue with normal install mode
 
 When the app finishes in an interactive terminal, it waits for `Enter` before closing.
+
+Install mode can also control how duplicate pack UUIDs are handled:
+
+- `--duplicate-mode replace`: replace existing installed copies for that UUID and update the world entry
+- `--duplicate-mode skip`: keep the currently installed UUID/version and skip the incoming pack
+- `--duplicate-mode keep-both`: keep older copies on disk, install the new one beside them, and update the world entry to the new version
+
+`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--rebuild`, `--beta`, or `--zip` when those are run on their own.
 
 ## What It Does
 
@@ -113,6 +126,7 @@ When the app finishes in an interactive terminal, it waits for `Enter` before cl
 - Detects whether a pack is a behavior pack or resource pack from `manifest.json`
 - Copies packs into `run/behavior_packs/` or `run/resource_packs/`
 - Registers packs in the selected world's JSON files
+- Audits installed packs and world registrations without modifying files
 - Warns about missing dependencies, invalid files, and old manifest versions
 - Moves processed input from `run/install/` to `run/installed/`
 - Writes a plain-text execution log to `run/logs/latest.txt` and keeps the 5 most recent timestamped logs
@@ -130,7 +144,7 @@ When the app finishes in an interactive terminal, it waits for `Enter` before cl
 
 - `bedrock_pack_installer.py`: thin CLI entrypoint
 - `bedrock_pack_installer/cli.py`: startup and argument handling
-- `bedrock_pack_installer/commands.py`: rebuild, zip, and beta command handlers
+- `bedrock_pack_installer/commands.py`: rebuild, zip, beta, and audit command handlers
 - `bedrock_pack_installer/install.py`: install workflow and dependency checks
 - `bedrock_pack_installer/worlds.py`: world selection and world JSON helpers
 - `bedrock_pack_installer/manifests.py`: manifest parsing and pack classification

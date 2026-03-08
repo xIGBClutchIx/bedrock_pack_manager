@@ -24,6 +24,22 @@ def is_already_registered(world_packs: list, uuid: str) -> bool:
     return any(pack.get("pack_id") == uuid for pack in world_packs)
 
 
+def upsert_pack(world_json_path: Path, uuid: str, version: list) -> str:
+    packs = load_world_json(world_json_path)
+    for pack in packs:
+        if pack.get("pack_id") != uuid:
+            continue
+        if pack.get("version") == version:
+            return "unchanged"
+        pack["version"] = version
+        save_world_json(world_json_path, packs)
+        return "updated"
+
+    packs.append({"pack_id": uuid, "version": version})
+    save_world_json(world_json_path, packs)
+    return "added"
+
+
 def register_pack(world_json_path: Path, uuid: str, version: list) -> bool:
     packs = load_world_json(world_json_path)
     if is_already_registered(packs, uuid):
