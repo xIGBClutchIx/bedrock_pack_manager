@@ -1,7 +1,7 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 
 class C:
@@ -14,10 +14,35 @@ class C:
     RESET = "\033[0m"
 
 
+def title_text(text: str) -> str:
+    return f"{C.CYAN}{C.BOLD}{text}{C.RESET}"
+
+
+def dim_text(text: str) -> str:
+    return f"{C.DIM}{text}{C.RESET}"
+
+
+def prompt_text(text: str) -> str:
+    return f"  {dim_text(text)}"
+
+
+@dataclass
+class ActionRecord:
+    kind: str
+    message: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class AppState:
     warnings: list[str] = field(default_factory=list)
     installed_packs: list[dict] = field(default_factory=list)
+    actions: list[ActionRecord] = field(default_factory=list)
+
+    def record(self, kind: str, message: str, **details: Any) -> ActionRecord:
+        action = ActionRecord(kind=kind, message=message, details=details)
+        self.actions.append(action)
+        return action
 
 
 class TerminalListMenu:
@@ -55,30 +80,39 @@ class TerminalListMenu:
 
 def warn(state: AppState, msg: str) -> None:
     state.warnings.append(msg)
+    state.record("warning", msg)
     print(f"  {C.YELLOW}[WARNING]{C.RESET} {msg}")
 
 
-def error(msg: str) -> None:
+def error(msg: str, state: AppState | None = None, **details: Any) -> None:
+    if state is not None:
+        state.record(str(details.pop("action", "error")), msg, **details)
     print(f"  {C.RED}[ERROR]{C.RESET} {msg}")
 
 
-def ok(msg: str) -> None:
+def ok(msg: str, state: AppState | None = None, **details: Any) -> None:
+    if state is not None:
+        state.record(str(details.pop("action", "ok")), msg, **details)
     print(f"  {C.GREEN}[OK]{C.RESET} {msg}")
 
 
-def info(msg: str) -> None:
+def info(msg: str, state: AppState | None = None, **details: Any) -> None:
+    if state is not None:
+        state.record(str(details.pop("action", "info")), msg, **details)
     print(f"  {C.CYAN}[INFO]{C.RESET} {msg}")
 
 
-def section(title: str) -> None:
-    print(f"\n{C.BOLD}{title}{C.RESET}")
+def section(title: str, state: AppState | None = None, **details: Any) -> None:
+    if state is not None:
+        state.record(str(details.pop("action", "section")), title, **details)
+    print(f"\n  {title_text(title)}")
 
 
 def app_header_lines() -> list[str]:
     return [
         "",
-        f"{C.CYAN}{C.BOLD}Bedrock Pack Installer{C.RESET}",
-        f"  {C.DIM}Minecraft world pack setup, repair, zip, and beta tools{C.RESET}",
+        title_text("Bedrock Pack Installer"),
+        f"  {dim_text('Minecraft world pack setup, repair, zip, and beta tools')}",
     ]
 
 
@@ -87,8 +121,10 @@ def app_header() -> None:
         print(line)
 
 
-def subsection(title: str) -> None:
-    print(f"\n  {C.BOLD}{title}{C.RESET}")
+def subsection(title: str, state: AppState | None = None, **details: Any) -> None:
+    if state is not None:
+        state.record(str(details.pop("action", "subsection")), title, **details)
+    print(f"\n  {title_text(title)}")
 
 
 def display_path(path: Path) -> str:

@@ -3,11 +3,11 @@ import sys
 from pathlib import Path
 
 from .commands import run
-from .console import AppState, C, TerminalListMenu, app_header, app_header_lines
+from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
 from .paths import build_paths
 from .terminal import read_keypress
-from .worlds import select_world
+from .worlds import find_world_by_name, resolve_world_path, select_world
 
 MODE_OPTIONS = [
     ("install", "Install Packs"),
@@ -64,6 +64,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="replace",
         help="How install mode handles incoming packs whose UUID already exists on disk.",
     )
+    parser.add_argument(
+        "--world-name",
+        help="Select a world folder by name from run/worlds.",
+    )
+    parser.add_argument(
+        "--world-path",
+        help="Select a world by path. Relative paths are resolved from run/worlds.",
+    )
     return parser.parse_args(argv)
 
 
@@ -109,12 +117,32 @@ def log_launch_context(argv: list[str], args: argparse.Namespace) -> None:
     log_only(f"  doctor: {args.doctor} ({_arg_source(argv, '--doctor')})\n")
     duplicate_mode_source = "arg" if "--duplicate-mode" in argv else "default"
     log_only(f"  duplicate_mode: {args.duplicate_mode} ({duplicate_mode_source})\n")
+    world_name_source = "arg" if "--world-name" in argv else "default"
+    world_path_source = "arg" if "--world-path" in argv else "default"
+    log_only(f"  world_name: {args.world_name or '(none)'} ({world_name_source})\n")
+    log_only(f"  world_path: {args.world_path or '(none)'} ({world_path_source})\n")
 
 
 def log_run_settings(flags: set[str], selection_source: str) -> None:
     log_only("\nRun Settings\n")
     log_only(f"  Selection source: {selection_source}\n")
     log_only(f"  Effective flags: {', '.join(sorted(flags)) if flags else '(install only)'}\n")
+
+
+def resolve_world(args: argparse.Namespace, paths) -> tuple[Path | None, str]:
+    if args.world_name and args.world_path:
+        raise ValueError("Use either --world-name or --world-path, not both")
+
+    if args.world_name:
+        world_dir = find_world_by_name(paths.worlds_dir, args.world_name)
+        if world_dir is None:
+            raise ValueError(f"World '{args.world_name}' was not found in {paths.worlds_dir}")
+        return world_dir, "--world-name"
+
+    if args.world_path:
+        return resolve_world_path(paths.worlds_dir, args.world_path), "--world-path"
+
+    return select_world(paths.worlds_dir), "prompt"
 
 
 def _move_cursor(delta: int, size: int, direction: str) -> int:
@@ -136,7 +164,7 @@ def _toggle_flag(selected: set[str], flag: str) -> set[str]:
 
 def _mode_menu_lines(cursor: int) -> list[str]:
     lines = [
-        f"  {C.DIM}Choose what to do{C.RESET}",
+        f"  {dim_text('Choose what to do')}",
         "",
     ]
     for index, (_flag, label) in enumerate(MODE_OPTIONS):
@@ -150,7 +178,9 @@ def _install_menu_lines(selected: set[str], cursor: int) -> list[str]:
     selection_label = "Install Packs" if not selected else f"Install Packs ({len(selected)} extra option(s))"
 
     lines = [
-        f"  {C.DIM}{selection_label}{C.RESET}",
+        "",
+        f"  {title_text(selection_label)}",
+        f"  {dim_text('Select any extra steps before continuing')}",
         "",
     ]
     for index, (flag, label) in enumerate(INSTALL_OPTIONS):
@@ -168,8 +198,8 @@ def prompt_mode() -> str:
         [
             *app_header_lines(),
             "",
-            f"  {C.CYAN}{C.BOLD}Mode{C.RESET}",
-            f"  {C.DIM}↑/↓ move  Enter select  Q quit{C.RESET}",
+            f"  {title_text('Mode')}",
+            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
         ],
         lambda: _mode_menu_lines(cursor),
     )
@@ -198,8 +228,8 @@ def prompt_install_flags() -> set[str]:
         [
             *app_header_lines(),
             "",
-            f"  {C.CYAN}{C.BOLD}Install Options{C.RESET}",
-            f"  {C.DIM}↑/↓ move  Space toggle  Enter continue  Q quit{C.RESET}",
+            f"  {title_text('Install Options')}",
+            f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
         ],
         lambda: _install_menu_lines(selected, cursor),
     )
@@ -228,7 +258,7 @@ def prompt_install_flags() -> set[str]:
 def pause_before_exit() -> None:
     if not is_interactive_terminal():
         return
-    input("\nPress Enter to exit...")
+    input(f"\n{prompt_text('Press Enter to exit...')}")
 
 
 def main() -> None:
@@ -252,8 +282,15 @@ def main() -> None:
                 log_run_settings(flags, "cli args/defaults")
 
             needs_world = not flags or flags != {"--zip"}
-            world_dir = select_world(paths.worlds_dir) if needs_world else None
+            world_dir = None
+            if needs_world:
+                world_dir, world_selection_source = resolve_world(args, paths)
+                log_only(f"  World source: {world_selection_source}\n")
+                log_only(f"  World: {world_dir}\n")
             run(flags, world_dir, paths, state, duplicate_mode=args.duplicate_mode)
+    except ValueError as exc:
+        print(f"\n{C.RED}{exc}{C.RESET}")
+        return
     except (KeyboardInterrupt, MenuExit):
         print(f"\n{C.YELLOW}Cancelled.{C.RESET}")
         return

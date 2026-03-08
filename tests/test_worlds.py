@@ -1,9 +1,11 @@
 import pytest
 from bedrock_pack_installer.worlds import (
     _move_cursor,
+    find_world_by_name,
     is_already_registered,
     load_world_json,
     register_pack,
+    resolve_world_path,
     save_world_json,
     select_world,
 )
@@ -131,3 +133,30 @@ def test_select_world_shows_relative_path_when_no_worlds_exist(tmp_path, monkeyp
         select_world(worlds_dir)
 
     assert "run/worlds" in capsys.readouterr().out
+
+
+def test_find_world_by_name_returns_matching_directory(tmp_path):
+    world_dir = tmp_path / "WorldA"
+    world_dir.mkdir()
+
+    assert find_world_by_name(tmp_path, "WorldA") == world_dir
+
+
+def test_find_world_by_name_returns_none_for_missing_world(tmp_path):
+    assert find_world_by_name(tmp_path, "MissingWorld") is None
+
+
+def test_resolve_world_path_accepts_relative_path(tmp_path):
+    worlds_dir = tmp_path / "run" / "worlds"
+    world_dir = worlds_dir / "WorldA"
+    world_dir.mkdir(parents=True)
+
+    assert resolve_world_path(worlds_dir, "WorldA") == world_dir.resolve()
+
+
+def test_resolve_world_path_rejects_missing_directory(tmp_path):
+    worlds_dir = tmp_path / "run" / "worlds"
+    worlds_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError):
+        resolve_world_path(worlds_dir, "MissingWorld")

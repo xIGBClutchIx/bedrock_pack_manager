@@ -95,6 +95,8 @@ python bedrock_pack_installer.py --rebuild
 python bedrock_pack_installer.py --zip
 python bedrock_pack_installer.py --beta
 python bedrock_pack_installer.py --doctor
+python bedrock_pack_installer.py --doctor --world-name "My World"
+python bedrock_pack_installer.py --rebuild --world-path "My World"
 python bedrock_pack_installer.py --duplicate-mode replace
 python bedrock_pack_installer.py --rebuild --beta
 python bedrock_pack_installer.py --rebuild --beta --zip
@@ -119,6 +121,14 @@ Install mode can also control how duplicate pack UUIDs are handled:
 - `--duplicate-mode keep-both`: keep older copies on disk, install the new one beside them, and update the world entry to the new version
 
 `--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--rebuild`, `--beta`, or `--zip` when those are run on their own.
+
+World selection can also be driven directly from the CLI:
+
+- `--world-name "My World"` selects `run/worlds/My World`
+- `--world-path "My World"` resolves a relative path from `run/worlds/`
+- `--world-path /absolute/path/to/World` uses an absolute path directly
+- if neither flag is provided, the existing interactive or prompt-based world picker is used
+- `--world-name` and `--world-path` are mutually exclusive
 
 ## What It Does
 

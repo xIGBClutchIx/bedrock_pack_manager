@@ -2,7 +2,7 @@ import json
 import sys
 from pathlib import Path
 
-from .console import C, TerminalListMenu, app_header_lines, display_path
+from .console import C, TerminalListMenu, app_header_lines, dim_text, display_path, title_text
 from .terminal import read_keypress
 
 
@@ -48,6 +48,28 @@ def register_pack(world_json_path: Path, uuid: str, version: list) -> bool:
     return True
 
 
+def find_world_by_name(worlds_dir: Path, world_name: str) -> Path | None:
+    world_path = worlds_dir / world_name
+    if world_path.is_dir() and not world_path.name.startswith("."):
+        return world_path
+    return None
+
+
+def resolve_world_path(worlds_dir: Path, world_path: str) -> Path:
+    resolved_path = Path(world_path).expanduser()
+    if not resolved_path.is_absolute():
+        resolved_path = (worlds_dir / resolved_path).resolve()
+    else:
+        resolved_path = resolved_path.resolve()
+
+    if not resolved_path.exists():
+        raise ValueError(f"World path does not exist: {resolved_path}")
+    if not resolved_path.is_dir():
+        raise ValueError(f"World path is not a directory: {resolved_path}")
+
+    return resolved_path
+
+
 def is_interactive_terminal() -> bool:
     return bool(getattr(sys.stdin, "isatty", lambda: False)()) and bool(getattr(sys.stdout, "isatty", lambda: False)())
 
@@ -75,7 +97,7 @@ def _world_details(world: Path) -> str:
 
 def _world_menu_lines(worlds: list[Path], cursor: int) -> list[str]:
     lines = [
-        f"  {C.DIM}{len(worlds)} world(s) available{C.RESET}",
+        f"  {dim_text(f'{len(worlds)} world(s) available')}",
         "",
     ]
     for index, world in enumerate(worlds):
@@ -91,8 +113,8 @@ def _select_world_interactive(worlds: list[Path]) -> Path:
         [
             *app_header_lines(),
             "",
-            f"  {C.CYAN}{C.BOLD}Worlds{C.RESET}",
-            f"  {C.DIM}↑/↓ move  Enter select  Q quit{C.RESET}",
+            f"  {title_text('Worlds')}",
+            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
         ],
         lambda: _world_menu_lines(worlds, cursor),
     )
@@ -115,7 +137,7 @@ def _select_world_interactive(worlds: list[Path]) -> Path:
 
 
 def _select_world_with_prompt(worlds: list[Path]) -> Path:
-    print(f"\n  {C.CYAN}{C.BOLD}Worlds{C.RESET}\n")
+    print(f"\n  {title_text('Worlds')}\n")
     for index, world in enumerate(worlds, 1):
         print(f"    {C.BOLD}{index}.{C.RESET} {world.name}{_world_details(world)}")
 
@@ -143,13 +165,13 @@ def select_world(worlds_dir: Path) -> Path:
     )
 
     if not worlds:
-        print(f"\n  {C.CYAN}{C.BOLD}Worlds{C.RESET}")
+        print(f"\n  {title_text('Worlds')}")
         print(f"  {C.RED}No worlds found in {display_path(worlds_dir)}.{C.RESET}")
         sys.exit(1)
 
     if len(worlds) == 1:
-        print(f"\n  {C.CYAN}{C.BOLD}Worlds{C.RESET}")
-        print(f"  {C.DIM}Only one world available{C.RESET}")
+        print(f"\n  {title_text('Worlds')}")
+        print(f"  {dim_text('Only one world available')}")
         print(f"  Selected: {C.CYAN}{worlds[0].name}{C.RESET}")
         return worlds[0]
     if is_interactive_terminal():

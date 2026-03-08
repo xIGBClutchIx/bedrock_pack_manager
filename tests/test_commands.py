@@ -20,7 +20,8 @@ def test_do_zip_creates_archive_with_run_contents(tmp_path):
     (paths.behavior_packs_dir / "bp.txt").write_text("bp", encoding="utf-8")
     (paths.resource_packs_dir / "rp.txt").write_text("rp", encoding="utf-8")
 
-    do_zip(paths, AppState())
+    state = AppState()
+    do_zip(paths, state)
 
     zip_files = list(tmp_path.glob("Bedrock_Packs_*.zip"))
     assert len(zip_files) == 1
@@ -31,6 +32,7 @@ def test_do_zip_creates_archive_with_run_contents(tmp_path):
             "run/behavior_packs/bp.txt",
             "run/resource_packs/rp.txt",
         }
+    assert any(action.kind == "create_zip" for action in state.actions)
 
 
 def test_do_rebuild_rewrites_world_jsons_from_installed_packs(tmp_path):
@@ -46,10 +48,12 @@ def test_do_rebuild_rewrites_world_jsons_from_installed_packs(tmp_path):
         module_type="resources",
     )
 
-    do_rebuild(world_dir, paths, AppState())
+    state = AppState()
+    do_rebuild(world_dir, paths, state)
 
     assert (world_dir / "world_behavior_packs.json").read_text(encoding="utf-8").count("bp-uuid") == 1
     assert (world_dir / "world_resource_packs.json").read_text(encoding="utf-8").count("rp-uuid") == 1
+    assert any(action.kind == "rebuild_world_json" for action in state.actions)
 
 
 def test_do_rebuild_warns_for_missing_manifest_and_uuid(tmp_path):
@@ -85,11 +89,14 @@ def test_do_beta_enables_world_when_helper_returns_true(tmp_path, monkeypatch, c
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
     monkeypatch.setattr("bedrock_pack_installer.commands.enable_beta_apis", lambda _path: True)
 
-    do_beta(world_dir)
+    state = AppState()
+    do_beta(world_dir, state)
 
     output = capsys.readouterr().out
     assert "Backup saved as level.dat.backup" in output
     assert "Beta APIs enabled" in output
+    assert any(action.kind == "beta_backup" for action in state.actions)
+    assert any(action.kind == "beta_toggle" and action.details["changed"] is True for action in state.actions)
 
 
 def test_do_beta_reports_already_enabled_when_helper_returns_false(tmp_path, monkeypatch, capsys):
@@ -100,9 +107,11 @@ def test_do_beta_reports_already_enabled_when_helper_returns_false(tmp_path, mon
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
     monkeypatch.setattr("bedrock_pack_installer.commands.enable_beta_apis", lambda _path: False)
 
-    do_beta(world_dir)
+    state = AppState()
+    do_beta(world_dir, state)
 
     assert "already" in capsys.readouterr().out.lower()
+    assert any(action.kind == "beta_toggle" and action.details["changed"] is False for action in state.actions)
 
 
 def test_do_beta_reports_missing_nbtlib_when_level_dat_exists(tmp_path, monkeypatch, capsys):
@@ -167,6 +176,7 @@ def test_do_doctor_reports_clean_state(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "Audit clean." in output
     assert not state.warnings
+    assert any(action.kind == "doctor_summary" for action in state.actions)
 
 
 def test_do_doctor_reports_registration_and_dependency_problems(tmp_path, capsys):

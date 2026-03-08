@@ -49,6 +49,8 @@ def test_process_pack_restores_files_when_registered_but_missing_on_disk(tmp_pat
     assert len(copied_manifests) == 1
     assert stats == {"installed": 1, "skipped": 0, "errors": 0}
     assert len(json.loads(world_json.read_text(encoding="utf-8"))) == 1
+    assert any(action.kind == "copy_pack" for action in state.actions)
+    assert any(action.kind == "register_world_pack" for action in state.actions)
 
 
 def test_process_pack_skips_when_registered_and_already_on_disk(tmp_path):
@@ -74,6 +76,7 @@ def test_process_pack_skips_when_registered_and_already_on_disk(tmp_path):
     assert len(copied_manifests) == 1
     assert stats == {"installed": 0, "skipped": 1, "errors": 0}
     assert len(json.loads(world_json.read_text(encoding="utf-8"))) == 1
+    assert any(action.kind == "skip_pack" for action in state.actions)
 
 
 def test_process_pack_replaces_existing_uuid_with_new_version_by_default(tmp_path):

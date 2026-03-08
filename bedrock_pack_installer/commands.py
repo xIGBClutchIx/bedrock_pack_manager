@@ -83,7 +83,7 @@ def _audit_world_json(world_json: Path, label: str, installed_map: dict[str, lis
 
 
 def do_doctor(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
-    section("Audit World And Installed Packs")
+    section("Audit World And Installed Packs", state=state, action="doctor")
 
     behavior_packs = _scan_installed_packs(paths.behavior_packs_dir, "Behavior Pack", state)
     resource_packs = _scan_installed_packs(paths.resource_packs_dir, "Resource Pack", state)
@@ -136,11 +136,20 @@ def do_doctor(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
 
     if not state.warnings:
         print(f"  {C.GREEN}Audit clean.{C.RESET}")
+    state.record(
+        "doctor_summary",
+        "Audit complete",
+        behavior_packs=len(behavior_packs),
+        resource_packs=len(resource_packs),
+        registered_behavior_packs=registered_bp_count,
+        registered_resource_packs=registered_rp_count,
+        warnings=len(state.warnings),
+    )
     print_warnings(state.warnings)
 
 
 def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
-    section("Rebuild World Pack JSONs")
+    section("Rebuild World Pack JSONs", state=state, action="rebuild")
 
     bp_entries = []
     rp_entries = []
@@ -193,6 +202,15 @@ def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
         f"and {C.CYAN}{rp_count}{C.RESET} resource pack(s)"
     )
 
+    state.record(
+        "rebuild_world_json",
+        "Rebuilt world pack JSON files",
+        world_dir=str(world_dir),
+        behavior_packs=bp_count,
+        resource_packs=rp_count,
+        behavior_json=str(world_dir / "world_behavior_packs.json"),
+        resource_json=str(world_dir / "world_resource_packs.json"),
+    )
     print_warnings(state.warnings)
 
 
@@ -201,7 +219,7 @@ def do_zip(paths: ProjectPaths, state: AppState) -> None:
     zip_name = f"Bedrock_Packs_{timestamp}.zip"
     zip_path = paths.base_dir / zip_name
 
-    section("Zip Pack Folders")
+    section("Zip Pack Folders", state=state, action="zip")
 
     folder_paths = [paths.worlds_dir, paths.behavior_packs_dir, paths.resource_packs_dir]
     file_count = 0
@@ -221,29 +239,42 @@ def do_zip(paths: ProjectPaths, state: AppState) -> None:
     print(f"\n  {C.GREEN}Done!{C.RESET} {file_count} files zipped")
     print(f"  {C.CYAN}{zip_name}{C.RESET} ({size_mb:.1f} MB)")
     print(f"  Saved to: {zip_path}")
+    state.record(
+        "create_zip",
+        "Created zip archive",
+        zip_path=str(zip_path),
+        file_count=file_count,
+        size_mb=round(size_mb, 1),
+    )
 
 
-def do_beta(world_dir: Path) -> None:
+def do_beta(world_dir: Path, state: AppState | None = None) -> None:
     dat_path = world_dir / "level.dat"
     if not dat_path.exists():
         print(f"  {C.YELLOW}[WARNING]{C.RESET} No level.dat found in '{world_dir.name}' - skipping beta toggle")
+        if state is not None:
+            state.record("beta_toggle", "Skipped beta toggle because level.dat is missing", world_dir=str(world_dir), changed=False)
         return
 
     try:
         import nbtlib  # noqa: F401
     except ImportError:
-        error("nbtlib is required. Install it with: pip install nbtlib")
+        error("nbtlib is required. Install it with: pip install nbtlib", state=state, action="beta_toggle", world_dir=str(world_dir), changed=False)
         return
 
-    section("Enable Beta APIs")
+    section("Enable Beta APIs", state=state, action="beta")
 
     if not enable_beta_apis(dat_path):
         print(f"\n  Beta APIs already {C.GREEN}enabled{C.RESET} for '{world_dir.name}'")
+        if state is not None:
+            state.record("beta_toggle", "Beta APIs already enabled", world_dir=str(world_dir), changed=False)
         return
 
-    info("Backup saved as level.dat.backup")
+    info("Backup saved as level.dat.backup", state=state, action="beta_backup", backup_path=str(dat_path.with_name("level.dat.backup")))
 
     print(f"\n  {C.GREEN}Done!{C.RESET} Beta APIs enabled for '{C.CYAN}{world_dir.name}{C.RESET}'")
+    if state is not None:
+        state.record("beta_toggle", "Enabled beta APIs", world_dir=str(world_dir), changed=True)
 
 
 def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
@@ -258,7 +289,7 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
         do_rebuild(world_dir, paths, state)
 
     if "--beta" in flags:
-        do_beta(world_dir)
+        do_beta(world_dir, state)
 
     if "--zip" in flags:
         do_zip(paths, state)

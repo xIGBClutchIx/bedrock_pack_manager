@@ -47,7 +47,12 @@ def extract_nested_archives(folder: Path, state: AppState) -> bool:
     for file_path in list(folder.rglob("*")):
         if file_path.is_file() and file_path.suffix.lower() in ARCHIVE_EXTS:
             found_nested = True
-            info(f"Found nested archive: {file_path.name} - extracting")
+            info(
+                f"Found nested archive: {file_path.name} - extracting",
+                state=state,
+                action="extract_nested_archive",
+                archive=str(file_path),
+            )
             try:
                 nested_dest = file_path.parent / f"_nested_{file_path.stem}"
                 with zipfile.ZipFile(file_path, "r") as zf:
@@ -140,10 +145,6 @@ def _record_installed_pack(
 
 def _sync_world_registration(world_json: Path, uuid: str, version: list) -> str:
     action = upsert_pack(world_json, uuid, version)
-    if action == "added":
-        ok(f"Registered in {world_json.name}")
-    elif action == "updated":
-        info(f"Updated {world_json.name} to v{_format_version(version)}")
     return action
 
 
@@ -213,16 +214,56 @@ def process_pack(
     if matching_version_packs:
         registration_action = _sync_world_registration(world_json, uuid, version)
         if registration_action == "added":
-            info("Matching pack already installed on disk - registered without copying")
+            ok(
+                f"Registered in {world_json.name}",
+                state=state,
+                action="register_world_pack",
+                world_json=str(world_json),
+                uuid=uuid,
+                version=version,
+                registration_action=registration_action,
+            )
+            info(
+                "Matching pack already installed on disk - registered without copying",
+                state=state,
+                action="reuse_installed_pack",
+                uuid=uuid,
+                version=version,
+                source=source_name,
+            )
             stats["installed"] += 1
             _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
             return
         if registration_action == "updated":
-            info("Matching pack already installed on disk - updated registration without copying")
+            info(
+                f"Updated {world_json.name} to v{_format_version(version)}",
+                state=state,
+                action="register_world_pack",
+                world_json=str(world_json),
+                uuid=uuid,
+                version=version,
+                registration_action=registration_action,
+            )
+            info(
+                "Matching pack already installed on disk - updated registration without copying",
+                state=state,
+                action="reuse_installed_pack",
+                uuid=uuid,
+                version=version,
+                source=source_name,
+            )
             stats["installed"] += 1
             _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
             return
-        info("Matching UUID and version already installed - skipping")
+        info(
+            "Matching UUID and version already installed - skipping",
+            state=state,
+            action="skip_pack",
+            reason="matching_uuid_and_version_already_installed",
+            uuid=uuid,
+            version=version,
+            source=source_name,
+        )
         stats["skipped"] += 1
         return
 
@@ -236,16 +277,76 @@ def process_pack(
         return
 
     if existing_packs and duplicate_mode == "replace":
-        info(f"Replacing {len(existing_packs)} existing pack copy/copies for UUID {uuid}")
+        info(
+            f"Replacing {len(existing_packs)} existing pack copy/copies for UUID {uuid}",
+            state=state,
+            action="remove_existing_packs",
+            uuid=uuid,
+            duplicate_mode=duplicate_mode,
+            removed_paths=[str(existing_pack["path"]) for existing_pack in existing_packs],
+        )
         _remove_existing_packs(existing_packs)
     elif existing_packs and duplicate_mode == "keep-both":
-        info(f"Keeping {len(existing_packs)} existing pack copy/copies for UUID {uuid}")
+        info(
+            f"Keeping {len(existing_packs)} existing pack copy/copies for UUID {uuid}",
+            state=state,
+            action="keep_existing_packs",
+            uuid=uuid,
+            duplicate_mode=duplicate_mode,
+            existing_paths=[str(existing_pack["path"]) for existing_pack in existing_packs],
+        )
 
     final_path = move_pack(pack_folder, dest_dir, name, pack_type)
-    ok(f"Copied to {final_path.relative_to(paths.base_dir)}")
+    ok(
+        f"Copied to {final_path.relative_to(paths.base_dir)}",
+        state=state,
+        action="copy_pack",
+        source=str(pack_folder),
+        target=str(final_path),
+        uuid=uuid,
+        version=version,
+        pack_type=pack_type,
+    )
     registration_action = _sync_world_registration(world_json, uuid, version)
+    if registration_action == "added":
+        ok(
+            f"Registered in {world_json.name}",
+            state=state,
+            action="register_world_pack",
+            world_json=str(world_json),
+            uuid=uuid,
+            version=version,
+            registration_action=registration_action,
+        )
+    elif registration_action == "updated":
+        info(
+            f"Updated {world_json.name} to v{_format_version(version)}",
+            state=state,
+            action="register_world_pack",
+            world_json=str(world_json),
+            uuid=uuid,
+            version=version,
+            registration_action=registration_action,
+        )
+    else:
+        state.record(
+            "register_world_pack",
+            f"{world_json.name} already references v{ver_str}",
+            world_json=str(world_json),
+            uuid=uuid,
+            version=version,
+            registration_action=registration_action,
+        )
     if existing_packs and registration_action == "unchanged":
-        info(f"{world_json.name} already references v{ver_str}")
+        info(
+            f"{world_json.name} already references v{ver_str}",
+            state=state,
+            action="register_world_pack",
+            world_json=str(world_json),
+            uuid=uuid,
+            version=version,
+            registration_action=registration_action,
+        )
 
     stats["installed"] += 1
     _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
@@ -388,7 +489,7 @@ def check_dependencies(world_dir: Path, paths: ProjectPaths, state: AppState) ->
 
 
 def do_install(world_dir: Path, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
-    section("Install Packs")
+    section("Install Packs", state=state, action="install")
 
     for directory in [paths.install_dir, paths.behavior_packs_dir, paths.resource_packs_dir]:
         directory.mkdir(parents=True, exist_ok=True)
@@ -409,6 +510,7 @@ def do_install(world_dir: Path, paths: ProjectPaths, state: AppState, duplicate_
         print("\n  No files found in the install folder.")
         print("  Drop .mcaddon, .mcpack, .zip files or folders into:")
         print(f"    {C.CYAN}{display_path(paths.install_dir)}{C.RESET}")
+        state.record("install_summary", "No files found in install folder", installed=0, skipped=0, warnings=0, errors=0)
         return
 
     print(f"\n  Found {len(entries)} item(s) in install folder")
@@ -439,4 +541,15 @@ def do_install(world_dir: Path, paths: ProjectPaths, state: AppState, duplicate_
         f"and {C.CYAN}{rp_count}{C.RESET} resource pack(s)"
     )
 
+    state.record(
+        "install_summary",
+        "Install complete",
+        installed=stats["installed"],
+        skipped=stats["skipped"],
+        warnings=len(state.warnings),
+        errors=stats["errors"],
+        behavior_packs=bp_count,
+        resource_packs=rp_count,
+        duplicate_mode=duplicate_mode,
+    )
     print_warnings(state.warnings)

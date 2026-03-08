@@ -57,6 +57,47 @@ def test_main_selects_world_for_doctor(tmp_path, monkeypatch):
     assert calls == [({"--doctor"}, selected_world, "replace")]
 
 
+def test_main_uses_world_name_without_prompt(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+
+    def fail_select_world(_worlds_dir):
+        raise AssertionError("select_world should not be called when --world-name is provided")
+
+    monkeypatch.setattr(cli, "select_world", fail_select_world)
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--doctor", "--world-name", "ExampleWorld"])
+
+    cli.main()
+
+    assert calls == [({"--doctor"}, selected_world, "replace")]
+
+
+def test_main_prints_error_for_conflicting_world_flags(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
+    )
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--doctor", "--world-name", "A", "--world-path", "B"])
+
+    cli.main()
+
+    assert "either --world-name or --world-path" in capsys.readouterr().out
+
+
 def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
