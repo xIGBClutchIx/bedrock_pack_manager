@@ -2,8 +2,8 @@ import json
 import re
 from pathlib import Path
 
-from .constants import BP_TYPES, RP_TYPES
 from .console import error
+from .constants import BP_TYPES, RP_TYPES
 
 
 def strip_mc_formatting(text: str) -> str:

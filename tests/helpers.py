@@ -1,7 +1,6 @@
 import json
 import zipfile
 
-
 PACK_UUID = "11111111-1111-1111-1111-111111111111"
 PACK_VERSION = [1, 0, 0]
 

@@ -5,7 +5,6 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 

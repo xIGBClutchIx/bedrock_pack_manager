@@ -3,7 +3,6 @@ import shutil
 import zipfile
 from pathlib import Path
 
-
 FIXTURES_DIR = Path(__file__).resolve().parent
 INSTALLED_DIR = FIXTURES_DIR / "installed"
 WORLD_DIR = FIXTURES_DIR / "worlds" / "World"

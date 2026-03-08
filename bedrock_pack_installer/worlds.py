@@ -42,7 +42,11 @@ def select_world(worlds_dir: Path) -> Path:
     )
 
     if not worlds:
-        print(f"\n  {C.RED}No worlds found in {worlds_dir}.{C.RESET}")
+        try:
+            display_path = worlds_dir.relative_to(Path.cwd())
+        except ValueError:
+            display_path = worlds_dir
+        print(f"\n  {C.RED}No worlds found in {display_path}.{C.RESET}")
         sys.exit(1)
 
     if len(worlds) == 1:

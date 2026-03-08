@@ -1,5 +1,4 @@
 import pytest
-
 from bedrock_pack_installer.worlds import (
     is_already_registered,
     load_world_json,
@@ -84,3 +83,13 @@ def test_select_world_retries_until_valid_choice(tmp_path, monkeypatch):
 def test_select_world_exits_when_no_worlds_exist(tmp_path):
     with pytest.raises(SystemExit):
         select_world(tmp_path)
+
+
+def test_select_world_shows_relative_path_when_no_worlds_exist(tmp_path, monkeypatch, capsys):
+    worlds_dir = tmp_path / "run" / "worlds"
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        select_world(worlds_dir)
+
+    assert "run/worlds" in capsys.readouterr().out

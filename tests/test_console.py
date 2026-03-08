@@ -1,4 +1,14 @@
-from bedrock_pack_installer.console import AppState, error, info, ok, print_warnings, section, subsection, warn
+from bedrock_pack_installer.console import (
+    AppState,
+    app_header,
+    error,
+    info,
+    ok,
+    print_warnings,
+    section,
+    subsection,
+    warn,
+)
 
 
 def test_console_helpers_print_expected_output(capsys):
@@ -8,6 +18,7 @@ def test_console_helpers_print_expected_output(capsys):
     error("error msg")
     ok("ok msg")
     info("info msg")
+    app_header()
     section("Section")
     subsection("Subsection")
     print_warnings(state.warnings)
@@ -17,6 +28,7 @@ def test_console_helpers_print_expected_output(capsys):
     assert "error msg" in output
     assert "ok msg" in output
     assert "info msg" in output
+    assert "Bedrock Pack Installer" in output
     assert "Section" in output
     assert "Subsection" in output
     assert "Warnings (1)" in output

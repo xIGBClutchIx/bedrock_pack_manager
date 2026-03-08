@@ -79,6 +79,27 @@ Expected outputs:
 
 If stdout capture behaves oddly in the current environment, `pytest -s` is acceptable for diagnosis, but normal work should keep `pytest` green.
 
+## Linting
+
+Primary command:
+
+```bash
+make lint
+```
+
+Auto-fix command:
+
+```bash
+make lint-fix
+```
+
+Rules:
+
+- use Ruff as the project linter
+- keep lint configuration in `pyproject.toml`
+- keep the current Ruff line length at `180` unless there is a project-level reason to change it
+- if lint dependencies change, keep `requirements.txt` in sync
+
 ## Test Data
 
 Use fixtures.
@@ -126,9 +147,12 @@ Project config lives in `pyproject.toml`.
 Keep:
 
 - runtime dependencies in `[project.dependencies]`
+- lint dependencies in `[project.optional-dependencies].lint`
 - test dependencies in `[project.optional-dependencies].test`
 
 `requirements.txt` still exists for convenience, so if dependencies change, keep it in sync with the current practical workflow.
+
+Development workflow should assume a local `.venv` when documenting setup, testing, linting, or build steps.
 
 ## Code Style
 
@@ -178,7 +202,8 @@ Rules:
 For normal code changes:
 
 1. Run `pytest`
-2. Check coverage if the change affects untested branches
-3. Update fixtures/tests/docs if behavior changed
+2. Run `make lint`
+3. Check coverage if the change affects untested branches
+4. Update fixtures/tests/docs if behavior changed
 
 If you cannot run tests, state that explicitly and explain why.

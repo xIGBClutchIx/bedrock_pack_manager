@@ -14,8 +14,13 @@ from bedrock_pack_installer.install import (
 )
 from bedrock_pack_installer.paths import build_paths
 from tests.conftest import FIXTURES
-from tests.helpers import PACK_UUID, PACK_VERSION, make_zip_from_dir, write_manifest, write_world_json
-
+from tests.helpers import (
+    PACK_UUID,
+    PACK_VERSION,
+    make_zip_from_dir,
+    write_manifest,
+    write_world_json,
+)
 
 FIXTURE_PACK_ARCHIVE = "pack.mcpack"
 FIXTURE_ADDON_ARCHIVE = "addon.mcaddon"

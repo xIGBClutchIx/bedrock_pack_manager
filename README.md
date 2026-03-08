@@ -6,7 +6,30 @@ All runtime data lives under `run/` so the project root stays clean.
 ## Setup
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
+```
+
+Use the local `.venv` for normal development, testing, linting, and builds instead of installing tools into the system Python environment.
+
+## Project Commands
+
+Activate the virtual environment first:
+
+```bash
+. .venv/bin/activate
+```
+
+```bash
+make run
+make test
+make test-verbose
+make lint
+make lint-fix
+make build-linux
+make build-windows
+make clean
 ```
 
 ## Testing
@@ -16,6 +39,52 @@ pytest
 ```
 
 Coverage is enabled by default through pytest configuration. Running `pytest` will print a terminal coverage report and write `coverage.xml`.
+
+## Linting
+
+```bash
+make lint
+make lint-fix
+```
+
+`make lint` runs Ruff across the project using the configuration in `pyproject.toml`.
+`make lint-fix` applies Ruff's automatic fixes where possible.
+The current Ruff line length is `180`.
+
+## Build Linux Executable
+
+Activate the virtual environment, install the build dependency if needed, and run:
+
+```bash
+. .venv/bin/activate
+python -m pip install pyinstaller
+bash scripts/build_linux.sh
+```
+
+This produces a single-file Linux executable at `dist/bedrock-pack-installer`.
+
+When running the packaged binary, runtime data is still created under a `run/` folder beside the executable.
+
+## Build Windows Executable
+
+Build the Windows executable on Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
+python -m pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+```
+
+Or from `cmd.exe`:
+
+```bat
+call .venv\Scripts\activate.bat
+scripts\build_windows.bat
+```
+
+This produces `dist\bedrock-pack-installer.exe`.
+
+PyInstaller does not reliably cross-build Windows executables from Linux, so use the Windows script on a Windows machine.
 
 ## Usage
 
@@ -27,6 +96,16 @@ python bedrock_pack_installer.py --zip
 python bedrock_pack_installer.py --beta
 python bedrock_pack_installer.py --rebuild --beta
 ```
+
+When launched without flags in an interactive terminal, the app now shows a keyboard-driven selection menu:
+
+- use `Up` and `Down` to move
+- press `Space` to toggle an option
+- press `Enter` to continue
+- press `Q` or `Ctrl+C` to quit
+- leave everything unchecked to continue with normal install mode
+
+When the app finishes in an interactive terminal, it waits for `Enter` before closing.
 
 ## What It Does
 
@@ -64,3 +143,6 @@ python bedrock_pack_installer.py --rebuild --beta
 
 - Python 3.10+
 - `nbtlib>=2.0.4`
+- `pytest>=8.0.0` and `pytest-cov>=5.0.0` for testing
+- `ruff>=0.9.0` for linting
+- `pyinstaller>=6.0.0` for standalone builds

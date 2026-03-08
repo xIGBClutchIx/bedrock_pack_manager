@@ -38,6 +38,11 @@ def section(title: str) -> None:
     print(f"\n{C.BOLD}{title}{C.RESET}")
 
 
+def app_header() -> None:
+    print(f"\n{C.CYAN}{C.BOLD}Bedrock Pack Installer{C.RESET}")
+    print(f"  {C.DIM}Minecraft world pack setup, repair, zip, and beta tools{C.RESET}")
+
+
 def subsection(title: str) -> None:
     print(f"\n  {C.BOLD}{title}{C.RESET}")
 
