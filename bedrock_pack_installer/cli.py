@@ -5,7 +5,7 @@ import tty
 from pathlib import Path
 
 from .commands import run
-from .console import AppState, C, app_header
+from .console import AppState, C, TerminalListMenu, app_header, app_header_lines
 from .logger import capture_run_logs
 from .paths import build_paths
 from .worlds import select_world
@@ -15,9 +15,6 @@ MENU_OPTIONS = [
     ("--beta", "Enable Beta APIs"),
     ("--zip", "Zip Pack Folders"),
 ]
-
-CLEAR_SCREEN = "\033[2J\033[H"
-
 
 class MenuExit(Exception):
     pass
@@ -112,30 +109,38 @@ def _read_key() -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def _render_menu(selected: set[str], cursor: int) -> None:
+def _menu_lines(selected: set[str], cursor: int) -> list[str]:
     selected_count = len(selected)
     selection_label = "Install Packs" if selected_count == 0 else f"{selected_count} option(s) selected"
 
-    app_header()
-    print(f"\n  {C.CYAN}{C.BOLD}Launch Options{C.RESET}")
-    print(f"  {C.DIM}↑/↓ move  Space toggle  Enter continue  Q quit{C.RESET}")
-    print(f"  {C.DIM}{selection_label}{C.RESET}\n")
+    lines = [
+        f"  {C.DIM}{selection_label}{C.RESET}",
+        "",
+    ]
     for index, (flag, label) in enumerate(MENU_OPTIONS):
         is_selected = flag in selected
         mark = f"{C.GREEN}◉{C.RESET}" if is_selected else f"{C.DIM}◌{C.RESET}"
         pointer = f"{C.CYAN}▸{C.RESET}" if index == cursor else " "
         label_text = f"{C.BOLD}{label}{C.RESET}" if index == cursor else label
-        print(f"  {pointer} {mark} {label_text}")
+        lines.append(f"  {pointer} {mark} {label_text}")
+    return lines
 
 
 def prompt_flags() -> set[str]:
     selected: set[str] = set()
     cursor = 0
+    menu = TerminalListMenu(
+        [
+            *app_header_lines(),
+            "",
+            f"  {C.CYAN}{C.BOLD}Launch Options{C.RESET}",
+            f"  {C.DIM}↑/↓ move  Space toggle  Enter continue  Q quit{C.RESET}",
+        ],
+        lambda: _menu_lines(selected, cursor),
+    )
+    menu.render_initial()
 
     while True:
-        print(CLEAR_SCREEN, end="")
-        _render_menu(selected, cursor)
-
         key = _read_key()
         if key in {"\r", "\n"}:
             return selected
@@ -143,12 +148,15 @@ def prompt_flags() -> set[str]:
             raise MenuExit()
         if key == " ":
             selected = _toggle_flag(selected, MENU_OPTIONS[cursor][0])
+            menu.redraw()
             continue
         if key == "\x1b[A":
             cursor = _move_cursor(cursor, len(MENU_OPTIONS), "up")
+            menu.redraw()
             continue
         if key == "\x1b[B":
             cursor = _move_cursor(cursor, len(MENU_OPTIONS), "down")
+            menu.redraw()
             continue
 
 

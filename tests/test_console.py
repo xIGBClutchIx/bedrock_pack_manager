@@ -1,6 +1,8 @@
 from bedrock_pack_installer.console import (
     AppState,
+    TerminalListMenu,
     app_header,
+    app_header_lines,
     error,
     info,
     ok,
@@ -37,3 +39,25 @@ def test_console_helpers_print_expected_output(capsys):
 def test_print_warnings_is_noop_for_empty_list(capsys):
     print_warnings([])
     assert capsys.readouterr().out == ""
+
+
+def test_app_header_lines_match_rendered_header(capsys):
+    app_header()
+
+    rendered = capsys.readouterr().out.splitlines()
+    assert rendered == app_header_lines()
+
+
+def test_terminal_list_menu_redraws_without_clearing_screen(capsys):
+    items = ["first"]
+    menu = TerminalListMenu(["header"], lambda: items)
+
+    menu.render_initial()
+    items[0] = "second"
+    menu.redraw()
+
+    output = capsys.readouterr().out
+    assert output.count("\033[2J\033[H") == 1
+    assert "\033[1F" in output
+    assert "first" in output
+    assert "second" in output

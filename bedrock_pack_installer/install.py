@@ -3,7 +3,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from .console import AppState, C, info, ok, print_warnings, section, warn
+from .console import AppState, C, display_path, info, ok, print_warnings, section, warn
 from .constants import ARCHIVE_EXTS
 from .manifests import classify_pack, get_pack_dependencies, get_pack_info, read_manifest
 from .paths import ProjectPaths
@@ -319,7 +319,7 @@ def do_install(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
     if not entries:
         print("\n  No files found in the install folder.")
         print("  Drop .mcaddon, .mcpack, .zip files or folders into:")
-        print(f"    {C.CYAN}{paths.install_dir}{C.RESET}")
+        print(f"    {C.CYAN}{display_path(paths.install_dir)}{C.RESET}")
         return
 
     print(f"\n  Found {len(entries)} item(s) in install folder")
