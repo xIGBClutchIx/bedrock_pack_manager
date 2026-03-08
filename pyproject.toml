@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bedrock-pack-installer"
+version = "0.1.0"
+description = "Minecraft Bedrock pack installer for worlds, behavior packs, and resource packs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "nbtlib>=2.0.4",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+  "pytest-cov>=5.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--cov=bedrock_pack_installer --cov-report=term-missing --cov-report=xml"
+
+[tool.coverage.run]
+branch = true
+source = ["bedrock_pack_installer"]
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = true
+
+[tool.setuptools]
+packages = ["bedrock_pack_installer"]
