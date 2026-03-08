@@ -17,12 +17,28 @@ from .worlds import (
 DuplicateMode = Literal["skip", "replace", "keep-both"]
 
 
+class UnsafeArchivePathError(Exception):
+    pass
+
+
+def _safe_extract_archive(zf: zipfile.ZipFile, dest: Path) -> None:
+    dest_root = dest.resolve()
+    for member in zf.infolist():
+        member_path = Path(member.filename)
+        if member_path.is_absolute():
+            raise UnsafeArchivePathError(f"Archive member '{member.filename}' uses an absolute path")
+        target_path = (dest_root / member.filename).resolve()
+        if os.path.commonpath([str(dest_root), str(target_path)]) != str(dest_root):
+            raise UnsafeArchivePathError(f"Archive member '{member.filename}' would extract outside the target folder")
+    zf.extractall(dest)
+
+
 def extract_archive(archive_path: Path, dest: Path) -> Path:
     extract_to = dest / f"_extracted_{archive_path.stem}"
     if extract_to.exists():
         shutil.rmtree(extract_to)
     with zipfile.ZipFile(archive_path, "r") as zf:
-        zf.extractall(extract_to)
+        _safe_extract_archive(zf, extract_to)
     return extract_to
 
 
@@ -35,10 +51,12 @@ def extract_nested_archives(folder: Path, state: AppState) -> bool:
             try:
                 nested_dest = file_path.parent / f"_nested_{file_path.stem}"
                 with zipfile.ZipFile(file_path, "r") as zf:
-                    zf.extractall(nested_dest)
+                    _safe_extract_archive(zf, nested_dest)
                 file_path.unlink()
             except zipfile.BadZipFile:
                 warn(state, f"Nested file {file_path.name} is not a valid archive, skipping it")
+            except UnsafeArchivePathError as exc:
+                warn(state, f"Nested file {file_path.name} is unsafe to extract, skipping it ({exc})")
     return found_nested
 
 
@@ -270,6 +288,10 @@ def process_entry(
             extracted = extract_archive(entry, paths.install_dir)
         except zipfile.BadZipFile:
             warn(state, f"'{entry.name}' is not a valid zip archive - file may be corrupt")
+            stats["errors"] += 1
+            return
+        except UnsafeArchivePathError as exc:
+            warn(state, f"'{entry.name}' contains unsafe archive paths - skipping it ({exc})")
             stats["errors"] += 1
             return
         except Exception as exc:

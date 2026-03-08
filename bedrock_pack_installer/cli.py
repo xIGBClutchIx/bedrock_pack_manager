@@ -1,13 +1,12 @@
 import argparse
 import sys
-import termios
-import tty
 from pathlib import Path
 
 from .commands import run
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines
 from .logger import capture_run_logs, log_only
 from .paths import build_paths
+from .terminal import read_keypress
 from .worlds import select_world
 
 MODE_OPTIONS = [
@@ -135,21 +134,6 @@ def _toggle_flag(selected: set[str], flag: str) -> set[str]:
     return updated
 
 
-def _read_key() -> str:
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        first = sys.stdin.read(1)
-        if first == "\x1b":
-            second = sys.stdin.read(1)
-            third = sys.stdin.read(1)
-            return first + second + third
-        return first
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-
 def _mode_menu_lines(cursor: int) -> list[str]:
     lines = [
         f"  {C.DIM}Choose what to do{C.RESET}",
@@ -192,7 +176,7 @@ def prompt_mode() -> str:
     menu.render_initial()
 
     while True:
-        key = _read_key()
+        key = read_keypress()
         if key in {"\r", "\n"}:
             return MODE_OPTIONS[cursor][0]
         if key in {"q", "Q", "\x03"}:
@@ -222,7 +206,7 @@ def prompt_install_flags() -> set[str]:
     menu.render_initial()
 
     while True:
-        key = _read_key()
+        key = read_keypress()
         if key in {"\r", "\n"}:
             return selected
         if key in {"q", "Q", "\x03"}:

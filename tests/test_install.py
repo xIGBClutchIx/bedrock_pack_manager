@@ -4,6 +4,8 @@ import zipfile
 
 from bedrock_pack_installer.console import AppState
 from bedrock_pack_installer.install import (
+    UnsafeArchivePathError,
+    _safe_extract_archive,
     check_dependencies,
     do_install,
     extract_nested_archives,
@@ -270,6 +272,39 @@ def test_process_entry_reports_invalid_archive(tmp_path):
     assert len(state.warnings) == 1
 
 
+def test_safe_extract_archive_rejects_path_traversal(tmp_path):
+    zip_path = tmp_path / "bad.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("../escape.txt", "nope")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        try:
+            _safe_extract_archive(zf, tmp_path / "extract")
+            assert False, "expected UnsafeArchivePathError"
+        except UnsafeArchivePathError:
+            pass
+
+
+def test_process_entry_rejects_zip_slip_archive(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+    paths.install_dir.mkdir(parents=True)
+
+    bad_zip = paths.install_dir / "bad.zip"
+    with zipfile.ZipFile(bad_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("../escape.txt", "nope")
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_entry(bad_zip, stats, world_dir, paths, state)
+
+    assert stats == {"installed": 0, "skipped": 0, "errors": 1}
+    assert any("unsafe archive paths" in warning for warning in state.warnings)
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_extract_nested_archives_warns_for_invalid_nested_archive(tmp_path):
     folder = tmp_path / "folder"
     folder.mkdir()
@@ -281,6 +316,21 @@ def test_extract_nested_archives_warns_for_invalid_nested_archive(tmp_path):
 
     assert found is True
     assert len(state.warnings) == 1
+
+
+def test_extract_nested_archives_warns_for_path_traversal(tmp_path):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    nested = folder / "bad.mcpack"
+    with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("../escape.txt", "nope")
+    state = AppState()
+
+    found = extract_nested_archives(folder, state)
+
+    assert found is True
+    assert any("unsafe to extract" in warning for warning in state.warnings)
+    assert not (tmp_path / "escape.txt").exists()
 
 
 def test_move_to_installed_renames_when_target_exists(tmp_path):

@@ -88,21 +88,21 @@ def test_toggle_flag_adds_and_removes_selection():
 
 
 def test_prompt_mode_returns_install_when_enter_is_pressed(monkeypatch):
-    monkeypatch.setattr(cli, "_read_key", lambda: "\n")
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
 
     assert cli.prompt_mode() == "install"
 
 
 def test_prompt_mode_uses_arrows_and_enter_to_select_doctor(monkeypatch):
     keys = iter(["\x1b[B", "\n"])
-    monkeypatch.setattr(cli, "_read_key", lambda: next(keys))
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
 
     assert cli.prompt_mode() == "--doctor"
 
 
 def test_prompt_install_flags_uses_arrows_and_space_to_select(monkeypatch):
     keys = iter([" ", "\x1b[B", " ", "\n"])
-    monkeypatch.setattr(cli, "_read_key", lambda: next(keys))
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
 
     assert cli.prompt_install_flags() == {"--rebuild", "--beta"}
 
@@ -123,7 +123,7 @@ def test_install_menu_lines_show_selection_count():
 
 
 def test_prompt_mode_quits_on_q(monkeypatch):
-    monkeypatch.setattr(cli, "_read_key", lambda: "q")
+    monkeypatch.setattr(cli, "read_keypress", lambda: "q")
 
     try:
         cli.prompt_mode()
@@ -133,7 +133,7 @@ def test_prompt_mode_quits_on_q(monkeypatch):
 
 
 def test_prompt_install_flags_quits_on_ctrl_c(monkeypatch):
-    monkeypatch.setattr(cli, "_read_key", lambda: "\x03")
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\x03")
 
     try:
         cli.prompt_install_flags()

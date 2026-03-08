@@ -1,10 +1,9 @@
 import json
 import sys
-import termios
-import tty
 from pathlib import Path
 
 from .console import C, TerminalListMenu, app_header_lines, display_path
+from .terminal import read_keypress
 
 
 def load_world_json(path: Path) -> list:
@@ -53,21 +52,6 @@ def is_interactive_terminal() -> bool:
     return bool(getattr(sys.stdin, "isatty", lambda: False)()) and bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
-def _read_key() -> str:
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        first = sys.stdin.read(1)
-        if first == "\x1b":
-            second = sys.stdin.read(1)
-            third = sys.stdin.read(1)
-            return first + second + third
-        return first
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-
 def _move_cursor(index: int, size: int, direction: str) -> int:
     if direction == "up":
         return (index - 1) % size
@@ -114,7 +98,7 @@ def _select_world_interactive(worlds: list[Path]) -> Path:
     )
     menu.render_initial()
     while True:
-        key = _read_key()
+        key = read_keypress()
         if key in {"\r", "\n"}:
             print(f"  Selected: {C.CYAN}{worlds[cursor].name}{C.RESET}")
             return worlds[cursor]

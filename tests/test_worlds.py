@@ -92,7 +92,7 @@ def test_select_world_interactive_uses_arrows_and_enter(tmp_path, monkeypatch, c
 
     monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: True)
     keys = iter(["\x1b[B", "\n"])
-    monkeypatch.setattr("bedrock_pack_installer.worlds._read_key", lambda: next(keys))
+    monkeypatch.setattr("bedrock_pack_installer.worlds.read_keypress", lambda: next(keys))
 
     assert select_world(tmp_path) == world_b
     output = capsys.readouterr().out
@@ -107,7 +107,7 @@ def test_select_world_interactive_quits_on_q(tmp_path, monkeypatch):
     world_b.mkdir()
 
     monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: True)
-    monkeypatch.setattr("bedrock_pack_installer.worlds._read_key", lambda: "q")
+    monkeypatch.setattr("bedrock_pack_installer.worlds.read_keypress", lambda: "q")
 
     with pytest.raises(KeyboardInterrupt):
         select_world(tmp_path)
