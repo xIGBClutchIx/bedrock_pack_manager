@@ -1,26 +1,111 @@
 import os
+import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .console import AppState, C, error, info, print_warnings, section, warn
-from .install import DuplicateMode, do_install
+from .console import AppState, C, display_path, error, info, ok, print_warnings, section, warn
+from .install import DuplicateMode, do_install, find_packs_on_disk
 from .manifests import get_pack_dependencies, get_pack_info, read_manifest
 from .nbt import GAMEMODE_VALUES, enable_beta_apis, set_world_gamemode
 from .paths import ProjectPaths
-from .worlds import load_world_json, save_world_json
+from .worlds import load_world_json, remove_pack, save_world_json
 
 GAMEMODE_LABELS = {
     "survival": "Survival",
     "creative": "Creative",
     "adventure": "Adventure",
 }
+PACK_TYPE_LABELS = {
+    "bp": "Behavior Pack",
+    "rp": "Resource Pack",
+}
+
+
+def _format_version(version: list) -> str:
+    return ".".join(str(value) for value in version)
 
 
 def _load_registered_ids(world_json: Path) -> set[str]:
     if not world_json.exists():
         return set()
     return {entry.get("pack_id", "") for entry in load_world_json(world_json)}
+
+
+def _uninstall_flag(pack_type: str, uuid: str, version: list) -> str:
+    return f"--uninstall-pack={pack_type}:{uuid}:{_format_version(version)}"
+
+
+def _parse_uninstall_flag(flag: str) -> tuple[str, str, str] | None:
+    if not flag.startswith("--uninstall-pack="):
+        return None
+    payload = flag.split("=", 1)[1]
+    parts = payload.split(":", 2)
+    if len(parts) != 3:
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+def _matching_installed_packs(dest_dir: Path, uuid: str, version: list) -> list[dict]:
+    return [pack for pack in find_packs_on_disk(dest_dir, uuid) if pack["version"] == version]
+
+
+def collect_uninstall_candidates(world_dir: Path, paths: ProjectPaths) -> list[dict]:
+    candidates = []
+    for pack_type, world_json_name, dest_dir in [
+        ("bp", "world_behavior_packs.json", paths.behavior_packs_dir),
+        ("rp", "world_resource_packs.json", paths.resource_packs_dir),
+    ]:
+        world_json = world_dir / world_json_name
+        for entry in load_world_json(world_json):
+            uuid = entry.get("pack_id", "")
+            version = entry.get("version", [])
+            if not uuid or not isinstance(version, list):
+                continue
+
+            installed_packs = find_packs_on_disk(dest_dir, uuid)
+            exact_matches = [pack for pack in installed_packs if pack["version"] == version]
+            name = exact_matches[0]["name"] if exact_matches else (installed_packs[0]["name"] if installed_packs else uuid)
+
+            if exact_matches:
+                details = display_path(exact_matches[0]["path"])
+            elif installed_packs:
+                details = f"registered v{_format_version(version)}, other version(s) on disk"
+            else:
+                details = "missing on disk"
+
+            candidates.append(
+                {
+                    "flag": _uninstall_flag(pack_type, uuid, version),
+                    "type": pack_type,
+                    "type_label": PACK_TYPE_LABELS[pack_type],
+                    "uuid": uuid,
+                    "version": version,
+                    "version_label": _format_version(version),
+                    "name": name,
+                    "label": f"[{pack_type.upper()}] {name} (v{_format_version(version)})",
+                    "details": details,
+                    "world_json": world_dir / world_json_name,
+                    "installed_paths": [pack["path"] for pack in exact_matches],
+                }
+            )
+
+    return sorted(candidates, key=lambda candidate: (candidate["type"], candidate["name"].lower(), candidate["version_label"]))
+
+
+def _other_world_references(paths: ProjectPaths, world_dir: Path, pack_type: str, uuid: str, version: list) -> list[str]:
+    world_json_name = "world_behavior_packs.json" if pack_type == "bp" else "world_resource_packs.json"
+    references = []
+
+    for other_world in sorted(paths.worlds_dir.iterdir(), key=lambda path: path.name.lower()):
+        if not other_world.is_dir() or other_world.name.startswith(".") or other_world.resolve() == world_dir.resolve():
+            continue
+        for entry in load_world_json(other_world / world_json_name):
+            if entry.get("pack_id") == uuid and entry.get("version") == version:
+                references.append(other_world.name)
+                break
+
+    return references
 
 
 def _scan_installed_packs(pack_dir: Path, label: str, state: AppState) -> list[dict]:
@@ -220,9 +305,19 @@ def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
     print_warnings(state.warnings)
 
 
-def do_zip(paths: ProjectPaths, state: AppState) -> None:
+def _resolve_zip_name(zip_name: str | None = None) -> str:
+    if zip_name:
+        normalized_name = Path(zip_name).name.strip()
+        if not normalized_name.lower().endswith(".zip"):
+            normalized_name += ".zip"
+        return normalized_name
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    zip_name = f"Bedrock_Packs_{timestamp}.zip"
+    return f"Bedrock_Packs_{timestamp}.zip"
+
+
+def do_zip(paths: ProjectPaths, state: AppState, zip_name: str | None = None) -> None:
+    zip_name = _resolve_zip_name(zip_name)
     zip_path = paths.base_dir / zip_name
 
     section("Zip Pack Folders", state=state, action="zip")
@@ -252,6 +347,113 @@ def do_zip(paths: ProjectPaths, state: AppState) -> None:
         file_count=file_count,
         size_mb=round(size_mb, 1),
     )
+
+
+def do_uninstall(world_dir: Path, paths: ProjectPaths, selected_flags: set[str], state: AppState) -> None:
+    candidates = {candidate["flag"]: candidate for candidate in collect_uninstall_candidates(world_dir, paths)}
+    unknown_flags = sorted(flag for flag in selected_flags if flag not in candidates)
+    if unknown_flags:
+        raise ValueError(f"Unknown uninstall selection(s): {', '.join(unknown_flags)}")
+
+    section("Uninstall Packs", state=state, action="uninstall")
+
+    removed_from_world = 0
+    deleted_folders = 0
+
+    for flag in sorted(selected_flags):
+        candidate = candidates[flag]
+        print(f"\n    {C.BOLD}[{candidate['type_label']}]{C.RESET} {candidate['name']} (v{candidate['version_label']})")
+        print(f"    UUID: {C.DIM}{candidate['uuid']}{C.RESET}")
+
+        if remove_pack(candidate["world_json"], candidate["uuid"]):
+            removed_from_world += 1
+            ok(
+                f"Removed from {candidate['world_json'].name}",
+                state=state,
+                action="uninstall_world_pack",
+                world_json=str(candidate["world_json"]),
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+            )
+        else:
+            info(
+                f"Already missing from {candidate['world_json'].name}",
+                state=state,
+                action="uninstall_world_pack",
+                world_json=str(candidate["world_json"]),
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+            )
+
+        other_worlds = _other_world_references(paths, world_dir, candidate["type"], candidate["uuid"], candidate["version"])
+        if other_worlds:
+            info(
+                f"Kept installed files because still used by: {', '.join(other_worlds)}",
+                state=state,
+                action="keep_shared_pack_files",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                world_dir=str(world_dir),
+                referenced_by=other_worlds,
+            )
+            state.record(
+                "uninstall_pack",
+                "Removed pack from world but kept shared files",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+                removed_paths=[],
+                referenced_by=other_worlds,
+            )
+            continue
+
+        if not candidate["installed_paths"]:
+            info(
+                "No matching installed pack files found on disk",
+                state=state,
+                action="uninstall_missing_pack_files",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+            )
+            state.record(
+                "uninstall_pack",
+                "Removed stale pack registration",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+                removed_paths=[],
+                referenced_by=[],
+            )
+            continue
+
+        removed_paths = []
+        for installed_path in candidate["installed_paths"]:
+            shutil.rmtree(installed_path)
+            removed_paths.append(str(installed_path))
+            deleted_folders += 1
+            ok(
+                f"Deleted {display_path(installed_path)}",
+                state=state,
+                action="delete_installed_pack",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+                deleted_path=str(installed_path),
+            )
+
+        state.record(
+            "uninstall_pack",
+            "Removed pack from world and disk",
+            uuid=candidate["uuid"],
+            version=candidate["version"],
+            pack_type=candidate["type"],
+            removed_paths=removed_paths,
+            referenced_by=[],
+        )
+
+    print(f"\n  {C.GREEN}Done!{C.RESET} Removed {C.CYAN}{removed_from_world}{C.RESET} pack(s) from '{C.CYAN}{world_dir.name}{C.RESET}'")
+    print(f"  Deleted {C.CYAN}{deleted_folders}{C.RESET} installed folder(s)")
 
 
 def do_beta(world_dir: Path, state: AppState | None = None) -> None:
@@ -323,6 +525,17 @@ def _selected_gamemode(flags: set[str]) -> str | None:
     return None
 
 
+def _selected_uninstall_flags(flags: set[str]) -> set[str]:
+    return {flag for flag in flags if flag.startswith("--uninstall-pack=")}
+
+
+def _selected_zip_name(flags: set[str]) -> str | None:
+    for flag in flags:
+        if flag.startswith("--zip-name="):
+            return flag.split("=", 1)[1]
+    return None
+
+
 def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
     if not flags:
         do_install(world_dir, paths, state, duplicate_mode=duplicate_mode)
@@ -330,6 +543,9 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
 
     if "--doctor" in flags:
         do_doctor(world_dir, paths, state)
+
+    if "--uninstall" in flags:
+        do_uninstall(world_dir, paths, _selected_uninstall_flags(flags), state)
 
     if "--rebuild" in flags:
         do_rebuild(world_dir, paths, state)
@@ -342,4 +558,4 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
         do_set_gamemode(world_dir, gamemode, state)
 
     if "--zip" in flags:
-        do_zip(paths, state)
+        do_zip(paths, state, zip_name=_selected_zip_name(flags))

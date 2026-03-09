@@ -5,6 +5,7 @@ from bedrock_pack_installer.worlds import (
     is_already_registered,
     load_world_json,
     register_pack,
+    remove_pack,
     resolve_world_path,
     save_world_json,
     select_world,
@@ -26,6 +27,21 @@ def test_register_pack_adds_entry_once(tmp_path):
     assert register_pack(world_json, "abc", [1, 0, 0]) is True
     assert register_pack(world_json, "abc", [1, 0, 0]) is False
     assert load_world_json(world_json) == [{"pack_id": "abc", "version": [1, 0, 0]}]
+
+
+def test_remove_pack_removes_matching_entry(tmp_path):
+    world_json = tmp_path / "world_behavior_packs.json"
+    save_world_json(world_json, [{"pack_id": "abc", "version": [1, 0, 0]}, {"pack_id": "xyz", "version": [2, 0, 0]}])
+
+    assert remove_pack(world_json, "abc") is True
+    assert load_world_json(world_json) == [{"pack_id": "xyz", "version": [2, 0, 0]}]
+
+
+def test_remove_pack_returns_false_when_uuid_missing(tmp_path):
+    world_json = tmp_path / "world_behavior_packs.json"
+    save_world_json(world_json, [{"pack_id": "xyz", "version": [2, 0, 0]}])
+
+    assert remove_pack(world_json, "abc") is False
 
 
 def test_is_already_registered_matches_pack_id():

@@ -10,22 +10,42 @@ def test_parse_args_defaults_to_no_flags():
 
     assert args.rebuild is False
     assert args.zip is False
+    assert args.zip_name is None
     assert args.beta is False
     assert args.gamemode is None
     assert args.doctor is False
+    assert args.uninstall is False
     assert args.duplicate_mode == "replace"
     assert args.world_name is None
     assert args.world_path is None
 
 
 def test_parse_args_accepts_combined_flags():
-    args = parse_args(["--rebuild", "--beta", "--gamemode", "creative", "--zip", "--doctor", "--duplicate-mode", "keep-both", "--world-name", "ExampleWorld"])
+    args = parse_args(
+        [
+            "--rebuild",
+            "--beta",
+            "--gamemode",
+            "creative",
+            "--zip",
+            "--zip-name",
+            "world.zip",
+            "--doctor",
+            "--uninstall",
+            "--duplicate-mode",
+            "keep-both",
+            "--world-name",
+            "ExampleWorld",
+        ]
+    )
 
     assert args.rebuild is True
     assert args.beta is True
     assert args.gamemode == "creative"
     assert args.zip is True
+    assert args.zip_name == "world.zip"
     assert args.doctor is True
+    assert args.uninstall is True
     assert args.duplicate_mode == "keep-both"
     assert args.world_name == "ExampleWorld"
 
@@ -52,24 +72,29 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
 
 
 def test_flags_from_args_converts_namespace_to_flag_set():
-    args = parse_args(["--rebuild", "--zip", "--gamemode", "adventure"])
+    args = parse_args(["--rebuild", "--zip-name", "world.zip", "--uninstall", "--gamemode", "adventure"])
 
-    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--gamemode=adventure"}
+    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--zip-name=world.zip", "--uninstall", "--gamemode=adventure"}
 
 
 def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
-    args = parse_args(["--beta", "--gamemode", "creative", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"])
+    args = parse_args(["--beta", "--gamemode", "creative", "--zip-name", "world.zip", "--uninstall", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"])
     logs_dir = tmp_path / "logs"
 
     with capture_run_logs(logs_dir):
-        cli.log_launch_context(["--beta", "--gamemode", "creative", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"], args)
+        cli.log_launch_context(
+            ["--beta", "--gamemode", "creative", "--zip-name", "world.zip", "--uninstall", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"],
+            args,
+        )
 
     assert capsys.readouterr().out == ""
     log_text = (logs_dir / "latest.txt").read_text(encoding="utf-8")
-    assert "Launch args: --beta --gamemode creative --duplicate-mode keep-both --world-path ExampleWorld" in log_text
+    assert "Launch args: --beta --gamemode creative --zip-name world.zip --uninstall --duplicate-mode keep-both --world-path ExampleWorld" in log_text
     assert "rebuild: False (default)" in log_text
     assert "beta: True (arg)" in log_text
     assert "gamemode: creative (arg)" in log_text
+    assert "zip_name: world.zip (arg)" in log_text
+    assert "uninstall: True (arg)" in log_text
     assert "duplicate_mode: keep-both (arg)" in log_text
     assert "world_name: (none) (default)" in log_text
     assert "world_path: ExampleWorld (arg)" in log_text
@@ -164,17 +189,36 @@ def test_prompt_mode_returns_install_when_enter_is_pressed(monkeypatch):
 
 
 def test_prompt_mode_uses_arrows_and_enter_to_select_doctor(monkeypatch):
-    keys = iter(["\x1b[B", "\x1b[B", "\n"])
+    keys = iter(["\x1b[B", "\x1b[B", "\x1b[B", "\n"])
     monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
 
     assert cli.prompt_mode() == "--doctor"
 
 
-def test_prompt_install_flags_uses_arrows_and_space_to_select(monkeypatch):
-    keys = iter([" ", "\x1b[B", " ", "\n"])
+def test_prompt_mode_uses_arrows_and_enter_to_select_rebuild(monkeypatch):
+    keys = iter(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\n"])
     monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
 
-    assert cli.prompt_install_flags() == {"--rebuild", "--beta"}
+    assert cli.prompt_mode() == "--rebuild"
+
+
+def test_prompt_mode_uses_arrows_and_enter_to_select_uninstall(monkeypatch):
+    keys = iter(["\x1b[B", "\x1b[B", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+
+    assert cli.prompt_mode() == "uninstall"
+
+
+def test_prompt_zip_name_returns_none_for_blank_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    assert cli.prompt_zip_name() is None
+
+
+def test_prompt_zip_name_returns_entered_name(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "world.zip")
+
+    assert cli.prompt_zip_name() == "world.zip"
 
 
 def test_prompt_edit_world_flags_uses_arrows_and_space_to_select(monkeypatch):
@@ -191,22 +235,38 @@ def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
     assert cli.prompt_gamemode() == "creative"
 
 
+def test_prompt_uninstall_flags_uses_arrows_and_space_to_select(monkeypatch):
+    candidates = [
+        {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
+        {"flag": "--uninstall-pack=rp:rp-uuid:1.0.0", "label": "[RP] RP One (v1.0.0)", "details": "resource_packs/RP One-RP"},
+    ]
+    keys = iter([" ", "\x1b[B", " ", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+
+    assert cli.prompt_uninstall_flags(candidates) == {"--uninstall-pack=bp:bp-uuid:1.0.0", "--uninstall-pack=rp:rp-uuid:1.0.0"}
+
+
+def test_prompt_uninstall_flags_uses_prompt_when_not_interactive(monkeypatch):
+    candidates = [
+        {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
+        {"flag": "--uninstall-pack=rp:rp-uuid:1.0.0", "label": "[RP] RP One (v1.0.0)", "details": "resource_packs/RP One-RP"},
+    ]
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1,2")
+
+    assert cli.prompt_uninstall_flags(candidates) == {"--uninstall-pack=bp:bp-uuid:1.0.0", "--uninstall-pack=rp:rp-uuid:1.0.0"}
+
+
 def test_mode_menu_lines_show_primary_choices():
     lines = cli._mode_menu_lines(0)
 
     assert "Choose what to do" in lines[0]
     assert "Install Packs" in lines[2]
     assert "Edit World" in lines[3]
-    assert "Audit World" in lines[4]
-
-
-def test_install_menu_lines_show_selection_count():
-    lines = cli._install_menu_lines({"--rebuild"}, 0)
-
-    assert lines[0] == ""
-    assert "Install Packs (1 extra option(s))" in lines[1]
-    assert "Select any extra steps before continuing" in lines[2]
-    assert "Rebuild World Pack JSONs" in lines[4]
+    assert "Uninstall Packs" in lines[4]
+    assert "Audit World" in lines[5]
+    assert "Rebuild World" in lines[6]
 
 
 def test_edit_world_menu_lines_show_selection_count():
@@ -216,6 +276,19 @@ def test_edit_world_menu_lines_show_selection_count():
     assert "World Edits (1 change(s))" in lines[1]
     assert "Select one or more world edits" in lines[2]
     assert "Enable Beta APIs" in lines[4]
+
+
+def test_uninstall_menu_lines_show_selection_count():
+    candidates = [
+        {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
+    ]
+    lines = cli._uninstall_menu_lines(candidates, {"--uninstall-pack=bp:bp-uuid:1.0.0"}, 0)
+
+    assert lines[0] == ""
+    assert "Registered Packs (1 selected)" in lines[1]
+    assert "Select one or more packs to remove from this world" in lines[2]
+    assert "BP One" in lines[4]
+    assert "behavior_packs/BP One-BP" in lines[5]
 
 
 def test_prompt_mode_quits_on_q(monkeypatch):
@@ -228,21 +301,25 @@ def test_prompt_mode_quits_on_q(monkeypatch):
         pass
 
 
-def test_prompt_install_flags_quits_on_ctrl_c(monkeypatch):
-    monkeypatch.setattr(cli, "read_keypress", lambda: "\x03")
-
-    try:
-        cli.prompt_install_flags()
-        assert False, "expected MenuExit"
-    except cli.MenuExit:
-        pass
-
-
 def test_prompt_edit_world_flags_quits_on_q(monkeypatch):
     monkeypatch.setattr(cli, "read_keypress", lambda: "q")
 
     try:
         cli.prompt_edit_world_flags()
+        assert False, "expected MenuExit"
+    except cli.MenuExit:
+        pass
+
+
+def test_prompt_uninstall_flags_quits_on_q(monkeypatch):
+    candidates = [
+        {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
+    ]
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "read_keypress", lambda: "q")
+
+    try:
+        cli.prompt_uninstall_flags(candidates)
         assert False, "expected MenuExit"
     except cli.MenuExit:
         pass

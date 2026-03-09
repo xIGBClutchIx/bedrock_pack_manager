@@ -112,7 +112,7 @@ def app_header_lines() -> list[str]:
     return [
         "",
         title_text("Bedrock Pack Installer"),
-        f"  {dim_text('Minecraft world pack setup, repair, zip, and level.dat edit tools')}",
+        f"  {dim_text('Minecraft world pack setup, uninstall, repair, zip, and level.dat edit tools')}",
     ]
 
 

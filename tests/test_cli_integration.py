@@ -102,8 +102,8 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(cli, "prompt_mode", lambda: "install")
-    monkeypatch.setattr(cli, "prompt_install_flags", lambda: {"--beta"})
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "install")
+    monkeypatch.setattr(cli, "prompt_zip_name", lambda: "world.zip")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: paths.worlds_dir / "ExampleWorld")
 
     calls = []
@@ -117,8 +117,61 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
 
     cli.main()
 
-    assert calls[0][0] == {"--beta"}
+    assert calls[0][0] == {"--zip", "--zip-name=world.zip"}
     assert calls[0][2] == "replace"
+    assert calls[1] == ("pause", None)
+
+
+def test_main_selects_world_before_showing_interactive_mode_menu(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    events = []
+
+    def fake_select_world(_worlds_dir):
+        events.append("select_world")
+        return selected_world
+
+    def fake_prompt_mode(_world=None):
+        events.append("prompt_mode")
+        return "install"
+
+    monkeypatch.setattr(cli, "select_world", fake_select_world)
+    monkeypatch.setattr(cli, "prompt_mode", fake_prompt_mode)
+    monkeypatch.setattr(cli, "prompt_zip_name", lambda: None)
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert events[:2] == ["select_world", "prompt_mode"]
+
+
+def test_main_uses_interactive_rebuild_mode(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "--rebuild")
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert calls[0][0] == {"--rebuild"}
+    assert calls[0][1] == selected_world
     assert calls[1] == ("pause", None)
 
 
@@ -126,7 +179,7 @@ def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_pa
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(cli, "prompt_mode", lambda: "edit")
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "edit")
     monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: {"--beta", "--gamemode"})
     monkeypatch.setattr(cli, "prompt_gamemode", lambda: "creative")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: paths.worlds_dir / "ExampleWorld")
@@ -147,46 +200,129 @@ def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_pa
     assert calls[1] == ("pause", None)
 
 
-def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, capsys):
+def test_main_uses_interactive_uninstall_menu_and_applies_selection(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    candidates = [{"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"}]
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(cli, "prompt_mode", lambda: "edit")
-    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: set())
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert calls[0][0] == {"--uninstall", "--uninstall-pack=bp:bp-uuid:1.0.0"}
+    assert calls[0][1] == selected_world
+    assert calls[1] == ("pause", None)
+
+
+def test_main_rejects_empty_uninstall_selection(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    candidates = [{"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"}]
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: set())
     monkeypatch.setattr(
         cli,
         "run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
     )
+    pause_calls = []
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert "Select at least one pack to uninstall." in capsys.readouterr().out
+    assert pause_calls == ["pause"]
+
+
+def test_main_reports_when_world_has_no_packs_to_uninstall(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: [])
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
+    )
+    pause_calls = []
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall"])
+
+    cli.main()
+
+    assert "No behavior or resource packs are registered in this world." in capsys.readouterr().out
+    assert pause_calls == ["pause"]
+
+
+def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "edit")
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: set())
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
+    )
+    pause_calls = []
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
     monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
 
     cli.main()
 
     assert "Select at least one world edit option." in capsys.readouterr().out
+    assert pause_calls == ["pause"]
 
 
 def test_main_cancels_cleanly_from_interactive_menu(tmp_path, monkeypatch, capsys):
     paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(cli, "prompt_mode", lambda: (_ for _ in ()).throw(cli.MenuExit()))
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: (_ for _ in ()).throw(cli.MenuExit()))
     monkeypatch.setattr(
         cli,
         "select_world",
-        lambda _worlds_dir: (_ for _ in ()).throw(AssertionError("select_world should not run")),
+        lambda _worlds_dir: selected_world,
     )
     monkeypatch.setattr(
         cli,
         "run",
         lambda *_args: (_ for _ in ()).throw(AssertionError("run should not execute")),
     )
-    monkeypatch.setattr(
-        cli,
-        "pause_before_exit",
-        lambda: (_ for _ in ()).throw(AssertionError("pause should not execute after cancel")),
-    )
+    pause_calls = []
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
     monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
 
     cli.main()
 
     assert "Cancelled." in capsys.readouterr().out
+    assert pause_calls == ["pause"]

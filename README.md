@@ -91,8 +91,10 @@ PyInstaller does not reliably cross-build Windows executables from Linux, so use
 ```bash
 python bedrock_pack_installer.py --help
 python bedrock_pack_installer.py
+python bedrock_pack_installer.py --uninstall
 python bedrock_pack_installer.py --rebuild
 python bedrock_pack_installer.py --zip
+python bedrock_pack_installer.py --zip-name world.zip
 python bedrock_pack_installer.py --beta
 python bedrock_pack_installer.py --gamemode creative
 python bedrock_pack_installer.py --beta --gamemode creative
@@ -106,8 +108,12 @@ python bedrock_pack_installer.py --rebuild --beta --zip
 
 When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
 
-- first choose `Install Packs`, `Edit World`, or `Audit World And Installed Packs`
-- if you choose install, a second menu lets you toggle `Rebuild World Pack JSONs`, `Enable Beta APIs`, and `Zip Pack Folders`
+- first choose `Install Packs`, `Uninstall Packs`, `Edit World`, or `Audit World`
+- `Rebuild World Pack JSONs` is a top-level mode
+- if you choose install, it asks for a zip output name
+- leave the zip name blank to skip zipping
+- enter a name like `world.zip` to run zip mode with that filename
+- if you choose uninstall packs, a second menu lets you toggle one or more registered behavior/resource packs to remove from that world
 - if you choose edit world, a second menu lets you toggle one or more world edits, then submit them together
 - if `Set Gamemode` is selected, a final menu asks which gamemode to write to `level.dat`
 - use `Up` and `Down` to move
@@ -132,7 +138,13 @@ World edit mode can also be driven directly from the CLI:
 - `--gamemode survival|creative|adventure` sets the world's default gamemode in `level.dat`
 - `--beta --gamemode creative` applies both world edits in one run
 
-`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--rebuild`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
+Uninstall mode can also be driven directly from the CLI:
+
+- `--uninstall` opens a pack picker for the selected world
+- uninstall always removes the pack from the selected world's JSON
+- installed pack folders are only deleted when no other world still references that same pack version
+
+`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--uninstall`, `--rebuild`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
 
 World selection can also be driven directly from the CLI:
 
@@ -166,7 +178,7 @@ World selection can also be driven directly from the CLI:
 
 - `bedrock_pack_installer.py`: thin CLI entrypoint
 - `bedrock_pack_installer/cli.py`: startup and argument handling
-- `bedrock_pack_installer/commands.py`: install, rebuild, zip, world edit, and audit command handlers
+- `bedrock_pack_installer/commands.py`: install, uninstall, rebuild, zip, world edit, and audit command handlers
 - `bedrock_pack_installer/install.py`: install workflow and dependency checks
 - `bedrock_pack_installer/worlds.py`: world selection and world JSON helpers
 - `bedrock_pack_installer/manifests.py`: manifest parsing and pack classification

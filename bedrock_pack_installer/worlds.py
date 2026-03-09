@@ -48,6 +48,15 @@ def register_pack(world_json_path: Path, uuid: str, version: list) -> bool:
     return True
 
 
+def remove_pack(world_json_path: Path, uuid: str) -> bool:
+    packs = load_world_json(world_json_path)
+    updated_packs = [pack for pack in packs if pack.get("pack_id") != uuid]
+    if len(updated_packs) == len(packs):
+        return False
+    save_world_json(world_json_path, updated_packs)
+    return True
+
+
 def find_world_by_name(worlds_dir: Path, world_name: str) -> Path | None:
     world_path = worlds_dir / world_name
     if world_path.is_dir() and not world_path.name.startswith("."):

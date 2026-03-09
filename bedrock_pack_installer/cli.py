@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .commands import run
+from .commands import collect_uninstall_candidates, run
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
 from .nbt import GAMEMODE_VALUES
@@ -13,12 +13,9 @@ from .worlds import find_world_by_name, resolve_world_path, select_world
 MODE_OPTIONS = [
     ("install", "Install Packs"),
     ("edit", "Edit World"),
+    ("uninstall", "Uninstall Packs"),
     ("--doctor", "Audit World"),
-]
-INSTALL_OPTIONS = [
-    ("--rebuild", "Rebuild World Pack JSONs"),
-    ("--beta", "Enable Beta APIs"),
-    ("--zip", "Zip Pack Folders"),
+    ("--rebuild", "Rebuild World"),
 ]
 EDIT_WORLD_OPTIONS = [
     ("--beta", "Enable Beta APIs"),
@@ -47,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="bedrock_pack_installer.py",
         description=(
             "Install Minecraft Bedrock packs from run/install/, rebuild world pack JSONs, "
-            "zip runtime data, and edit a selected world's level.dat."
+            "zip runtime data, uninstall world packs, and edit a selected world's level.dat."
         ),
     )
     parser.add_argument(
@@ -59,6 +56,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--zip",
         action="store_true",
         help="Create a zip archive containing run/worlds, run/behavior_packs, and run/resource_packs.",
+    )
+    parser.add_argument(
+        "--zip-name",
+        help="Custom zip filename to use with --zip. If provided without --zip, zip mode is implied.",
     )
     parser.add_argument(
         "--beta",
@@ -74,6 +75,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--doctor",
         action="store_true",
         help="Audit the selected world and installed packs without changing any files.",
+    )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Select behavior/resource packs to uninstall from the chosen world.",
     )
     parser.add_argument(
         "--duplicate-mode",
@@ -109,9 +115,11 @@ def flags_from_args(args: argparse.Namespace) -> set[str]:
         flag
         for enabled, flag in [
             (args.rebuild, "--rebuild"),
-            (args.zip, "--zip"),
+            (args.zip or bool(args.zip_name), "--zip"),
             (args.beta, "--beta"),
             (args.doctor, "--doctor"),
+            (args.uninstall, "--uninstall"),
+            (bool(args.zip_name), f"--zip-name={args.zip_name}"),
             (bool(args.gamemode), f"--gamemode={args.gamemode}"),
         ]
         if enabled
@@ -134,7 +142,10 @@ def log_launch_context(argv: list[str], args: argparse.Namespace) -> None:
     gamemode_source = "arg" if "--gamemode" in argv else "default"
     log_only(f"  gamemode: {args.gamemode or '(none)'} ({gamemode_source})\n")
     log_only(f"  zip: {args.zip} ({_arg_source(argv, '--zip')})\n")
+    zip_name_source = "arg" if "--zip-name" in argv else "default"
+    log_only(f"  zip_name: {args.zip_name or '(none)'} ({zip_name_source})\n")
     log_only(f"  doctor: {args.doctor} ({_arg_source(argv, '--doctor')})\n")
+    log_only(f"  uninstall: {args.uninstall} ({_arg_source(argv, '--uninstall')})\n")
     duplicate_mode_source = "arg" if "--duplicate-mode" in argv else "default"
     log_only(f"  duplicate_mode: {args.duplicate_mode} ({duplicate_mode_source})\n")
     world_name_source = "arg" if "--world-name" in argv else "default"
@@ -194,24 +205,6 @@ def _mode_menu_lines(cursor: int) -> list[str]:
     return lines
 
 
-def _install_menu_lines(selected: set[str], cursor: int) -> list[str]:
-    selection_label = "Install Packs" if not selected else f"Install Packs ({len(selected)} extra option(s))"
-
-    lines = [
-        "",
-        f"  {title_text(selection_label)}",
-        f"  {dim_text('Select any extra steps before continuing')}",
-        "",
-    ]
-    for index, (flag, label) in enumerate(INSTALL_OPTIONS):
-        is_selected = flag in selected
-        mark = f"{C.GREEN}◉{C.RESET}" if is_selected else f"{C.DIM}◌{C.RESET}"
-        pointer = f"{C.CYAN}▸{C.RESET}" if index == cursor else " "
-        label_text = f"{C.BOLD}{label}{C.RESET}" if index == cursor else label
-        lines.append(f"  {pointer} {mark} {label_text}")
-    return lines
-
-
 def _edit_world_menu_lines(selected: set[str], cursor: int) -> list[str]:
     selection_label = "World Edits" if not selected else f"World Edits ({len(selected)} change(s))"
 
@@ -230,6 +223,26 @@ def _edit_world_menu_lines(selected: set[str], cursor: int) -> list[str]:
     return lines
 
 
+def _uninstall_menu_lines(candidates: list[dict], selected: set[str], cursor: int) -> list[str]:
+    selection_label = "Registered Packs" if not selected else f"Registered Packs ({len(selected)} selected)"
+
+    lines = [
+        "",
+        f"  {title_text(selection_label)}",
+        f"  {dim_text('Select one or more packs to remove from this world')}",
+        "",
+    ]
+    for index, candidate in enumerate(candidates):
+        flag = candidate["flag"]
+        is_selected = flag in selected
+        mark = f"{C.GREEN}◉{C.RESET}" if is_selected else f"{C.DIM}◌{C.RESET}"
+        pointer = f"{C.CYAN}▸{C.RESET}" if index == cursor else " "
+        label_text = f"{C.BOLD}{candidate['label']}{C.RESET}" if index == cursor else candidate["label"]
+        lines.append(f"  {pointer} {mark} {label_text}")
+        lines.append(f"    {dim_text(candidate['details'])}")
+    return lines
+
+
 def _single_select_menu_lines(options: list[tuple[str, str]], cursor: int, title: str, subtitle: str) -> list[str]:
     lines = [
         "",
@@ -244,15 +257,23 @@ def _single_select_menu_lines(options: list[tuple[str, str]], cursor: int, title
     return lines
 
 
-def prompt_mode() -> str:
+def prompt_mode(selected_world: Path | None = None) -> str:
     cursor = 0
+    static_lines = [
+        *app_header_lines(),
+        "",
+        f"  {title_text('Mode')}",
+        f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
+    ]
+    if selected_world is not None:
+        static_lines.extend(
+            [
+                f"  {dim_text(f'World: {selected_world.name}')}",
+                "",
+            ]
+        )
     menu = TerminalListMenu(
-        [
-            *app_header_lines(),
-            "",
-            f"  {title_text('Mode')}",
-            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
-        ],
+        static_lines,
         lambda: _mode_menu_lines(cursor),
     )
     menu.render_initial()
@@ -336,17 +357,17 @@ def prompt_gamemode() -> str:
             continue
 
 
-def prompt_install_flags() -> set[str]:
+def _prompt_uninstall_flags_interactive(candidates: list[dict]) -> set[str]:
     selected: set[str] = set()
     cursor = 0
     menu = TerminalListMenu(
         [
             *app_header_lines(),
             "",
-            f"  {title_text('Install Options')}",
+            f"  {title_text('Uninstall Packs')}",
             f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
         ],
-        lambda: _install_menu_lines(selected, cursor),
+        lambda: _uninstall_menu_lines(candidates, selected, cursor),
     )
     menu.render_initial()
 
@@ -357,23 +378,59 @@ def prompt_install_flags() -> set[str]:
         if key in {"q", "Q", "\x03"}:
             raise MenuExit()
         if key == " ":
-            selected = _toggle_flag(selected, INSTALL_OPTIONS[cursor][0])
+            selected = _toggle_flag(selected, candidates[cursor]["flag"])
             menu.redraw()
             continue
         if key == "\x1b[A":
-            cursor = _move_cursor(cursor, len(INSTALL_OPTIONS), "up")
+            cursor = _move_cursor(cursor, len(candidates), "up")
             menu.redraw()
             continue
         if key == "\x1b[B":
-            cursor = _move_cursor(cursor, len(INSTALL_OPTIONS), "down")
+            cursor = _move_cursor(cursor, len(candidates), "down")
             menu.redraw()
             continue
+
+
+def _prompt_uninstall_flags_with_prompt(candidates: list[dict]) -> set[str]:
+    print(f"\n  {title_text('Uninstall Packs')}\n")
+    for index, candidate in enumerate(candidates, 1):
+        print(f"    {C.BOLD}{index}.{C.RESET} {candidate['label']}")
+        print(f"       {candidate['details']}")
+
+    print()
+    while True:
+        raw_choice = input(f"  Select pack numbers to uninstall (comma-separated 1-{len(candidates)}): ").strip()
+        if not raw_choice:
+            return set()
+
+        try:
+            indexes = {int(part.strip()) - 1 for part in raw_choice.split(",")}
+        except ValueError:
+            print(f"  {C.RED}Enter comma-separated numbers{C.RESET}")
+            continue
+
+        if not indexes or any(index < 0 or index >= len(candidates) for index in indexes):
+            print(f"  {C.RED}Invalid choice{C.RESET}")
+            continue
+
+        return {candidates[index]["flag"] for index in sorted(indexes)}
+
+
+def prompt_uninstall_flags(candidates: list[dict]) -> set[str]:
+    if is_interactive_terminal():
+        return _prompt_uninstall_flags_interactive(candidates)
+    return _prompt_uninstall_flags_with_prompt(candidates)
+
+
+def prompt_zip_name() -> str | None:
+    zip_name = input(f"\n{prompt_text('Zip output name (blank to skip): ')}").strip()
+    return zip_name or None
 
 
 def pause_before_exit() -> None:
     if not is_interactive_terminal():
         return
-    input(f"\n{prompt_text('Press Enter to exit...')}")
+    input(prompt_text("Press Enter to exit..."))
 
 
 def main() -> None:
@@ -388,10 +445,21 @@ def main() -> None:
     try:
         with capture_run_logs(paths.logs_dir):
             log_launch_context(argv, args)
-            if not flags and is_interactive_terminal():
-                mode = prompt_mode()
+            interactive_launch = not flags and is_interactive_terminal()
+            world_dir = None
+            world_selection_source = ""
+
+            if interactive_launch:
+                world_dir, world_selection_source = resolve_world(args, paths)
+                log_only(f"  World source: {world_selection_source}\n")
+                log_only(f"  World: {world_dir}\n")
+                mode = prompt_mode(world_dir)
                 if mode == "--doctor":
                     flags = {"--doctor"}
+                elif mode == "--rebuild":
+                    flags = {"--rebuild"}
+                elif mode == "uninstall":
+                    flags = {"--uninstall"}
                 elif mode == "edit":
                     flags = prompt_edit_world_flags()
                     if not flags:
@@ -400,24 +468,44 @@ def main() -> None:
                         flags.remove("--gamemode")
                         flags.add(f"--gamemode={prompt_gamemode()}")
                 else:
-                    flags = prompt_install_flags()
+                    zip_name = prompt_zip_name()
+                    flags = {"--zip", f"--zip-name={zip_name}"} if zip_name else set()
                 log_run_settings(flags, "interactive prompt")
             else:
                 app_header()
                 log_run_settings(flags, "cli args/defaults")
 
             needs_world = not flags or flags != {"--zip"}
-            world_dir = None
-            if needs_world:
+            if needs_world and world_dir is None:
                 world_dir, world_selection_source = resolve_world(args, paths)
                 log_only(f"  World source: {world_selection_source}\n")
                 log_only(f"  World: {world_dir}\n")
+                if "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags):
+                    uninstall_candidates = collect_uninstall_candidates(world_dir, paths)
+                    if not uninstall_candidates:
+                        raise ValueError("No behavior or resource packs are registered in this world.")
+                    flags = set(flags)
+                    selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates)
+                    if not selected_uninstall_flags:
+                        raise ValueError("Select at least one pack to uninstall.")
+                    flags.update(selected_uninstall_flags)
+            elif world_dir is not None and "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags):
+                uninstall_candidates = collect_uninstall_candidates(world_dir, paths)
+                if not uninstall_candidates:
+                    raise ValueError("No behavior or resource packs are registered in this world.")
+                flags = set(flags)
+                selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates)
+                if not selected_uninstall_flags:
+                    raise ValueError("Select at least one pack to uninstall.")
+                flags.update(selected_uninstall_flags)
             run(flags, world_dir, paths, state, duplicate_mode=args.duplicate_mode)
     except ValueError as exc:
         print(f"\n{C.RED}{exc}{C.RESET}")
+        pause_before_exit()
         return
     except (KeyboardInterrupt, MenuExit):
         print(f"\n{C.YELLOW}Cancelled.{C.RESET}")
+        pause_before_exit()
         return
 
     pause_before_exit()
