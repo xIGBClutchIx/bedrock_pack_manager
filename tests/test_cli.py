@@ -30,6 +30,7 @@ def test_parse_args_accepts_combined_flags():
 
 def test_configure_output_uses_reconfigure_when_available(monkeypatch):
     calls = []
+    ansi_calls = []
 
     class FakeStream:
         def reconfigure(self, **kwargs):
@@ -37,6 +38,7 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
 
     monkeypatch.setattr(sys, "stdout", FakeStream())
     monkeypatch.setattr(sys, "stderr", FakeStream())
+    monkeypatch.setattr(cli, "enable_virtual_terminal", lambda: ansi_calls.append("enabled"))
 
     cli.configure_output()
 
@@ -44,6 +46,7 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
         {"encoding": "utf-8", "errors": "replace"},
         {"encoding": "utf-8", "errors": "replace"},
     ]
+    assert ansi_calls == ["enabled"]
 
 
 def test_flags_from_args_converts_namespace_to_flag_set():

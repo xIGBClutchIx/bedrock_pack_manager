@@ -153,6 +153,13 @@ Keep:
 `requirements.txt` still exists for convenience, so if dependencies change, keep it in sync with the current practical workflow.
 
 Development workflow should assume a local `.venv` when documenting setup, testing, linting, or build steps.
+Before running project Python tools directly in the shell, activate the local virtual environment with:
+
+```bash
+. .venv/bin/activate
+```
+
+Prefer commands run from the activated `.venv` over the system Python environment.
 
 ## Code Style
 

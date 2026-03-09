@@ -6,7 +6,7 @@ from .commands import run
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
 from .paths import build_paths
-from .terminal import read_keypress
+from .terminal import enable_virtual_terminal, read_keypress
 from .worlds import find_world_by_name, resolve_world_path, select_world
 
 MODE_OPTIONS = [
@@ -28,6 +28,7 @@ def configure_output() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    enable_virtual_terminal()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

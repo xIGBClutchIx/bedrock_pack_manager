@@ -112,6 +112,8 @@ When launched without flags in an interactive terminal, the app now shows a two-
 - press `Q` or `Ctrl+C` to quit
 - leave all install options unchecked to continue with normal install mode
 
+The interactive menus work in POSIX terminals and on modern Windows consoles such as Windows Terminal and PowerShell.
+
 When the app finishes in an interactive terminal, it waits for `Enter` before closing.
 
 Install mode can also control how duplicate pack UUIDs are handled:
