@@ -5,18 +5,29 @@ from pathlib import Path
 from .commands import run
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
+from .nbt import GAMEMODE_VALUES
 from .paths import build_paths
 from .terminal import enable_virtual_terminal, read_keypress
 from .worlds import find_world_by_name, resolve_world_path, select_world
 
 MODE_OPTIONS = [
     ("install", "Install Packs"),
-    ("--doctor", "Audit World And Installed Packs"),
+    ("edit", "Edit World"),
+    ("--doctor", "Audit World"),
 ]
 INSTALL_OPTIONS = [
     ("--rebuild", "Rebuild World Pack JSONs"),
     ("--beta", "Enable Beta APIs"),
     ("--zip", "Zip Pack Folders"),
+]
+EDIT_WORLD_OPTIONS = [
+    ("--beta", "Enable Beta APIs"),
+    ("--gamemode", "Set Gamemode"),
+]
+GAMEMODE_OPTIONS = [
+    ("survival", "Survival"),
+    ("creative", "Creative"),
+    ("adventure", "Adventure"),
 ]
 
 class MenuExit(Exception):
@@ -36,7 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="bedrock_pack_installer.py",
         description=(
             "Install Minecraft Bedrock packs from run/install/, rebuild world pack JSONs, "
-            "zip runtime data, and enable Beta APIs in a selected world."
+            "zip runtime data, and edit a selected world's level.dat."
         ),
     )
     parser.add_argument(
@@ -53,6 +64,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--beta",
         action="store_true",
         help="Enable Beta APIs in the selected world's level.dat.",
+    )
+    parser.add_argument(
+        "--gamemode",
+        choices=sorted(GAMEMODE_VALUES),
+        help="Set the selected world's default gamemode in level.dat.",
     )
     parser.add_argument(
         "--doctor",
@@ -96,6 +112,7 @@ def flags_from_args(args: argparse.Namespace) -> set[str]:
             (args.zip, "--zip"),
             (args.beta, "--beta"),
             (args.doctor, "--doctor"),
+            (bool(args.gamemode), f"--gamemode={args.gamemode}"),
         ]
         if enabled
     }
@@ -114,6 +131,8 @@ def log_launch_context(argv: list[str], args: argparse.Namespace) -> None:
     log_only(f"  Launch args: {_format_arg_list(argv)}\n")
     log_only(f"  rebuild: {args.rebuild} ({_arg_source(argv, '--rebuild')})\n")
     log_only(f"  beta: {args.beta} ({_arg_source(argv, '--beta')})\n")
+    gamemode_source = "arg" if "--gamemode" in argv else "default"
+    log_only(f"  gamemode: {args.gamemode or '(none)'} ({gamemode_source})\n")
     log_only(f"  zip: {args.zip} ({_arg_source(argv, '--zip')})\n")
     log_only(f"  doctor: {args.doctor} ({_arg_source(argv, '--doctor')})\n")
     duplicate_mode_source = "arg" if "--duplicate-mode" in argv else "default"
@@ -193,6 +212,38 @@ def _install_menu_lines(selected: set[str], cursor: int) -> list[str]:
     return lines
 
 
+def _edit_world_menu_lines(selected: set[str], cursor: int) -> list[str]:
+    selection_label = "World Edits" if not selected else f"World Edits ({len(selected)} change(s))"
+
+    lines = [
+        "",
+        f"  {title_text(selection_label)}",
+        f"  {dim_text('Select one or more world edits, then press Enter to apply them')}",
+        "",
+    ]
+    for index, (flag, label) in enumerate(EDIT_WORLD_OPTIONS):
+        is_selected = flag in selected
+        mark = f"{C.GREEN}◉{C.RESET}" if is_selected else f"{C.DIM}◌{C.RESET}"
+        pointer = f"{C.CYAN}▸{C.RESET}" if index == cursor else " "
+        label_text = f"{C.BOLD}{label}{C.RESET}" if index == cursor else label
+        lines.append(f"  {pointer} {mark} {label_text}")
+    return lines
+
+
+def _single_select_menu_lines(options: list[tuple[str, str]], cursor: int, title: str, subtitle: str) -> list[str]:
+    lines = [
+        "",
+        f"  {title_text(title)}",
+        f"  {dim_text(subtitle)}",
+        "",
+    ]
+    for index, (_value, label) in enumerate(options):
+        pointer = f"{C.CYAN}▸{C.RESET}" if index == cursor else " "
+        label_text = f"{C.BOLD}{label}{C.RESET}" if index == cursor else label
+        lines.append(f"  {pointer} {label_text}")
+    return lines
+
+
 def prompt_mode() -> str:
     cursor = 0
     menu = TerminalListMenu(
@@ -218,6 +269,69 @@ def prompt_mode() -> str:
             continue
         if key == "\x1b[B":
             cursor = _move_cursor(cursor, len(MODE_OPTIONS), "down")
+            menu.redraw()
+            continue
+
+
+def prompt_edit_world_flags() -> set[str]:
+    selected: set[str] = set()
+    cursor = 0
+    menu = TerminalListMenu(
+        [
+            *app_header_lines(),
+            "",
+            f"  {title_text('Edit World')}",
+            f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
+        ],
+        lambda: _edit_world_menu_lines(selected, cursor),
+    )
+    menu.render_initial()
+
+    while True:
+        key = read_keypress()
+        if key in {"\r", "\n"}:
+            return selected
+        if key in {"q", "Q", "\x03"}:
+            raise MenuExit()
+        if key == " ":
+            selected = _toggle_flag(selected, EDIT_WORLD_OPTIONS[cursor][0])
+            menu.redraw()
+            continue
+        if key == "\x1b[A":
+            cursor = _move_cursor(cursor, len(EDIT_WORLD_OPTIONS), "up")
+            menu.redraw()
+            continue
+        if key == "\x1b[B":
+            cursor = _move_cursor(cursor, len(EDIT_WORLD_OPTIONS), "down")
+            menu.redraw()
+            continue
+
+
+def prompt_gamemode() -> str:
+    cursor = 0
+    menu = TerminalListMenu(
+        [
+            *app_header_lines(),
+            "",
+            f"  {title_text('Set Gamemode')}",
+            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
+        ],
+        lambda: _single_select_menu_lines(GAMEMODE_OPTIONS, cursor, "Gamemode", "Choose the world's default gamemode"),
+    )
+    menu.render_initial()
+
+    while True:
+        key = read_keypress()
+        if key in {"\r", "\n"}:
+            return GAMEMODE_OPTIONS[cursor][0]
+        if key in {"q", "Q", "\x03"}:
+            raise MenuExit()
+        if key == "\x1b[A":
+            cursor = _move_cursor(cursor, len(GAMEMODE_OPTIONS), "up")
+            menu.redraw()
+            continue
+        if key == "\x1b[B":
+            cursor = _move_cursor(cursor, len(GAMEMODE_OPTIONS), "down")
             menu.redraw()
             continue
 
@@ -276,7 +390,17 @@ def main() -> None:
             log_launch_context(argv, args)
             if not flags and is_interactive_terminal():
                 mode = prompt_mode()
-                flags = {"--doctor"} if mode == "--doctor" else prompt_install_flags()
+                if mode == "--doctor":
+                    flags = {"--doctor"}
+                elif mode == "edit":
+                    flags = prompt_edit_world_flags()
+                    if not flags:
+                        raise ValueError("Select at least one world edit option.")
+                    if "--gamemode" in flags:
+                        flags.remove("--gamemode")
+                        flags.add(f"--gamemode={prompt_gamemode()}")
+                else:
+                    flags = prompt_install_flags()
                 log_run_settings(flags, "interactive prompt")
             else:
                 app_header()

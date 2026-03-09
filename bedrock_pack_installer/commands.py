@@ -6,9 +6,15 @@ from pathlib import Path
 from .console import AppState, C, error, info, print_warnings, section, warn
 from .install import DuplicateMode, do_install
 from .manifests import get_pack_dependencies, get_pack_info, read_manifest
-from .nbt import enable_beta_apis
+from .nbt import GAMEMODE_VALUES, enable_beta_apis, set_world_gamemode
 from .paths import ProjectPaths
 from .worlds import load_world_json, save_world_json
+
+GAMEMODE_LABELS = {
+    "survival": "Survival",
+    "creative": "Creative",
+    "adventure": "Adventure",
+}
 
 
 def _load_registered_ids(world_json: Path) -> set[str]:
@@ -277,6 +283,46 @@ def do_beta(world_dir: Path, state: AppState | None = None) -> None:
         state.record("beta_toggle", "Enabled beta APIs", world_dir=str(world_dir), changed=True)
 
 
+def do_set_gamemode(world_dir: Path, gamemode: str, state: AppState | None = None) -> None:
+    dat_path = world_dir / "level.dat"
+    if not dat_path.exists():
+        print(f"  {C.YELLOW}[WARNING]{C.RESET} No level.dat found in '{world_dir.name}' - skipping gamemode update")
+        if state is not None:
+            state.record("set_gamemode", "Skipped gamemode update because level.dat is missing", world_dir=str(world_dir), gamemode=gamemode, changed=False)
+        return
+
+    try:
+        import nbtlib  # noqa: F401
+    except ImportError:
+        error("nbtlib is required. Install it with: pip install nbtlib", state=state, action="set_gamemode", world_dir=str(world_dir), gamemode=gamemode, changed=False)
+        return
+
+    gamemode_label = GAMEMODE_LABELS[gamemode]
+    section(f"Set World Gamemode: {gamemode_label}", state=state, action="set_gamemode_section", gamemode=gamemode)
+
+    if not set_world_gamemode(dat_path, gamemode):
+        print(f"\n  World gamemode already set to {C.GREEN}{gamemode_label}{C.RESET} for '{world_dir.name}'")
+        if state is not None:
+            state.record("set_gamemode", "World gamemode already set", world_dir=str(world_dir), gamemode=gamemode, changed=False)
+        return
+
+    info("Backup saved as level.dat.backup", state=state, action="gamemode_backup", backup_path=str(dat_path.with_name("level.dat.backup")))
+
+    print(f"\n  {C.GREEN}Done!{C.RESET} World gamemode set to {C.CYAN}{gamemode_label}{C.RESET} for '{C.CYAN}{world_dir.name}{C.RESET}'")
+    if state is not None:
+        state.record("set_gamemode", "Updated world gamemode", world_dir=str(world_dir), gamemode=gamemode, changed=True)
+
+
+def _selected_gamemode(flags: set[str]) -> str | None:
+    for flag in flags:
+        if not flag.startswith("--gamemode="):
+            continue
+        gamemode = flag.split("=", 1)[1]
+        if gamemode in GAMEMODE_VALUES:
+            return gamemode
+    return None
+
+
 def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: AppState, duplicate_mode: DuplicateMode = "replace") -> None:
     if not flags:
         do_install(world_dir, paths, state, duplicate_mode=duplicate_mode)
@@ -290,6 +336,10 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
 
     if "--beta" in flags:
         do_beta(world_dir, state)
+
+    gamemode = _selected_gamemode(flags)
+    if gamemode is not None:
+        do_set_gamemode(world_dir, gamemode, state)
 
     if "--zip" in flags:
         do_zip(paths, state)

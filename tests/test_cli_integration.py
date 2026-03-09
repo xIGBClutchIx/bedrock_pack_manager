@@ -122,6 +122,49 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
     assert calls[1] == ("pause", None)
 
 
+def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda: "edit")
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: {"--beta", "--gamemode"})
+    monkeypatch.setattr(cli, "prompt_gamemode", lambda: "creative")
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: paths.worlds_dir / "ExampleWorld")
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert calls[0][0] == {"--beta", "--gamemode=creative"}
+    assert calls[0][2] == "replace"
+    assert calls[1] == ("pause", None)
+
+
+def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda: "edit")
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: set())
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
+    )
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert "Select at least one world edit option." in capsys.readouterr().out
+
+
 def test_main_cancels_cleanly_from_interactive_menu(tmp_path, monkeypatch, capsys):
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)

@@ -4,7 +4,7 @@ import types
 import zipfile
 
 import bedrock_pack_installer.commands as commands
-from bedrock_pack_installer.commands import do_beta, do_doctor, do_rebuild, do_zip
+from bedrock_pack_installer.commands import do_beta, do_doctor, do_rebuild, do_set_gamemode, do_zip
 from bedrock_pack_installer.console import AppState
 from bedrock_pack_installer.paths import build_paths
 from tests.helpers import PACK_UUID, PACK_VERSION, write_manifest, write_world_json
@@ -134,6 +134,68 @@ def test_do_beta_reports_missing_nbtlib_when_level_dat_exists(tmp_path, monkeypa
     assert "nbtlib is required" in capsys.readouterr().out
 
 
+def test_do_set_gamemode_returns_when_level_dat_missing(tmp_path, capsys):
+    world_dir = tmp_path / "ExampleWorld"
+    world_dir.mkdir()
+
+    do_set_gamemode(world_dir, "creative")
+
+    assert "No level.dat found" in capsys.readouterr().out
+
+
+def test_do_set_gamemode_updates_world_when_helper_returns_true(tmp_path, monkeypatch, capsys):
+    world_dir = tmp_path / "ExampleWorld"
+    world_dir.mkdir()
+    (world_dir / "level.dat").write_bytes(b"dummy")
+
+    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
+    monkeypatch.setattr("bedrock_pack_installer.commands.set_world_gamemode", lambda _path, _gamemode: True)
+
+    state = AppState()
+    do_set_gamemode(world_dir, "creative", state)
+
+    output = capsys.readouterr().out
+    assert "Backup saved as level.dat.backup" in output
+    assert "World gamemode set to" in output
+    assert any(action.kind == "gamemode_backup" for action in state.actions)
+    assert any(action.kind == "set_gamemode" and action.details["changed"] is True for action in state.actions)
+
+
+def test_do_set_gamemode_reports_already_set_when_helper_returns_false(tmp_path, monkeypatch, capsys):
+    world_dir = tmp_path / "ExampleWorld"
+    world_dir.mkdir()
+    (world_dir / "level.dat").write_bytes(b"dummy")
+
+    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
+    monkeypatch.setattr("bedrock_pack_installer.commands.set_world_gamemode", lambda _path, _gamemode: False)
+
+    state = AppState()
+    do_set_gamemode(world_dir, "survival", state)
+
+    assert "already set" in capsys.readouterr().out.lower()
+    assert any(action.kind == "set_gamemode" and action.details["changed"] is False for action in state.actions)
+
+
+def test_do_set_gamemode_reports_missing_nbtlib_when_level_dat_exists(tmp_path, monkeypatch, capsys):
+    world_dir = tmp_path / "ExampleWorld"
+    world_dir.mkdir()
+    (world_dir / "level.dat").write_bytes(b"dummy")
+    monkeypatch.delitem(sys.modules, "nbtlib", raising=False)
+
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "nbtlib":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    do_set_gamemode(world_dir, "creative")
+
+    assert "nbtlib is required" in capsys.readouterr().out
+
+
 def test_do_zip_warns_for_missing_run_folders(tmp_path):
     paths = build_paths(tmp_path)
     state = AppState()
@@ -152,13 +214,14 @@ def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "do_doctor", lambda *_args: calls.append("doctor"))
     monkeypatch.setattr(commands, "do_rebuild", lambda *_args: calls.append("rebuild"))
     monkeypatch.setattr(commands, "do_beta", lambda *_args: calls.append("beta"))
+    monkeypatch.setattr(commands, "do_set_gamemode", lambda *_args: calls.append("gamemode"))
     monkeypatch.setattr(commands, "do_zip", lambda *_args: calls.append("zip"))
     monkeypatch.setattr(commands, "do_install", lambda *_args, **_kwargs: calls.append("install"))
 
     commands.run(set(), world_dir, paths, state, duplicate_mode="keep-both")
-    commands.run({"--beta", "--zip", "--rebuild", "--doctor"}, world_dir, paths, state)
+    commands.run({"--beta", "--zip", "--rebuild", "--doctor", "--gamemode=creative"}, world_dir, paths, state)
 
-    assert calls == ["install", "doctor", "rebuild", "beta", "zip"]
+    assert calls == ["install", "doctor", "rebuild", "beta", "gamemode", "zip"]
 
 
 def test_do_doctor_reports_clean_state(tmp_path, capsys):

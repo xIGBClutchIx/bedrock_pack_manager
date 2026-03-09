@@ -94,6 +94,8 @@ python bedrock_pack_installer.py
 python bedrock_pack_installer.py --rebuild
 python bedrock_pack_installer.py --zip
 python bedrock_pack_installer.py --beta
+python bedrock_pack_installer.py --gamemode creative
+python bedrock_pack_installer.py --beta --gamemode creative
 python bedrock_pack_installer.py --doctor
 python bedrock_pack_installer.py --doctor --world-name "My World"
 python bedrock_pack_installer.py --rebuild --world-path "My World"
@@ -102,12 +104,14 @@ python bedrock_pack_installer.py --rebuild --beta
 python bedrock_pack_installer.py --rebuild --beta --zip
 ```
 
-When launched without flags in an interactive terminal, the app now shows a two-step keyboard-driven prompt:
+When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
 
-- first choose `Install Packs` or `Audit World And Installed Packs`
+- first choose `Install Packs`, `Edit World`, or `Audit World And Installed Packs`
 - if you choose install, a second menu lets you toggle `Rebuild World Pack JSONs`, `Enable Beta APIs`, and `Zip Pack Folders`
+- if you choose edit world, a second menu lets you toggle one or more world edits, then submit them together
+- if `Set Gamemode` is selected, a final menu asks which gamemode to write to `level.dat`
 - use `Up` and `Down` to move
-- press `Space` to toggle install options in the second menu
+- press `Space` to toggle options in multi-select menus
 - press `Enter` to continue
 - press `Q` or `Ctrl+C` to quit
 - leave all install options unchecked to continue with normal install mode
@@ -122,7 +126,13 @@ Install mode can also control how duplicate pack UUIDs are handled:
 - `--duplicate-mode skip`: keep the currently installed UUID/version and skip the incoming pack
 - `--duplicate-mode keep-both`: keep older copies on disk, install the new one beside them, and update the world entry to the new version
 
-`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--rebuild`, `--beta`, or `--zip` when those are run on their own.
+World edit mode can also be driven directly from the CLI:
+
+- `--beta` enables Beta APIs in the selected world's `level.dat`
+- `--gamemode survival|creative|adventure` sets the world's default gamemode in `level.dat`
+- `--beta --gamemode creative` applies both world edits in one run
+
+`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--rebuild`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
 
 World selection can also be driven directly from the CLI:
 
@@ -156,11 +166,11 @@ World selection can also be driven directly from the CLI:
 
 - `bedrock_pack_installer.py`: thin CLI entrypoint
 - `bedrock_pack_installer/cli.py`: startup and argument handling
-- `bedrock_pack_installer/commands.py`: rebuild, zip, beta, and audit command handlers
+- `bedrock_pack_installer/commands.py`: install, rebuild, zip, world edit, and audit command handlers
 - `bedrock_pack_installer/install.py`: install workflow and dependency checks
 - `bedrock_pack_installer/worlds.py`: world selection and world JSON helpers
 - `bedrock_pack_installer/manifests.py`: manifest parsing and pack classification
-- `bedrock_pack_installer/nbt.py`: `level.dat` NBT helpers for experiment toggles
+- `bedrock_pack_installer/nbt.py`: `level.dat` NBT helpers for world edits
 - `bedrock_pack_installer/paths.py`: shared project paths
 - `bedrock_pack_installer/console.py`: console output and shared app state
 - `bedrock_pack_installer/constants.py`: shared pack/archive constants

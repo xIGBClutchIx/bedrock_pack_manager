@@ -11,6 +11,7 @@ def test_parse_args_defaults_to_no_flags():
     assert args.rebuild is False
     assert args.zip is False
     assert args.beta is False
+    assert args.gamemode is None
     assert args.doctor is False
     assert args.duplicate_mode == "replace"
     assert args.world_name is None
@@ -18,10 +19,11 @@ def test_parse_args_defaults_to_no_flags():
 
 
 def test_parse_args_accepts_combined_flags():
-    args = parse_args(["--rebuild", "--beta", "--zip", "--doctor", "--duplicate-mode", "keep-both", "--world-name", "ExampleWorld"])
+    args = parse_args(["--rebuild", "--beta", "--gamemode", "creative", "--zip", "--doctor", "--duplicate-mode", "keep-both", "--world-name", "ExampleWorld"])
 
     assert args.rebuild is True
     assert args.beta is True
+    assert args.gamemode == "creative"
     assert args.zip is True
     assert args.doctor is True
     assert args.duplicate_mode == "keep-both"
@@ -50,23 +52,24 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
 
 
 def test_flags_from_args_converts_namespace_to_flag_set():
-    args = parse_args(["--rebuild", "--zip"])
+    args = parse_args(["--rebuild", "--zip", "--gamemode", "adventure"])
 
-    assert cli.flags_from_args(args) == {"--rebuild", "--zip"}
+    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--gamemode=adventure"}
 
 
 def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
-    args = parse_args(["--beta", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"])
+    args = parse_args(["--beta", "--gamemode", "creative", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"])
     logs_dir = tmp_path / "logs"
 
     with capture_run_logs(logs_dir):
-        cli.log_launch_context(["--beta", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"], args)
+        cli.log_launch_context(["--beta", "--gamemode", "creative", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"], args)
 
     assert capsys.readouterr().out == ""
     log_text = (logs_dir / "latest.txt").read_text(encoding="utf-8")
-    assert "Launch args: --beta --duplicate-mode keep-both --world-path ExampleWorld" in log_text
+    assert "Launch args: --beta --gamemode creative --duplicate-mode keep-both --world-path ExampleWorld" in log_text
     assert "rebuild: False (default)" in log_text
     assert "beta: True (arg)" in log_text
+    assert "gamemode: creative (arg)" in log_text
     assert "duplicate_mode: keep-both (arg)" in log_text
     assert "world_name: (none) (default)" in log_text
     assert "world_path: ExampleWorld (arg)" in log_text
@@ -161,7 +164,7 @@ def test_prompt_mode_returns_install_when_enter_is_pressed(monkeypatch):
 
 
 def test_prompt_mode_uses_arrows_and_enter_to_select_doctor(monkeypatch):
-    keys = iter(["\x1b[B", "\n"])
+    keys = iter(["\x1b[B", "\x1b[B", "\n"])
     monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
 
     assert cli.prompt_mode() == "--doctor"
@@ -174,12 +177,27 @@ def test_prompt_install_flags_uses_arrows_and_space_to_select(monkeypatch):
     assert cli.prompt_install_flags() == {"--rebuild", "--beta"}
 
 
+def test_prompt_edit_world_flags_uses_arrows_and_space_to_select(monkeypatch):
+    keys = iter([" ", "\x1b[B", " ", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+
+    assert cli.prompt_edit_world_flags() == {"--beta", "--gamemode"}
+
+
+def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
+    keys = iter(["\x1b[B", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+
+    assert cli.prompt_gamemode() == "creative"
+
+
 def test_mode_menu_lines_show_primary_choices():
     lines = cli._mode_menu_lines(0)
 
     assert "Choose what to do" in lines[0]
     assert "Install Packs" in lines[2]
-    assert "Audit World And Installed Packs" in lines[3]
+    assert "Edit World" in lines[3]
+    assert "Audit World" in lines[4]
 
 
 def test_install_menu_lines_show_selection_count():
@@ -189,6 +207,15 @@ def test_install_menu_lines_show_selection_count():
     assert "Install Packs (1 extra option(s))" in lines[1]
     assert "Select any extra steps before continuing" in lines[2]
     assert "Rebuild World Pack JSONs" in lines[4]
+
+
+def test_edit_world_menu_lines_show_selection_count():
+    lines = cli._edit_world_menu_lines({"--beta"}, 0)
+
+    assert lines[0] == ""
+    assert "World Edits (1 change(s))" in lines[1]
+    assert "Select one or more world edits" in lines[2]
+    assert "Enable Beta APIs" in lines[4]
 
 
 def test_prompt_mode_quits_on_q(monkeypatch):
@@ -206,6 +233,16 @@ def test_prompt_install_flags_quits_on_ctrl_c(monkeypatch):
 
     try:
         cli.prompt_install_flags()
+        assert False, "expected MenuExit"
+    except cli.MenuExit:
+        pass
+
+
+def test_prompt_edit_world_flags_quits_on_q(monkeypatch):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "q")
+
+    try:
+        cli.prompt_edit_world_flags()
         assert False, "expected MenuExit"
     except cli.MenuExit:
         pass
