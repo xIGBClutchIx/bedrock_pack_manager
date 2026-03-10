@@ -316,6 +316,10 @@ def test_do_doctor_reports_clean_state(tmp_path, capsys):
     do_doctor(world_dir, paths, state)
 
     output = capsys.readouterr().out
+    assert "[BP]" in output
+    assert "BP One (v1.0.0)" in output
+    assert "[RP]" in output
+    assert "RP One (v1.0.0)" in output
     assert "Audit clean." in output
     assert not state.warnings
     assert any(action.kind == "doctor_summary" for action in state.actions)

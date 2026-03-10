@@ -160,7 +160,7 @@ World selection can also be driven directly from the CLI:
 - Detects whether a pack is a behavior pack or resource pack from `manifest.json`
 - Copies packs into `run/behavior_packs/` or `run/resource_packs/`
 - Registers packs in the selected world's JSON files
-- Audits installed packs and world registrations without modifying files
+- Audits installed packs and world registrations without modifying files, listing detected packs in the terminal
 - Warns about missing dependencies, invalid files, and old manifest versions
 - Moves processed input from `run/install/` to `run/installed/`
 - Writes a plain-text execution log to `run/logs/latest.txt` and keeps the 5 most recent timestamped logs

@@ -26,6 +26,11 @@ def _format_version(version: list) -> str:
     return ".".join(str(value) for value in version)
 
 
+def _print_pack_summary(pack_type: str, name: str, version: list) -> None:
+    color = C.GREEN if pack_type == "bp" else C.CYAN
+    print(f"  {color}[{pack_type.upper()}]{C.RESET} {name} (v{_format_version(version)})")
+
+
 def _load_registered_ids(world_json: Path) -> set[str]:
     if not world_json.exists():
         return set()
@@ -180,6 +185,11 @@ def do_doctor(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
     resource_packs = _scan_installed_packs(paths.resource_packs_dir, "Resource Pack", state)
     all_packs = behavior_packs + resource_packs
 
+    for pack in behavior_packs:
+        _print_pack_summary("bp", pack["name"], pack["version"])
+    for pack in resource_packs:
+        _print_pack_summary("rp", pack["name"], pack["version"])
+
     state.installed_packs = [
         {
             "uuid": pack["uuid"],
@@ -264,7 +274,7 @@ def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
                 continue
             bp_entries.append({"pack_id": uuid, "version": version})
             bp_count += 1
-            print(f"  {C.GREEN}[BP]{C.RESET} {name} (v{'.'.join(str(v) for v in version)})")
+            _print_pack_summary("bp", name, version)
 
     if paths.resource_packs_dir.exists():
         for subfolder in sorted(paths.resource_packs_dir.iterdir()):
@@ -283,7 +293,7 @@ def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
                 continue
             rp_entries.append({"pack_id": uuid, "version": version})
             rp_count += 1
-            print(f"  {C.CYAN}[RP]{C.RESET} {name} (v{'.'.join(str(v) for v in version)})")
+            _print_pack_summary("rp", name, version)
 
     save_world_json(world_dir / "world_behavior_packs.json", bp_entries)
     save_world_json(world_dir / "world_resource_packs.json", rp_entries)
