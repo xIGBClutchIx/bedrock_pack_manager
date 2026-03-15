@@ -8,10 +8,12 @@ class ProjectPaths:
     run_dir: Path
     logs_dir: Path
     install_dir: Path
+    uninstall_dir: Path
     behavior_packs_dir: Path
     resource_packs_dir: Path
     worlds_dir: Path
     installed_dir: Path
+    uninstalled_dir: Path
 
 
 def build_paths(base_dir: Path) -> ProjectPaths:
@@ -21,8 +23,10 @@ def build_paths(base_dir: Path) -> ProjectPaths:
         run_dir=run_dir,
         logs_dir=run_dir / "logs",
         install_dir=run_dir / "install",
+        uninstall_dir=run_dir / "uninstall",
         behavior_packs_dir=run_dir / "behavior_packs",
         resource_packs_dir=run_dir / "resource_packs",
         worlds_dir=run_dir / "worlds",
         installed_dir=run_dir / "installed",
+        uninstalled_dir=run_dir / "uninstalled",
     )

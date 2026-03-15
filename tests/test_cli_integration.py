@@ -98,6 +98,28 @@ def test_main_prints_error_for_conflicting_world_flags(tmp_path, monkeypatch, ca
     assert "either --world-name or --world-path" in capsys.readouterr().out
 
 
+def test_main_prints_clear_error_for_corrupt_world_pack_json(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    (selected_world / "world_behavior_packs.json").write_text('[{"pack_id":"bp","version":[1,0,0]},\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
+    )
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall"])
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert "Corrupt world pack JSON" in output
+    assert str(selected_world / "world_behavior_packs.json") in output
+
+
 def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
@@ -208,6 +230,7 @@ def test_main_uses_interactive_uninstall_menu_and_applies_selection(tmp_path, mo
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "remove")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
     monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
@@ -228,6 +251,35 @@ def test_main_uses_interactive_uninstall_menu_and_applies_selection(tmp_path, mo
     assert calls[1] == ("pause", None)
 
 
+def test_main_uses_interactive_uninstall_json_only_mode(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    candidates = [{"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"}]
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "keep-files")
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+
+    cli.main()
+
+    assert calls[0][0] == {"--uninstall", "--uninstall-keep-files", "--uninstall-pack=bp:bp-uuid:1.0.0"}
+    assert calls[0][1] == selected_world
+    assert calls[1] == ("pause", None)
+
+
 def test_main_rejects_empty_uninstall_selection(tmp_path, monkeypatch, capsys):
     paths = build_paths(tmp_path)
     selected_world = paths.worlds_dir / "ExampleWorld"
@@ -236,6 +288,7 @@ def test_main_rejects_empty_uninstall_selection(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "remove")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
     monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: set())
@@ -275,6 +328,33 @@ def test_main_reports_when_world_has_no_packs_to_uninstall(tmp_path, monkeypatch
 
     assert "No behavior or resource packs are registered in this world." in capsys.readouterr().out
     assert pause_calls == ["pause"]
+
+
+def test_main_skips_uninstall_picker_when_queue_folder_has_entries(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    paths.uninstall_dir.mkdir(parents=True)
+    (paths.uninstall_dir / "Queued Pack").mkdir()
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(
+        cli,
+        "prompt_uninstall_flags",
+        lambda _candidates: (_ for _ in ()).throw(AssertionError("prompt should not execute when uninstall queue is populated")),
+    )
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall", "--uninstall-keep-files"])
+
+    cli.main()
+
+    assert calls == [({"--uninstall", "--uninstall-keep-files"}, selected_world, "replace")]
 
 
 def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, capsys):

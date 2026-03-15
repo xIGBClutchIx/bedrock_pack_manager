@@ -260,6 +260,24 @@ def test_do_uninstall_keeps_shared_pack_files_when_another_world_uses_them(tmp_p
     assert any(action.kind == "keep_shared_pack_files" for action in state.actions)
 
 
+def test_do_uninstall_keeps_disk_files_when_requested(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    installed_path = paths.behavior_packs_dir / "Behavior Pack-BP"
+    write_manifest(installed_path, uuid="bp-uuid", version=PACK_VERSION, name="Behavior Pack")
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
+    write_world_json(world_dir / "world_resource_packs.json", [])
+
+    state = AppState()
+    do_uninstall(world_dir, paths, {"--uninstall-pack=bp:bp-uuid:1.0.0"}, state, keep_files=True)
+
+    assert json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8")) == []
+    assert installed_path.exists()
+    assert any(action.kind == "keep_uninstall_pack_files" for action in state.actions)
+    assert any(action.kind == "uninstall_pack" and action.details["keep_files"] is True for action in state.actions)
+
+
 def test_do_uninstall_removes_stale_registration_when_disk_files_are_missing(tmp_path):
     paths = build_paths(tmp_path)
     world_dir = paths.worlds_dir / "ExampleWorld"
@@ -272,6 +290,26 @@ def test_do_uninstall_removes_stale_registration_when_disk_files_are_missing(tmp
 
     assert json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8")) == []
     assert any(action.kind == "uninstall_missing_pack_files" for action in state.actions)
+
+
+def test_do_uninstall_uses_uninstall_queue_and_keeps_files(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    installed_path = paths.resource_packs_dir / "Queued Pack-RP"
+    queued_path = paths.uninstall_dir / "Queued Pack-RP"
+    write_manifest(installed_path, uuid="rp-uuid", version=PACK_VERSION, name="Queued Pack", module_type="resources")
+    write_manifest(queued_path, uuid="rp-uuid", version=PACK_VERSION, name="Queued Pack", module_type="resources")
+    write_world_json(world_dir / "world_behavior_packs.json", [])
+    write_world_json(world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
+
+    state = AppState()
+    do_uninstall(world_dir, paths, set(), state, keep_files=True)
+
+    assert json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8")) == []
+    assert installed_path.exists()
+    assert not queued_path.exists()
+    assert (paths.uninstalled_dir / "Queued Pack-RP").exists()
 
 
 def test_do_zip_warns_for_missing_run_folders(tmp_path):
@@ -290,7 +328,7 @@ def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
     calls = []
 
     monkeypatch.setattr(commands, "do_doctor", lambda *_args: calls.append("doctor"))
-    monkeypatch.setattr(commands, "do_uninstall", lambda *_args: calls.append("uninstall"))
+    monkeypatch.setattr(commands, "do_uninstall", lambda *_args, **_kwargs: calls.append("uninstall"))
     monkeypatch.setattr(commands, "do_rebuild", lambda *_args: calls.append("rebuild"))
     monkeypatch.setattr(commands, "do_beta", lambda *_args: calls.append("beta"))
     monkeypatch.setattr(commands, "do_set_gamemode", lambda *_args: calls.append("gamemode"))

@@ -15,6 +15,7 @@ def test_parse_args_defaults_to_no_flags():
     assert args.gamemode is None
     assert args.doctor is False
     assert args.uninstall is False
+    assert args.uninstall_keep_files is False
     assert args.duplicate_mode == "replace"
     assert args.world_name is None
     assert args.world_path is None
@@ -32,6 +33,7 @@ def test_parse_args_accepts_combined_flags():
             "world.zip",
             "--doctor",
             "--uninstall",
+            "--uninstall-keep-files",
             "--duplicate-mode",
             "keep-both",
             "--world-name",
@@ -46,6 +48,7 @@ def test_parse_args_accepts_combined_flags():
     assert args.zip_name == "world.zip"
     assert args.doctor is True
     assert args.uninstall is True
+    assert args.uninstall_keep_files is True
     assert args.duplicate_mode == "keep-both"
     assert args.world_name == "ExampleWorld"
 
@@ -72,29 +75,56 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
 
 
 def test_flags_from_args_converts_namespace_to_flag_set():
-    args = parse_args(["--rebuild", "--zip-name", "world.zip", "--uninstall", "--gamemode", "adventure"])
+    args = parse_args(["--rebuild", "--zip-name", "world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode", "adventure"])
 
-    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--zip-name=world.zip", "--uninstall", "--gamemode=adventure"}
+    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--zip-name=world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode=adventure"}
 
 
 def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
-    args = parse_args(["--beta", "--gamemode", "creative", "--zip-name", "world.zip", "--uninstall", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"])
+    args = parse_args(
+        [
+            "--beta",
+            "--gamemode",
+            "creative",
+            "--zip-name",
+            "world.zip",
+            "--uninstall",
+            "--uninstall-keep-files",
+            "--duplicate-mode",
+            "keep-both",
+            "--world-path",
+            "ExampleWorld",
+        ]
+    )
     logs_dir = tmp_path / "logs"
 
     with capture_run_logs(logs_dir):
         cli.log_launch_context(
-            ["--beta", "--gamemode", "creative", "--zip-name", "world.zip", "--uninstall", "--duplicate-mode", "keep-both", "--world-path", "ExampleWorld"],
+            [
+                "--beta",
+                "--gamemode",
+                "creative",
+                "--zip-name",
+                "world.zip",
+                "--uninstall",
+                "--uninstall-keep-files",
+                "--duplicate-mode",
+                "keep-both",
+                "--world-path",
+                "ExampleWorld",
+            ],
             args,
         )
 
     assert capsys.readouterr().out == ""
     log_text = (logs_dir / "latest.txt").read_text(encoding="utf-8")
-    assert "Launch args: --beta --gamemode creative --zip-name world.zip --uninstall --duplicate-mode keep-both --world-path ExampleWorld" in log_text
+    assert "Launch args: --beta --gamemode creative --zip-name world.zip --uninstall --uninstall-keep-files --duplicate-mode keep-both --world-path ExampleWorld" in log_text
     assert "rebuild: False (default)" in log_text
     assert "beta: True (arg)" in log_text
     assert "gamemode: creative (arg)" in log_text
     assert "zip_name: world.zip (arg)" in log_text
     assert "uninstall: True (arg)" in log_text
+    assert "uninstall_keep_files: True (arg)" in log_text
     assert "duplicate_mode: keep-both (arg)" in log_text
     assert "world_name: (none) (default)" in log_text
     assert "world_path: ExampleWorld (arg)" in log_text
@@ -235,6 +265,19 @@ def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
     assert cli.prompt_gamemode() == "creative"
 
 
+def test_prompt_uninstall_mode_returns_remove_by_default(monkeypatch):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    assert cli.prompt_uninstall_mode() == "remove"
+
+
+def test_prompt_uninstall_mode_uses_arrows_and_enter(monkeypatch):
+    keys = iter(["\x1b[B", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+
+    assert cli.prompt_uninstall_mode() == "keep-files"
+
+
 def test_prompt_uninstall_flags_uses_arrows_and_space_to_select(monkeypatch):
     candidates = [
         {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
@@ -291,6 +334,16 @@ def test_uninstall_menu_lines_show_selection_count():
     assert "behavior_packs/BP One-BP" in lines[5]
 
 
+def test_uninstall_mode_menu_lines_show_choices():
+    lines = cli._uninstall_mode_menu_lines(0)
+
+    assert lines[0] == ""
+    assert "Uninstall Mode" in lines[1]
+    assert "delete pack folders" in lines[2]
+    assert "Remove From World And Delete Unused Files" in lines[4]
+    assert "Remove From World JSON Only" in lines[5]
+
+
 def test_prompt_mode_quits_on_q(monkeypatch):
     monkeypatch.setattr(cli, "read_keypress", lambda: "q")
 
@@ -320,6 +373,16 @@ def test_prompt_uninstall_flags_quits_on_q(monkeypatch):
 
     try:
         cli.prompt_uninstall_flags(candidates)
+        assert False, "expected MenuExit"
+    except cli.MenuExit:
+        pass
+
+
+def test_prompt_uninstall_mode_quits_on_q(monkeypatch):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "q")
+
+    try:
+        cli.prompt_uninstall_mode()
         assert False, "expected MenuExit"
     except cli.MenuExit:
         pass

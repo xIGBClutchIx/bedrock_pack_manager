@@ -92,6 +92,7 @@ PyInstaller does not reliably cross-build Windows executables from Linux, so use
 python bedrock_pack_installer.py --help
 python bedrock_pack_installer.py
 python bedrock_pack_installer.py --uninstall
+python bedrock_pack_installer.py --uninstall --uninstall-keep-files
 python bedrock_pack_installer.py --rebuild
 python bedrock_pack_installer.py --zip
 python bedrock_pack_installer.py --zip-name world.zip
@@ -114,6 +115,7 @@ When launched without flags in an interactive terminal, the app shows a keyboard
 - leave the zip name blank to skip zipping
 - enter a name like `world.zip` to run zip mode with that filename
 - if you choose uninstall packs, a second menu lets you toggle one or more registered behavior/resource packs to remove from that world
+- uninstall mode now asks whether to delete unused pack folders or keep files and edit world JSON only
 - if you choose edit world, a second menu lets you toggle one or more world edits, then submit them together
 - if `Set Gamemode` is selected, a final menu asks which gamemode to write to `level.dat`
 - use `Up` and `Down` to move
@@ -142,7 +144,10 @@ Uninstall mode can also be driven directly from the CLI:
 
 - `--uninstall` opens a pack picker for the selected world
 - uninstall always removes the pack from the selected world's JSON
+- `--uninstall-keep-files` removes the JSON registration but leaves installed pack folders on disk
 - installed pack folders are only deleted when no other world still references that same pack version
+- if `run/uninstall/` contains pack files or folders, uninstall mode uses those manifests as the removal list instead of opening the picker
+- processed uninstall inputs are moved to `run/uninstalled/`
 
 `--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--uninstall`, `--rebuild`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
 
@@ -169,6 +174,8 @@ World selection can also be driven directly from the CLI:
 
 - `run/install/`: drop `.mcaddon`, `.mcpack`, `.zip`, or extracted pack folders here
 - `run/installed/`: processed files and folders are moved here
+- `run/uninstall/`: drop `.mcaddon`, `.mcpack`, `.zip`, or extracted pack folders here to remove matching packs from a world
+- `run/uninstalled/`: processed uninstall files and folders are moved here
 - `run/behavior_packs/`: installed behavior packs
 - `run/resource_packs/`: installed resource packs
 - `run/worlds/`: world folders containing `level.dat` and pack JSON files

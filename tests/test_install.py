@@ -414,6 +414,28 @@ def test_process_pack_collects_format_and_beta_warnings(tmp_path):
     assert len(state.warnings) == 2
 
 
+def test_process_pack_skips_beta_warning_when_world_is_already_enabled(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "World"
+    world_dir.mkdir(parents=True)
+    pack_dir = tmp_path / "warn_pack"
+    pack_dir.mkdir()
+    manifest = {
+        "format_version": 2,
+        "header": {"name": "Warn Pack", "uuid": PACK_UUID, "version": PACK_VERSION},
+        "modules": [{"type": "data", "uuid": "22222222-2222-2222-2222-222222222222", "version": PACK_VERSION}],
+        "dependencies": [{"uuid": "dep", "version": "beta"}],
+    }
+    (pack_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(pack_dir, stats, world_dir, paths, state, beta_enabled=True)
+
+    assert stats["installed"] == 1
+    assert state.warnings == []
+
+
 def test_check_dependencies_reports_missing_dependency_only(tmp_path):
     paths = build_paths(tmp_path)
     world_dir = paths.worlds_dir / "ExampleWorld"

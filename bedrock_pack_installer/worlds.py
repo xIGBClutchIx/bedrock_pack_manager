@@ -9,8 +9,16 @@ from .terminal import read_keypress
 def load_world_json(path: Path) -> list:
     if not path.exists():
         return []
-    with open(path, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Corrupt world pack JSON: {path} "
+            f"(line {exc.lineno}, column {exc.colno}, char {exc.pos})"
+        ) from exc
+    except OSError as exc:
+        raise ValueError(f"Can't read world pack JSON: {path} ({exc})") from exc
 
 
 def save_world_json(path: Path, data: list) -> None:

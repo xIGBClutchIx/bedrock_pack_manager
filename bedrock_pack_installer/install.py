@@ -7,6 +7,7 @@ from typing import Literal
 from .console import AppState, C, display_path, info, ok, print_warnings, section, warn
 from .constants import ARCHIVE_EXTS
 from .manifests import classify_pack, get_pack_dependencies, get_pack_info, read_manifest
+from .nbt import beta_apis_enabled
 from .paths import ProjectPaths
 from .worlds import (
     load_world_json,
@@ -153,6 +154,22 @@ def _remove_existing_packs(existing_packs: list[dict]) -> None:
         shutil.rmtree(existing_pack["path"])
 
 
+def _world_beta_status(world_dir: Path) -> bool | None:
+    dat_path = world_dir / "level.dat"
+    if not dat_path.exists():
+        return None
+
+    try:
+        import nbtlib  # noqa: F401
+    except ImportError:
+        return None
+
+    try:
+        return beta_apis_enabled(dat_path)
+    except Exception:
+        return None
+
+
 def process_pack(
     pack_folder: Path,
     stats: dict,
@@ -161,6 +178,7 @@ def process_pack(
     state: AppState,
     duplicate_mode: DuplicateMode = "replace",
     source_name: str = "",
+    beta_enabled: bool | None = None,
 ) -> None:
     manifest_path = pack_folder / "manifest.json"
     if not manifest_path.exists():
@@ -195,7 +213,7 @@ def process_pack(
     elif fmt_ver < 2:
         warn(state, f"Pack '{name}' uses format_version {fmt_ver} (old format, may have issues)")
 
-    if any("beta" in str(dep.get("version", "")) for dep in manifest.get("dependencies", [])):
+    if any("beta" in str(dep.get("version", "")).lower() for dep in manifest.get("dependencies", [])) and beta_enabled is not True:
         warn(state, f"Pack '{name}' uses beta API versions - run with --beta to enable experiments")
 
     type_label = "Behavior Pack" if pack_type == "bp" else "Resource Pack"
@@ -352,17 +370,21 @@ def process_pack(
     _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
 
 
-def move_to_installed(entry: Path, paths: ProjectPaths) -> None:
-    paths.installed_dir.mkdir(exist_ok=True)
-    target = paths.installed_dir / entry.name
+def move_to_processed(entry: Path, processed_dir: Path) -> None:
+    processed_dir.mkdir(exist_ok=True)
+    target = processed_dir / entry.name
     counter = 2
     original = target
     while target.exists():
         stem = original.stem if original.is_file() else original.name
         suffix = original.suffix if original.is_file() else ""
-        target = paths.installed_dir / f"{stem}_{counter}{suffix}"
+        target = processed_dir / f"{stem}_{counter}{suffix}"
         counter += 1
     shutil.move(str(entry), str(target))
+
+
+def move_to_installed(entry: Path, paths: ProjectPaths) -> None:
+    move_to_processed(entry, paths.installed_dir)
 
 
 def process_entry(
@@ -372,6 +394,7 @@ def process_entry(
     paths: ProjectPaths,
     state: AppState,
     duplicate_mode: DuplicateMode = "replace",
+    beta_enabled: bool | None = None,
 ) -> None:
     print(f"\n{C.BOLD}>> {entry.name}{C.RESET}")
 
@@ -430,7 +453,7 @@ def process_entry(
                 )
 
         for pack in packs:
-            process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
+            process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name, beta_enabled=beta_enabled)
 
         shutil.rmtree(extracted, ignore_errors=True)
         move_to_installed(entry, paths)
@@ -444,11 +467,11 @@ def process_entry(
             return
 
         if len(packs) == 1 and packs[0] == entry:
-            process_pack(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
+            process_pack(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name, beta_enabled=beta_enabled)
         else:
             info(f"Found {len(packs)} pack(s) inside folder")
             for pack in packs:
-                process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name)
+                process_pack(pack, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, source_name=entry.name, beta_enabled=beta_enabled)
 
         move_to_installed(entry, paths)
 
@@ -515,9 +538,10 @@ def do_install(world_dir: Path, paths: ProjectPaths, state: AppState, duplicate_
 
     print(f"\n  Found {len(entries)} item(s) in install folder")
 
+    beta_enabled = _world_beta_status(world_dir)
     stats = {"installed": 0, "skipped": 0, "errors": 0}
     for entry in entries:
-        process_entry(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode)
+        process_entry(entry, stats, world_dir, paths, state, duplicate_mode=duplicate_mode, beta_enabled=beta_enabled)
 
     for dep_warning in check_dependencies(world_dir, paths, state):
         state.warnings.append(dep_warning)

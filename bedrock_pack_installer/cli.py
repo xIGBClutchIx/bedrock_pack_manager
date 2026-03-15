@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .commands import collect_uninstall_candidates, run
+from .commands import collect_uninstall_candidates, has_uninstall_queue_entries, run
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
 from .nbt import GAMEMODE_VALUES
@@ -25,6 +25,10 @@ GAMEMODE_OPTIONS = [
     ("survival", "Survival"),
     ("creative", "Creative"),
     ("adventure", "Adventure"),
+]
+UNINSTALL_MODE_OPTIONS = [
+    ("remove", "Remove From World And Delete Unused Files"),
+    ("keep-files", "Remove From World JSON Only"),
 ]
 
 class MenuExit(Exception):
@@ -82,6 +86,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Select behavior/resource packs to uninstall from the chosen world.",
     )
     parser.add_argument(
+        "--uninstall-keep-files",
+        action="store_true",
+        help="Remove packs from world JSON only and keep installed pack folders on disk.",
+    )
+    parser.add_argument(
         "--duplicate-mode",
         choices=["skip", "replace", "keep-both"],
         default="replace",
@@ -119,6 +128,7 @@ def flags_from_args(args: argparse.Namespace) -> set[str]:
             (args.beta, "--beta"),
             (args.doctor, "--doctor"),
             (args.uninstall, "--uninstall"),
+            (args.uninstall_keep_files, "--uninstall-keep-files"),
             (bool(args.zip_name), f"--zip-name={args.zip_name}"),
             (bool(args.gamemode), f"--gamemode={args.gamemode}"),
         ]
@@ -146,6 +156,7 @@ def log_launch_context(argv: list[str], args: argparse.Namespace) -> None:
     log_only(f"  zip_name: {args.zip_name or '(none)'} ({zip_name_source})\n")
     log_only(f"  doctor: {args.doctor} ({_arg_source(argv, '--doctor')})\n")
     log_only(f"  uninstall: {args.uninstall} ({_arg_source(argv, '--uninstall')})\n")
+    log_only(f"  uninstall_keep_files: {args.uninstall_keep_files} ({_arg_source(argv, '--uninstall-keep-files')})\n")
     duplicate_mode_source = "arg" if "--duplicate-mode" in argv else "default"
     log_only(f"  duplicate_mode: {args.duplicate_mode} ({duplicate_mode_source})\n")
     world_name_source = "arg" if "--world-name" in argv else "default"
@@ -241,6 +252,15 @@ def _uninstall_menu_lines(candidates: list[dict], selected: set[str], cursor: in
         lines.append(f"  {pointer} {mark} {label_text}")
         lines.append(f"    {dim_text(candidate['details'])}")
     return lines
+
+
+def _uninstall_mode_menu_lines(cursor: int) -> list[str]:
+    return _single_select_menu_lines(
+        UNINSTALL_MODE_OPTIONS,
+        cursor,
+        "Uninstall Mode",
+        "Choose whether uninstall should also delete pack folders when possible",
+    )
 
 
 def _single_select_menu_lines(options: list[tuple[str, str]], cursor: int, title: str, subtitle: str) -> list[str]:
@@ -357,6 +377,35 @@ def prompt_gamemode() -> str:
             continue
 
 
+def prompt_uninstall_mode() -> str:
+    cursor = 0
+    menu = TerminalListMenu(
+        [
+            *app_header_lines(),
+            "",
+            f"  {title_text('Uninstall Mode')}",
+            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
+        ],
+        lambda: _uninstall_mode_menu_lines(cursor),
+    )
+    menu.render_initial()
+
+    while True:
+        key = read_keypress()
+        if key in {"\r", "\n"}:
+            return UNINSTALL_MODE_OPTIONS[cursor][0]
+        if key in {"q", "Q", "\x03"}:
+            raise MenuExit()
+        if key == "\x1b[A":
+            cursor = _move_cursor(cursor, len(UNINSTALL_MODE_OPTIONS), "up")
+            menu.redraw()
+            continue
+        if key == "\x1b[B":
+            cursor = _move_cursor(cursor, len(UNINSTALL_MODE_OPTIONS), "down")
+            menu.redraw()
+            continue
+
+
 def _prompt_uninstall_flags_interactive(candidates: list[dict]) -> set[str]:
     selected: set[str] = set()
     cursor = 0
@@ -460,6 +509,8 @@ def main() -> None:
                     flags = {"--rebuild"}
                 elif mode == "uninstall":
                     flags = {"--uninstall"}
+                    if prompt_uninstall_mode() == "keep-files":
+                        flags.add("--uninstall-keep-files")
                 elif mode == "edit":
                     flags = prompt_edit_world_flags()
                     if not flags:
@@ -480,7 +531,7 @@ def main() -> None:
                 world_dir, world_selection_source = resolve_world(args, paths)
                 log_only(f"  World source: {world_selection_source}\n")
                 log_only(f"  World: {world_dir}\n")
-                if "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags):
+                if "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags) and not has_uninstall_queue_entries(paths):
                     uninstall_candidates = collect_uninstall_candidates(world_dir, paths)
                     if not uninstall_candidates:
                         raise ValueError("No behavior or resource packs are registered in this world.")
@@ -489,7 +540,7 @@ def main() -> None:
                     if not selected_uninstall_flags:
                         raise ValueError("Select at least one pack to uninstall.")
                     flags.update(selected_uninstall_flags)
-            elif world_dir is not None and "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags):
+            elif world_dir is not None and "--uninstall" in flags and not any(flag.startswith("--uninstall-pack=") for flag in flags) and not has_uninstall_queue_entries(paths):
                 uninstall_candidates = collect_uninstall_candidates(world_dir, paths)
                 if not uninstall_candidates:
                     raise ValueError("No behavior or resource packs are registered in this world.")

@@ -21,6 +21,18 @@ def test_save_and_load_world_json_round_trip(tmp_path):
     assert load_world_json(world_json) == data
 
 
+def test_load_world_json_raises_clear_error_for_invalid_json(tmp_path):
+    world_json = tmp_path / "world_behavior_packs.json"
+    world_json.write_text('[{"pack_id":"abc","version":[1,0,0]},\n', encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_world_json(world_json)
+
+    assert "Corrupt world pack JSON" in str(exc_info.value)
+    assert str(world_json) in str(exc_info.value)
+    assert "line 2, column 1" in str(exc_info.value)
+
+
 def test_register_pack_adds_entry_once(tmp_path):
     world_json = tmp_path / "world_behavior_packs.json"
 

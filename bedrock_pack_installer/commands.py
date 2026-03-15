@@ -5,8 +5,18 @@ from datetime import datetime
 from pathlib import Path
 
 from .console import AppState, C, display_path, error, info, ok, print_warnings, section, warn
-from .install import DuplicateMode, do_install, find_packs_on_disk
-from .manifests import get_pack_dependencies, get_pack_info, read_manifest
+from .constants import ARCHIVE_EXTS
+from .install import (
+    DuplicateMode,
+    UnsafeArchivePathError,
+    do_install,
+    extract_archive,
+    extract_nested_archives,
+    find_all_packs,
+    find_packs_on_disk,
+    move_to_processed,
+)
+from .manifests import classify_pack, get_pack_dependencies, get_pack_info, read_manifest
 from .nbt import GAMEMODE_VALUES, enable_beta_apis, set_world_gamemode
 from .paths import ProjectPaths
 from .worlds import load_world_json, remove_pack, save_world_json
@@ -96,6 +106,157 @@ def collect_uninstall_candidates(world_dir: Path, paths: ProjectPaths) -> list[d
             )
 
     return sorted(candidates, key=lambda candidate: (candidate["type"], candidate["name"].lower(), candidate["version_label"]))
+
+
+def has_uninstall_queue_entries(paths: ProjectPaths) -> bool:
+    if not paths.uninstall_dir.exists():
+        return False
+    return any(
+        not entry.name.startswith(".") and not entry.name.startswith("_extracted_")
+        for entry in paths.uninstall_dir.iterdir()
+    )
+
+
+def _read_uninstall_source_pack(pack_folder: Path, state: AppState) -> dict | None:
+    manifest_path = pack_folder / "manifest.json"
+    if not manifest_path.exists():
+        warn(state, f"Folder '{pack_folder.name}' has no manifest.json - not a valid pack")
+        return None
+
+    manifest = read_manifest(manifest_path)
+    if not manifest:
+        return None
+
+    pack_type = classify_pack(manifest)
+    uuid, _version, name = get_pack_info(manifest)
+    if not pack_type:
+        modules = manifest.get("modules", [])
+        types = [module.get("type", "???") for module in modules]
+        warn(state, f"Cannot determine type for '{name}' (module types: {types}) - skipping")
+        return None
+    if not uuid:
+        warn(state, f"Pack '{name}' has no UUID in manifest - skipping (broken pack?)")
+        return None
+
+    return {
+        "type": pack_type,
+        "type_label": PACK_TYPE_LABELS[pack_type],
+        "uuid": uuid,
+        "name": name,
+    }
+
+
+def _collect_uninstall_source_packs(entry: Path, paths: ProjectPaths, state: AppState) -> list[dict]:
+    print(f"\n{C.BOLD}>> {entry.name}{C.RESET}")
+
+    if entry.is_file() and entry.suffix.lower() not in ARCHIVE_EXTS:
+        warn(
+            state,
+            f"Unknown file type '{entry.suffix}' for '{entry.name}' - "
+            f"only {', '.join(sorted(ARCHIVE_EXTS))} are supported",
+        )
+        return []
+
+    pack_folders: list[Path] = []
+    extracted_dir: Path | None = None
+
+    if entry.is_file() and entry.suffix.lower() in ARCHIVE_EXTS:
+        try:
+            extracted_dir = extract_archive(entry, paths.uninstall_dir)
+        except zipfile.BadZipFile:
+            warn(state, f"'{entry.name}' is not a valid zip archive - file may be corrupt")
+            return []
+        except UnsafeArchivePathError as exc:
+            warn(state, f"'{entry.name}' contains unsafe archive paths - skipping it ({exc})")
+            return []
+        except Exception as exc:
+            warn(state, f"Failed to extract '{entry.name}': {exc}")
+            return []
+
+        extract_nested_archives(extracted_dir, state)
+        pack_folders = find_all_packs(extracted_dir)
+        if not pack_folders:
+            warn(
+                state,
+                f"No manifest.json found anywhere inside '{entry.name}' - "
+                f"archive may not be a valid Minecraft pack",
+            )
+            shutil.rmtree(extracted_dir, ignore_errors=True)
+            return []
+
+        info(f"Found {len(pack_folders)} pack(s) inside", state=state, action="inspect_uninstall_source", source=str(entry))
+    elif entry.is_dir() and not entry.name.startswith("_extracted_"):
+        pack_folders = find_all_packs(entry)
+        if not pack_folders:
+            warn(state, f"Folder '{entry.name}' contains no manifest.json - not a valid pack or addon")
+            return []
+        if len(pack_folders) > 1 or pack_folders[0] != entry:
+            info(f"Found {len(pack_folders)} pack(s) inside folder", state=state, action="inspect_uninstall_source", source=str(entry))
+
+    source_packs = []
+    for pack_folder in pack_folders:
+        source_pack = _read_uninstall_source_pack(pack_folder, state)
+        if source_pack is not None:
+            source_packs.append(source_pack)
+
+    if extracted_dir is not None:
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+
+    if source_packs:
+        move_to_processed(entry, paths.uninstalled_dir)
+    return source_packs
+
+
+def _collect_uninstall_queue_candidates(world_dir: Path, paths: ProjectPaths, state: AppState) -> list[dict]:
+    if not paths.uninstall_dir.exists():
+        return []
+
+    queued_entries = sorted(
+        entry
+        for entry in paths.uninstall_dir.iterdir()
+        if not entry.name.startswith(".") and not entry.name.startswith("_extracted_")
+    )
+    if not queued_entries:
+        return []
+
+    registered_candidates = collect_uninstall_candidates(world_dir, paths)
+    candidate_by_key = {
+        (candidate["type"], candidate["uuid"]): candidate
+        for candidate in registered_candidates
+    }
+    selected_candidates: dict[str, dict] = {}
+
+    section("Resolve Uninstall Queue", state=state, action="uninstall_queue")
+
+    for entry in queued_entries:
+        for source_pack in _collect_uninstall_source_packs(entry, paths, state):
+            candidate = candidate_by_key.get((source_pack["type"], source_pack["uuid"]))
+            if candidate is None:
+                info(
+                    f"{source_pack['type_label']} '{source_pack['name']}' is not registered in {world_dir.name} - skipping",
+                    state=state,
+                    action="skip_uninstall_queue_pack",
+                    source=str(entry),
+                    uuid=source_pack["uuid"],
+                    pack_type=source_pack["type"],
+                )
+                continue
+
+            if candidate["flag"] in selected_candidates:
+                continue
+
+            info(
+                f"Queued {candidate['type_label']} '{candidate['name']}' from {entry.name}",
+                state=state,
+                action="queue_uninstall_pack",
+                source=str(entry),
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+            )
+            selected_candidates[candidate["flag"]] = candidate
+
+    return [selected_candidates[flag] for flag in sorted(selected_candidates)]
 
 
 def _other_world_references(paths: ProjectPaths, world_dir: Path, pack_type: str, uuid: str, version: list) -> list[str]:
@@ -359,19 +520,24 @@ def do_zip(paths: ProjectPaths, state: AppState, zip_name: str | None = None) ->
     )
 
 
-def do_uninstall(world_dir: Path, paths: ProjectPaths, selected_flags: set[str], state: AppState) -> None:
-    candidates = {candidate["flag"]: candidate for candidate in collect_uninstall_candidates(world_dir, paths)}
-    unknown_flags = sorted(flag for flag in selected_flags if flag not in candidates)
-    if unknown_flags:
-        raise ValueError(f"Unknown uninstall selection(s): {', '.join(unknown_flags)}")
+def do_uninstall(world_dir: Path, paths: ProjectPaths, selected_flags: set[str], state: AppState, keep_files: bool = False) -> None:
+    if selected_flags:
+        candidates = {candidate["flag"]: candidate for candidate in collect_uninstall_candidates(world_dir, paths)}
+        unknown_flags = sorted(flag for flag in selected_flags if flag not in candidates)
+        if unknown_flags:
+            raise ValueError(f"Unknown uninstall selection(s): {', '.join(unknown_flags)}")
+        chosen_candidates = [candidates[flag] for flag in sorted(selected_flags)]
+    else:
+        chosen_candidates = _collect_uninstall_queue_candidates(world_dir, paths, state)
+        if not chosen_candidates:
+            raise ValueError("No packs from run/uninstall matched this world's registered packs.")
 
-    section("Uninstall Packs", state=state, action="uninstall")
+    section("Uninstall Packs", state=state, action="uninstall", keep_files=keep_files)
 
     removed_from_world = 0
     deleted_folders = 0
 
-    for flag in sorted(selected_flags):
-        candidate = candidates[flag]
+    for candidate in chosen_candidates:
         print(f"\n    {C.BOLD}[{candidate['type_label']}]{C.RESET} {candidate['name']} (v{candidate['version_label']})")
         print(f"    UUID: {C.DIM}{candidate['uuid']}{C.RESET}")
 
@@ -434,6 +600,31 @@ def do_uninstall(world_dir: Path, paths: ProjectPaths, selected_flags: set[str],
                 pack_type=candidate["type"],
                 removed_paths=[],
                 referenced_by=[],
+                keep_files=False,
+            )
+            continue
+
+        if keep_files:
+            installed_paths = [str(installed_path) for installed_path in candidate["installed_paths"]]
+            info(
+                "Kept installed pack files on disk",
+                state=state,
+                action="keep_uninstall_pack_files",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+                installed_paths=installed_paths,
+            )
+            state.record(
+                "uninstall_pack",
+                "Removed pack from world JSON and kept disk files",
+                uuid=candidate["uuid"],
+                version=candidate["version"],
+                pack_type=candidate["type"],
+                removed_paths=[],
+                kept_paths=installed_paths,
+                referenced_by=[],
+                keep_files=True,
             )
             continue
 
@@ -460,10 +651,14 @@ def do_uninstall(world_dir: Path, paths: ProjectPaths, selected_flags: set[str],
             pack_type=candidate["type"],
             removed_paths=removed_paths,
             referenced_by=[],
+            keep_files=False,
         )
 
     print(f"\n  {C.GREEN}Done!{C.RESET} Removed {C.CYAN}{removed_from_world}{C.RESET} pack(s) from '{C.CYAN}{world_dir.name}{C.RESET}'")
-    print(f"  Deleted {C.CYAN}{deleted_folders}{C.RESET} installed folder(s)")
+    if keep_files:
+        print("  Kept installed pack folders on disk")
+    else:
+        print(f"  Deleted {C.CYAN}{deleted_folders}{C.RESET} installed folder(s)")
 
 
 def do_beta(world_dir: Path, state: AppState | None = None) -> None:
@@ -539,6 +734,10 @@ def _selected_uninstall_flags(flags: set[str]) -> set[str]:
     return {flag for flag in flags if flag.startswith("--uninstall-pack=")}
 
 
+def _keep_uninstall_files(flags: set[str]) -> bool:
+    return "--uninstall-keep-files" in flags
+
+
 def _selected_zip_name(flags: set[str]) -> str | None:
     for flag in flags:
         if flag.startswith("--zip-name="):
@@ -555,7 +754,7 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
         do_doctor(world_dir, paths, state)
 
     if "--uninstall" in flags:
-        do_uninstall(world_dir, paths, _selected_uninstall_flags(flags), state)
+        do_uninstall(world_dir, paths, _selected_uninstall_flags(flags), state, keep_files=_keep_uninstall_files(flags))
 
     if "--rebuild" in flags:
         do_rebuild(world_dir, paths, state)

@@ -39,13 +39,14 @@ def _backup_level_dat(dat_path: Path) -> None:
 def enable_beta_apis(dat_path: Path) -> bool:
     nbtlib, version, nbt_file = _read_level_dat(dat_path)
 
+    if beta_apis_enabled(dat_path):
+        return False
+
+    _, version, nbt_file = _read_level_dat(dat_path)
     if "experiments" not in nbt_file:
         nbt_file["experiments"] = nbtlib.Compound()
 
     experiments = nbt_file["experiments"]
-    current_beta = experiments.get("gametest", nbtlib.Byte(0))
-    if int(current_beta) == 1:
-        return False
 
     _backup_level_dat(dat_path)
 
@@ -56,6 +57,13 @@ def enable_beta_apis(dat_path: Path) -> bool:
 
     _write_level_dat(dat_path, version, nbt_file)
     return True
+
+
+def beta_apis_enabled(dat_path: Path) -> bool:
+    nbtlib, _version, nbt_file = _read_level_dat(dat_path)
+    experiments = nbt_file.get("experiments", nbtlib.Compound())
+    current_beta = experiments.get("gametest", nbtlib.Byte(0))
+    return int(current_beta) == 1
 
 
 def set_world_gamemode(dat_path: Path, gamemode: str) -> bool:
