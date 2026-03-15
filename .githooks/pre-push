@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,12 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    result = subprocess.run([str(python), "-m", "pytest"], cwd=root_dir)
+    tmp_dir = root_dir / ".tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env["TMPDIR"] = str(tmp_dir)
+
+    result = subprocess.run([str(python), "-m", "pytest"], cwd=root_dir, env=env)
     return result.returncode
 
 
