@@ -130,6 +130,7 @@ python bedrock_pack_manager.py
 python bedrock_pack_manager.py --uninstall
 python bedrock_pack_manager.py --uninstall --uninstall-keep-files
 python bedrock_pack_manager.py --rebuild
+python bedrock_pack_manager.py --cleanup-pack-folders
 python bedrock_pack_manager.py --zip
 python bedrock_pack_manager.py --zip-name world.zip
 python bedrock_pack_manager.py --beta
@@ -145,7 +146,7 @@ python bedrock_pack_manager.py --rebuild --beta --zip
 
 When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
 
-- first choose `Install Packs`, `Edit World`, `Uninstall Packs`, `Audit World`, or `Rebuild World`
+- first choose `Install Packs`, `Edit World`, `Uninstall Packs`, `Audit World`, `Rebuild JSONs`, or `Cleanup Pack Folders`
 - if you choose install, it asks for a zip output name
 - leave the zip name blank to skip zipping
 - enter a name like `world.zip` to run zip mode with that filename
@@ -185,7 +186,14 @@ Uninstall mode can also be driven directly from the CLI:
 - if `run/uninstall/` contains pack files or folders, uninstall mode uses those manifests as the removal list instead of opening the picker
 - processed uninstall inputs are moved to `run/uninstalled/`
 
-`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--uninstall`, `--rebuild`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
+Cleanup mode can also be driven directly from the CLI:
+
+- `--cleanup-pack-folders` scans installed pack folders in `run/behavior_packs/` and `run/resource_packs/`
+- each folder's `manifest.json` UUID and version is compared against the selected world's JSON registrations
+- folders not registered in that world are deleted
+- folders are kept when another world still references that same pack version
+
+`--duplicate-mode` applies to install mode only. It does not affect `--doctor`, `--uninstall`, `--rebuild`, `--cleanup-pack-folders`, `--beta`, `--gamemode`, or `--zip` when those are run on their own.
 
 World selection can also be driven directly from the CLI:
 
@@ -201,6 +209,8 @@ World selection can also be driven directly from the CLI:
 - Detects whether a pack is a behavior pack or resource pack from `manifest.json`
 - Copies packs into `run/behavior_packs/` or `run/resource_packs/`
 - Registers packs in the selected world's JSON files
+- Rebuilds world pack JSON files from installed pack folders on demand
+- Cleans up installed pack folders that are no longer registered to the selected world
 - Audits installed packs and world registrations without modifying files, listing detected packs in the terminal
 - Warns about missing dependencies, invalid files, and old manifest versions
 - Moves processed input from `run/install/` to `run/installed/`
@@ -221,7 +231,7 @@ World selection can also be driven directly from the CLI:
 
 - `bedrock_pack_manager.py`: thin CLI entrypoint
 - `bedrock_pack_manager/cli.py`: startup and argument handling
-- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, world edit, and audit command handlers
+- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, cleanup, zip, world edit, and audit command handlers
 - `bedrock_pack_manager/install.py`: install workflow and dependency checks
 - `bedrock_pack_manager/worlds.py`: world selection and world JSON helpers
 - `bedrock_pack_manager/manifests.py`: manifest parsing and pack classification

@@ -17,7 +17,8 @@ MODE_OPTIONS = [
     ("edit", "Edit World"),
     ("uninstall", "Uninstall Packs"),
     ("--doctor", "Audit World"),
-    ("--rebuild", "Rebuild World"),
+    ("--rebuild", "Rebuild JSONs"),
+    ("--cleanup-pack-folders", "Cleanup Pack Folders"),
 ]
 EDIT_WORLD_OPTIONS = [
     ("--beta", "Enable Beta APIs"),
@@ -50,13 +51,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="bedrock_pack_manager.py",
         description=(
             "Install Minecraft Bedrock packs from run/install/, rebuild world pack JSONs, "
-            "zip runtime data, uninstall world packs, and edit a selected world's level.dat."
+            "clean up unregistered installed pack folders, zip runtime data, uninstall world packs, "
+            "and edit a selected world's level.dat."
         ),
     )
     parser.add_argument(
         "--rebuild",
         action="store_true",
         help="Rebuild world_behavior_packs.json and world_resource_packs.json from installed pack folders.",
+    )
+    parser.add_argument(
+        "--cleanup-pack-folders",
+        action="store_true",
+        help="Delete installed pack folders whose manifest UUID/version is not registered in the selected world's JSON files.",
     )
     parser.add_argument(
         "--zip",
@@ -126,6 +133,7 @@ def flags_from_args(args: argparse.Namespace) -> set[str]:
         flag
         for enabled, flag in [
             (args.rebuild, "--rebuild"),
+            (args.cleanup_pack_folders, "--cleanup-pack-folders"),
             (args.zip or bool(args.zip_name), "--zip"),
             (args.beta, "--beta"),
             (args.doctor, "--doctor"),
@@ -150,6 +158,7 @@ def log_launch_context(argv: list[str], args: argparse.Namespace) -> None:
     log_only("\nLaunch Context\n")
     log_only(f"  Launch args: {_format_arg_list(argv)}\n")
     log_only(f"  rebuild: {args.rebuild} ({_arg_source(argv, '--rebuild')})\n")
+    log_only(f"  cleanup_pack_folders: {args.cleanup_pack_folders} ({_arg_source(argv, '--cleanup-pack-folders')})\n")
     log_only(f"  beta: {args.beta} ({_arg_source(argv, '--beta')})\n")
     gamemode_source = "arg" if "--gamemode" in argv else "default"
     log_only(f"  gamemode: {args.gamemode or '(none)'} ({gamemode_source})\n")
@@ -578,6 +587,8 @@ def main() -> None:
                     flags = {"--doctor"}
                 elif mode == "--rebuild":
                     flags = {"--rebuild"}
+                elif mode == "--cleanup-pack-folders":
+                    flags = {"--cleanup-pack-folders"}
                 elif mode == "uninstall":
                     flags = {"--uninstall"}
                     if prompt_uninstall_mode(world_dir) == "keep-files":

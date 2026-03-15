@@ -43,6 +43,7 @@ Current public commands:
 
 - default install: `python bedrock_pack_manager.py`
 - rebuild: `python bedrock_pack_manager.py --rebuild`
+- cleanup pack folders: `python bedrock_pack_manager.py --cleanup-pack-folders`
 - zip: `python bedrock_pack_manager.py --zip`
 - audit: `python bedrock_pack_manager.py --doctor`
 - uninstall: `python bedrock_pack_manager.py --uninstall`
@@ -61,6 +62,9 @@ When adding CLI options:
 - keep `python bedrock_pack_manager.py --help` accurate
 - prefer explicit flags over implicit behavior
 - preserve existing workflows unless the user asked for a breaking change
+- keep CLI flags and the interactive prompt/menu in sync
+- if you add a CLI action or option, add the corresponding interactive prompt path when it makes sense for interactive use
+- if you add or change an interactive action or option, add or update the corresponding CLI flag or argument unless the user explicitly wants it to stay interactive-only
 
 ## Logging
 

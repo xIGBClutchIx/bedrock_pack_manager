@@ -10,6 +10,7 @@ def test_parse_args_defaults_to_no_flags():
     args = parse_args([])
 
     assert args.rebuild is False
+    assert args.cleanup_pack_folders is False
     assert args.zip is False
     assert args.zip_name is None
     assert args.beta is False
@@ -26,6 +27,7 @@ def test_parse_args_accepts_combined_flags():
     args = parse_args(
         [
             "--rebuild",
+            "--cleanup-pack-folders",
             "--beta",
             "--gamemode",
             "creative",
@@ -43,6 +45,7 @@ def test_parse_args_accepts_combined_flags():
     )
 
     assert args.rebuild is True
+    assert args.cleanup_pack_folders is True
     assert args.beta is True
     assert args.gamemode == "creative"
     assert args.zip is True
@@ -76,14 +79,15 @@ def test_configure_output_uses_reconfigure_when_available(monkeypatch):
 
 
 def test_flags_from_args_converts_namespace_to_flag_set():
-    args = parse_args(["--rebuild", "--zip-name", "world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode", "adventure"])
+    args = parse_args(["--rebuild", "--cleanup-pack-folders", "--zip-name", "world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode", "adventure"])
 
-    assert cli.flags_from_args(args) == {"--rebuild", "--zip", "--zip-name=world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode=adventure"}
+    assert cli.flags_from_args(args) == {"--rebuild", "--cleanup-pack-folders", "--zip", "--zip-name=world.zip", "--uninstall", "--uninstall-keep-files", "--gamemode=adventure"}
 
 
 def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
     args = parse_args(
         [
+            "--cleanup-pack-folders",
             "--beta",
             "--gamemode",
             "creative",
@@ -102,6 +106,7 @@ def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
     with capture_run_logs(logs_dir):
         cli.log_launch_context(
             [
+                "--cleanup-pack-folders",
                 "--beta",
                 "--gamemode",
                 "creative",
@@ -119,8 +124,12 @@ def test_log_launch_context_writes_to_log_only(tmp_path, capsys):
 
     assert capsys.readouterr().out == ""
     log_text = (logs_dir / "latest.txt").read_text(encoding="utf-8")
-    assert "Launch args: --beta --gamemode creative --zip-name world.zip --uninstall --uninstall-keep-files --duplicate-mode keep-both --world-path ExampleWorld" in log_text
+    assert (
+        "Launch args: --cleanup-pack-folders --beta --gamemode creative --zip-name world.zip "
+        "--uninstall --uninstall-keep-files --duplicate-mode keep-both --world-path ExampleWorld"
+    ) in log_text
     assert "rebuild: False (default)" in log_text
+    assert "cleanup_pack_folders: True (arg)" in log_text
     assert "beta: True (arg)" in log_text
     assert "gamemode: creative (arg)" in log_text
     assert "zip_name: world.zip (arg)" in log_text
@@ -389,7 +398,8 @@ def test_mode_menu_lines_show_primary_choices():
     assert "Edit World" in lines[3]
     assert "Uninstall Packs" in lines[4]
     assert "Audit World" in lines[5]
-    assert "Rebuild World" in lines[6]
+    assert "Rebuild JSONs" in lines[6]
+    assert "Cleanup Pack Folders" in lines[7]
 
 
 def test_edit_world_menu_lines_show_selection_count():

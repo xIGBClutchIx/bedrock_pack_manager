@@ -335,6 +335,31 @@ def test_main_uses_interactive_rebuild_mode(tmp_path, monkeypatch):
     assert calls[1] == ("pause", None)
 
 
+def test_main_uses_interactive_cleanup_mode(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "--cleanup-pack-folders")
+
+    calls = []
+
+    def fake_run(flags, world_dir, _paths, _state, duplicate_mode="replace"):
+        calls.append((flags, world_dir, duplicate_mode))
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
+
+    cli.main()
+
+    assert calls[0][0] == {"--cleanup-pack-folders"}
+    assert calls[0][1] == selected_world
+    assert calls[1] == ("pause", None)
+
+
 def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)

@@ -4,7 +4,7 @@ import types
 import zipfile
 
 import bedrock_pack_manager.commands as commands
-from bedrock_pack_manager.commands import collect_uninstall_candidates, do_beta, do_doctor, do_rebuild, do_set_gamemode, do_uninstall, do_zip
+from bedrock_pack_manager.commands import collect_uninstall_candidates, do_beta, do_cleanup_pack_folders, do_doctor, do_rebuild, do_set_gamemode, do_uninstall, do_zip
 from bedrock_pack_manager.console import AppState
 from bedrock_pack_manager.paths import build_paths
 from tests.helpers import PACK_UUID, PACK_VERSION, write_manifest, write_world_json
@@ -81,6 +81,47 @@ def test_do_rebuild_warns_for_missing_manifest_and_uuid(tmp_path):
     assert len(state.warnings) == 2
     assert "has no manifest.json" in state.warnings[0]
     assert "has no UUID" in state.warnings[1]
+
+
+def test_do_cleanup_pack_folders_deletes_unregistered_pack_versions(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    kept_bp = paths.behavior_packs_dir / "Kept Pack-BP"
+    removed_rp = paths.resource_packs_dir / "Old Pack-RP"
+    write_manifest(kept_bp, uuid="bp-uuid", version=PACK_VERSION, name="Kept Pack")
+    write_manifest(removed_rp, uuid="rp-uuid", version=PACK_VERSION, name="Old Pack", module_type="resources")
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
+    write_world_json(world_dir / "world_resource_packs.json", [])
+
+    state = AppState()
+    do_cleanup_pack_folders(world_dir, paths, state)
+
+    assert kept_bp.exists()
+    assert not removed_rp.exists()
+    assert any(action.kind == "cleanup_pack_folder" and action.details.get("deleted") is True for action in state.actions)
+    assert any(action.kind == "cleanup_pack_folders_summary" and action.details["deleted_folders"] == 1 for action in state.actions)
+
+
+def test_do_cleanup_pack_folders_keeps_shared_pack_versions(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    other_world_dir = paths.worlds_dir / "OtherWorld"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    other_world_dir.mkdir(parents=True, exist_ok=True)
+    shared_rp = paths.resource_packs_dir / "Shared Pack-RP"
+    write_manifest(shared_rp, uuid="rp-uuid", version=PACK_VERSION, name="Shared Pack", module_type="resources")
+    write_world_json(world_dir / "world_behavior_packs.json", [])
+    write_world_json(world_dir / "world_resource_packs.json", [])
+    write_world_json(other_world_dir / "world_behavior_packs.json", [])
+    write_world_json(other_world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
+
+    state = AppState()
+    do_cleanup_pack_folders(world_dir, paths, state)
+
+    assert shared_rp.exists()
+    assert any(action.kind == "cleanup_pack_folder" and action.details.get("deleted") is False for action in state.actions)
+    assert any(action.kind == "cleanup_pack_folders_summary" and action.details["kept_shared_folders"] == 1 for action in state.actions)
 
 
 def test_do_beta_returns_when_level_dat_missing(tmp_path, capsys):
@@ -329,6 +370,7 @@ def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
 
     monkeypatch.setattr(commands, "do_doctor", lambda *_args: calls.append("doctor"))
     monkeypatch.setattr(commands, "do_uninstall", lambda *_args, **_kwargs: calls.append("uninstall"))
+    monkeypatch.setattr(commands, "do_cleanup_pack_folders", lambda *_args: calls.append("cleanup"))
     monkeypatch.setattr(commands, "do_rebuild", lambda *_args: calls.append("rebuild"))
     monkeypatch.setattr(commands, "do_beta", lambda *_args: calls.append("beta"))
     monkeypatch.setattr(commands, "do_set_gamemode", lambda *_args: calls.append("gamemode"))
@@ -336,9 +378,14 @@ def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "do_install", lambda *_args, **_kwargs: calls.append("install"))
 
     commands.run(set(), world_dir, paths, state, duplicate_mode="keep-both")
-    commands.run({"--beta", "--zip", "--rebuild", "--doctor", "--uninstall", "--uninstall-pack=bp:uuid:1.0.0", "--gamemode=creative"}, world_dir, paths, state)
+    commands.run(
+        {"--beta", "--zip", "--rebuild", "--cleanup-pack-folders", "--doctor", "--uninstall", "--uninstall-pack=bp:uuid:1.0.0", "--gamemode=creative"},
+        world_dir,
+        paths,
+        state,
+    )
 
-    assert calls == ["install", "doctor", "uninstall", "rebuild", "beta", "gamemode", "zip"]
+    assert calls == ["install", "doctor", "uninstall", "cleanup", "rebuild", "beta", "gamemode", "zip"]
 
 
 def test_do_doctor_reports_clean_state(tmp_path, capsys):

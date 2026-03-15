@@ -1,4 +1,4 @@
-"""Top-level command handlers for install, uninstall, rebuild, audit, zip, and world edits."""
+"""Top-level command handlers for install, uninstall, rebuild, cleanup, audit, zip, and world edits."""
 
 import os
 import shutil
@@ -47,6 +47,16 @@ def _load_registered_ids(world_json: Path) -> set[str]:
     if not world_json.exists():
         return set()
     return {entry.get("pack_id", "") for entry in load_world_json(world_json)}
+
+
+def _load_registered_pack_keys(world_json: Path) -> set[tuple[str, tuple[int | str, ...]]]:
+    if not world_json.exists():
+        return set()
+    return {
+        (entry.get("pack_id", ""), tuple(entry.get("version", [])))
+        for entry in load_world_json(world_json)
+        if entry.get("pack_id") and isinstance(entry.get("version"), list)
+    }
 
 
 def _uninstall_flag(pack_type: str, uuid: str, version: list) -> str:
@@ -417,7 +427,7 @@ def do_doctor(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
 
 
 def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
-    section("Rebuild World Pack JSONs", state=state, action="rebuild")
+    section("Rebuild JSONs", state=state, action="rebuild")
 
     bp_entries = []
     rp_entries = []
@@ -478,6 +488,89 @@ def do_rebuild(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
         resource_packs=rp_count,
         behavior_json=str(world_dir / "world_behavior_packs.json"),
         resource_json=str(world_dir / "world_resource_packs.json"),
+    )
+    print_warnings(state.warnings)
+
+
+def do_cleanup_pack_folders(world_dir: Path, paths: ProjectPaths, state: AppState) -> None:
+    section("Cleanup Pack Folders", state=state, action="cleanup_pack_folders")
+
+    registered_bp = _load_registered_pack_keys(world_dir / "world_behavior_packs.json")
+    registered_rp = _load_registered_pack_keys(world_dir / "world_resource_packs.json")
+
+    deleted_folders = 0
+    kept_shared_folders = 0
+
+    for pack_type, pack_label, pack_dir, registered_keys in [
+        ("bp", "Behavior Pack", paths.behavior_packs_dir, registered_bp),
+        ("rp", "Resource Pack", paths.resource_packs_dir, registered_rp),
+    ]:
+        for pack in _scan_installed_packs(pack_dir, pack_label, state):
+            pack_key = (pack["uuid"], tuple(pack["version"]))
+            if pack_key in registered_keys:
+                continue
+
+            other_worlds = _other_world_references(paths, world_dir, pack_type, pack["uuid"], pack["version"])
+            if other_worlds:
+                kept_shared_folders += 1
+                info(
+                    f"Kept {display_path(pack['path'])} because still used by: {', '.join(other_worlds)}",
+                    state=state,
+                    action="keep_shared_cleanup_pack",
+                    uuid=pack["uuid"],
+                    version=pack["version"],
+                    pack_type=pack_type,
+                    world_dir=str(world_dir),
+                    referenced_by=other_worlds,
+                )
+                state.record(
+                    "cleanup_pack_folder",
+                    "Kept unregistered pack folder because another world still references it",
+                    uuid=pack["uuid"],
+                    version=pack["version"],
+                    pack_type=pack_type,
+                    deleted=False,
+                    path=str(pack["path"]),
+                    referenced_by=other_worlds,
+                )
+                continue
+
+            shutil.rmtree(pack["path"])
+            deleted_folders += 1
+            ok(
+                f"Deleted {display_path(pack['path'])}",
+                state=state,
+                action="cleanup_pack_folder",
+                uuid=pack["uuid"],
+                version=pack["version"],
+                pack_type=pack_type,
+                deleted_path=str(pack["path"]),
+            )
+            state.record(
+                "cleanup_pack_folder",
+                "Deleted unregistered pack folder",
+                uuid=pack["uuid"],
+                version=pack["version"],
+                pack_type=pack_type,
+                deleted=True,
+                path=str(pack["path"]),
+                referenced_by=[],
+            )
+
+    if deleted_folders == 0:
+        print(f"  {C.GREEN}No unregistered pack folders to delete.{C.RESET}")
+    else:
+        print(f"  {C.GREEN}Done!{C.RESET} Deleted {C.CYAN}{deleted_folders}{C.RESET} unregistered pack folder(s)")
+
+    if kept_shared_folders:
+        print(f"  Kept {C.CYAN}{kept_shared_folders}{C.RESET} folder(s) still referenced by other worlds")
+
+    state.record(
+        "cleanup_pack_folders_summary",
+        "Cleanup pack folders complete",
+        world_dir=str(world_dir),
+        deleted_folders=deleted_folders,
+        kept_shared_folders=kept_shared_folders,
     )
     print_warnings(state.warnings)
 
@@ -761,6 +854,9 @@ def run(flags: set[str], world_dir: Path | None, paths: ProjectPaths, state: App
 
     if "--uninstall" in flags:
         do_uninstall(world_dir, paths, _selected_uninstall_flags(flags), state, keep_files=_keep_uninstall_files(flags))
+
+    if "--cleanup-pack-folders" in flags:
+        do_cleanup_pack_folders(world_dir, paths, state)
 
     if "--rebuild" in flags:
         do_rebuild(world_dir, paths, state)
