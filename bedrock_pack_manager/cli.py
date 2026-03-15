@@ -281,6 +281,24 @@ def _single_select_menu_lines(options: list[tuple[str, str]], cursor: int, title
     return lines
 
 
+def _selected_world_lines(selected_world: Path | None, *, leading_blank: bool = True) -> list[str]:
+    if selected_world is None:
+        return []
+
+    worlds_dir = selected_world.parent
+    world_count = 0
+    if worlds_dir.exists():
+        world_count = sum(1 for directory in worlds_dir.iterdir() if directory.is_dir() and not directory.name.startswith("."))
+
+    lines = [f"  {title_text('Worlds')}"]
+    if leading_blank:
+        lines.insert(0, "")
+    if world_count == 1:
+        lines.append(f"  {dim_text('Only one world available')}")
+    lines.append(f"  Selected: {C.CYAN}{selected_world.name}{C.RESET}")
+    return lines
+
+
 def prompt_mode(selected_world: Path | None = None) -> str:
     cursor = 0
     static_lines = [
@@ -318,16 +336,18 @@ def prompt_mode(selected_world: Path | None = None) -> str:
             continue
 
 
-def prompt_edit_world_flags() -> set[str]:
+def prompt_edit_world_flags(selected_world: Path | None = None) -> set[str]:
     selected: set[str] = set()
     cursor = 0
+    static_lines = [
+        *app_header_lines(),
+        "",
+        f"  {title_text('Edit World')}",
+        f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
+    ]
+    static_lines.extend(_selected_world_lines(selected_world))
     menu = TerminalListMenu(
-        [
-            *app_header_lines(),
-            "",
-            f"  {title_text('Edit World')}",
-            f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
-        ],
+        static_lines,
         lambda: _edit_world_menu_lines(selected, cursor),
     )
     menu.render_initial()
@@ -352,15 +372,17 @@ def prompt_edit_world_flags() -> set[str]:
             continue
 
 
-def prompt_gamemode() -> str:
+def prompt_gamemode(selected_world: Path | None = None) -> str:
     cursor = 0
+    static_lines = [
+        *app_header_lines(),
+        "",
+        f"  {title_text('Set Gamemode')}",
+        f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
+    ]
+    static_lines.extend(_selected_world_lines(selected_world))
     menu = TerminalListMenu(
-        [
-            *app_header_lines(),
-            "",
-            f"  {title_text('Set Gamemode')}",
-            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
-        ],
+        static_lines,
         lambda: _single_select_menu_lines(GAMEMODE_OPTIONS, cursor, "Gamemode", "Choose the world's default gamemode"),
     )
     menu.render_initial()
@@ -381,15 +403,17 @@ def prompt_gamemode() -> str:
             continue
 
 
-def prompt_uninstall_mode() -> str:
+def prompt_uninstall_mode(selected_world: Path | None = None) -> str:
     cursor = 0
+    static_lines = [
+        *app_header_lines(),
+        "",
+        f"  {title_text('Uninstall Mode')}",
+        f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
+    ]
+    static_lines.extend(_selected_world_lines(selected_world))
     menu = TerminalListMenu(
-        [
-            *app_header_lines(),
-            "",
-            f"  {title_text('Uninstall Mode')}",
-            f"  {dim_text('↑/↓ move  Enter select  Q quit')}",
-        ],
+        static_lines,
         lambda: _uninstall_mode_menu_lines(cursor),
     )
     menu.render_initial()
@@ -410,16 +434,18 @@ def prompt_uninstall_mode() -> str:
             continue
 
 
-def _prompt_uninstall_flags_interactive(candidates: list[dict]) -> set[str]:
+def _prompt_uninstall_flags_interactive(candidates: list[dict], selected_world: Path | None = None) -> set[str]:
     selected: set[str] = set()
     cursor = 0
+    static_lines = [
+        *app_header_lines(),
+        "",
+        f"  {title_text('Uninstall Packs')}",
+        f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
+    ]
+    static_lines.extend(_selected_world_lines(selected_world))
     menu = TerminalListMenu(
-        [
-            *app_header_lines(),
-            "",
-            f"  {title_text('Uninstall Packs')}",
-            f"  {dim_text('↑/↓ move  Space toggle  Enter continue  Q quit')}",
-        ],
+        static_lines,
         lambda: _uninstall_menu_lines(candidates, selected, cursor),
     )
     menu.render_initial()
@@ -444,8 +470,10 @@ def _prompt_uninstall_flags_interactive(candidates: list[dict]) -> set[str]:
             continue
 
 
-def _prompt_uninstall_flags_with_prompt(candidates: list[dict]) -> set[str]:
+def _prompt_uninstall_flags_with_prompt(candidates: list[dict], selected_world: Path | None = None) -> set[str]:
     print(f"\n  {title_text('Uninstall Packs')}\n")
+    for line in _selected_world_lines(selected_world):
+        print(line)
     for index, candidate in enumerate(candidates, 1):
         print(f"    {C.BOLD}{index}.{C.RESET} {candidate['label']}")
         print(f"       {candidate['details']}")
@@ -469,21 +497,57 @@ def _prompt_uninstall_flags_with_prompt(candidates: list[dict]) -> set[str]:
         return {candidates[index]["flag"] for index in sorted(indexes)}
 
 
-def prompt_uninstall_flags(candidates: list[dict]) -> set[str]:
+def prompt_uninstall_flags(candidates: list[dict], selected_world: Path | None = None) -> set[str]:
     if is_interactive_terminal():
-        return _prompt_uninstall_flags_interactive(candidates)
-    return _prompt_uninstall_flags_with_prompt(candidates)
+        return _prompt_uninstall_flags_interactive(candidates, selected_world)
+    return _prompt_uninstall_flags_with_prompt(candidates, selected_world)
 
 
-def prompt_zip_name() -> str | None:
-    zip_name = input(f"\n{prompt_text('Zip output name (blank to skip): ')}").strip()
+def _prompt_text_input_interactive(prompt: str) -> str:
+    sys.stdout.write(f"\n{prompt}")
+    sys.stdout.flush()
+    chars: list[str] = []
+
+    while True:
+        key = read_keypress()
+        if key in {"\r", "\n"}:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return "".join(chars)
+        if key == "\x03":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            raise MenuExit()
+        if key in {"\x08", "\x7f"}:
+            if chars:
+                chars.pop()
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+            continue
+        if len(key) == 1 and key.isprintable():
+            chars.append(key)
+            sys.stdout.write(key)
+            sys.stdout.flush()
+
+
+def prompt_zip_name(selected_world: Path | None = None) -> str | None:
+    if is_interactive_terminal():
+        zip_name = _prompt_text_input_interactive(prompt_text("Zip output name (blank to skip): ")).strip()
+    else:
+        try:
+            zip_name = input(f"\n{prompt_text('Zip output name (blank to skip): ')}").strip()
+        except KeyboardInterrupt as exc:
+            raise MenuExit() from exc
     return zip_name or None
 
 
 def pause_before_exit() -> None:
     if not is_interactive_terminal():
         return
-    input(prompt_text("Press Enter to exit..."))
+    try:
+        input(prompt_text("Press Enter to exit..."))
+    except KeyboardInterrupt:
+        return
 
 
 def main() -> None:
@@ -505,28 +569,28 @@ def main() -> None:
             world_selection_source = ""
 
             if interactive_launch:
-                # Interactive startup chooses a world first so the mode menu can show context.
+                # Interactive startup shows the mode menu first, then resolves the world for that mode.
+                mode = prompt_mode()
                 world_dir, world_selection_source = resolve_world(args, paths)
                 log_only(f"  World source: {world_selection_source}\n")
                 log_only(f"  World: {world_dir}\n")
-                mode = prompt_mode(world_dir)
                 if mode == "--doctor":
                     flags = {"--doctor"}
                 elif mode == "--rebuild":
                     flags = {"--rebuild"}
                 elif mode == "uninstall":
                     flags = {"--uninstall"}
-                    if prompt_uninstall_mode() == "keep-files":
+                    if prompt_uninstall_mode(world_dir) == "keep-files":
                         flags.add("--uninstall-keep-files")
                 elif mode == "edit":
-                    flags = prompt_edit_world_flags()
+                    flags = prompt_edit_world_flags(world_dir)
                     if not flags:
                         raise ValueError("Select at least one world edit option.")
                     if "--gamemode" in flags:
                         flags.remove("--gamemode")
-                        flags.add(f"--gamemode={prompt_gamemode()}")
+                        flags.add(f"--gamemode={prompt_gamemode(world_dir)}")
                 else:
-                    zip_name = prompt_zip_name()
+                    zip_name = prompt_zip_name(world_dir)
                     flags = {"--zip", f"--zip-name={zip_name}"} if zip_name else set()
                 log_run_settings(flags, "interactive prompt")
             else:
@@ -543,7 +607,7 @@ def main() -> None:
                     if not uninstall_candidates:
                         raise ValueError("No behavior or resource packs are registered in this world.")
                     flags = set(flags)
-                    selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates)
+                    selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates, world_dir)
                     if not selected_uninstall_flags:
                         raise ValueError("Select at least one pack to uninstall.")
                     flags.update(selected_uninstall_flags)
@@ -552,7 +616,7 @@ def main() -> None:
                 if not uninstall_candidates:
                     raise ValueError("No behavior or resource packs are registered in this world.")
                 flags = set(flags)
-                selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates)
+                selected_uninstall_flags = prompt_uninstall_flags(uninstall_candidates, world_dir)
                 if not selected_uninstall_flags:
                     raise ValueError("Select at least one pack to uninstall.")
                 flags.update(selected_uninstall_flags)
@@ -562,7 +626,8 @@ def main() -> None:
         pause_before_exit()
         return
     except (KeyboardInterrupt, MenuExit):
-        print(f"\n{C.YELLOW}Cancelled.{C.RESET}")
+        print()
+        print(f"{C.YELLOW}Cancelled.{C.RESET}")
         pause_before_exit()
         return
 

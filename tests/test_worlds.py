@@ -148,19 +148,21 @@ def test_move_cursor_wraps_for_world_menu():
     assert _move_cursor(2, 3, "down") == 0
 
 
-def test_select_world_exits_when_no_worlds_exist(tmp_path):
-    with pytest.raises(SystemExit):
+def test_select_world_raises_clear_error_when_no_worlds_exist(tmp_path):
+    with pytest.raises(ValueError) as exc_info:
         select_world(tmp_path)
 
+    assert "No worlds found in" in str(exc_info.value)
 
-def test_select_world_shows_relative_path_when_no_worlds_exist(tmp_path, monkeypatch, capsys):
+
+def test_select_world_uses_relative_path_when_no_worlds_exist(tmp_path, monkeypatch):
     worlds_dir = tmp_path / "run" / "worlds"
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError) as exc_info:
         select_world(worlds_dir)
 
-    assert "run/worlds" in capsys.readouterr().out
+    assert "run/worlds" in str(exc_info.value)
 
 
 def test_find_world_by_name_returns_matching_directory(tmp_path):

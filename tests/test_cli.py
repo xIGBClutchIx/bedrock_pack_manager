@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import bedrock_pack_manager.cli as cli
 from bedrock_pack_manager.cli import parse_args
@@ -240,15 +241,46 @@ def test_prompt_mode_uses_arrows_and_enter_to_select_uninstall(monkeypatch):
 
 
 def test_prompt_zip_name_returns_none_for_blank_input(monkeypatch):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     assert cli.prompt_zip_name() is None
 
 
 def test_prompt_zip_name_returns_entered_name(monkeypatch):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "world.zip")
 
     assert cli.prompt_zip_name() == "world.zip"
+
+
+def test_prompt_zip_name_shows_selected_world(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    assert cli.prompt_zip_name(Path("/tmp/ExampleWorld")) is None
+    output = capsys.readouterr().out
+    assert output == ""
+
+
+def test_prompt_zip_name_ctrl_c_raises_menu_exit(monkeypatch):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\x03")
+
+    try:
+        cli.prompt_zip_name()
+        assert False, "expected MenuExit"
+    except cli.MenuExit:
+        pass
+
+
+def test_prompt_zip_name_interactive_returns_entered_name(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    keys = iter(["w", "o", "r", "l", "d", ".", "z", "i", "p", "\n"])
+    monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
+
+    assert cli.prompt_zip_name() == "world.zip"
+    assert "Zip output name" in capsys.readouterr().out
 
 
 def test_prompt_edit_world_flags_uses_arrows_and_space_to_select(monkeypatch):
@@ -258,6 +290,17 @@ def test_prompt_edit_world_flags_uses_arrows_and_space_to_select(monkeypatch):
     assert cli.prompt_edit_world_flags() == {"--beta", "--gamemode"}
 
 
+def test_prompt_edit_world_flags_shows_selected_world(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    assert cli.prompt_edit_world_flags(Path("/tmp/ExampleWorld")) == set()
+    output = capsys.readouterr().out
+    assert "Worlds" in output
+    assert "Selected:" in output
+    assert "ExampleWorld" in output
+    assert "World: ExampleWorld" not in output
+
+
 def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
     keys = iter(["\x1b[B", "\n"])
     monkeypatch.setattr(cli, "read_keypress", lambda: next(keys))
@@ -265,10 +308,32 @@ def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
     assert cli.prompt_gamemode() == "creative"
 
 
+def test_prompt_gamemode_shows_selected_world(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    assert cli.prompt_gamemode(Path("/tmp/ExampleWorld")) == "survival"
+    output = capsys.readouterr().out
+    assert "Worlds" in output
+    assert "Selected:" in output
+    assert "ExampleWorld" in output
+    assert "World: ExampleWorld" not in output
+
+
 def test_prompt_uninstall_mode_returns_remove_by_default(monkeypatch):
     monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
 
     assert cli.prompt_uninstall_mode() == "remove"
+
+
+def test_prompt_uninstall_mode_shows_selected_world(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    assert cli.prompt_uninstall_mode(Path("/tmp/ExampleWorld")) == "remove"
+    output = capsys.readouterr().out
+    assert "Worlds" in output
+    assert "Selected:" in output
+    assert "ExampleWorld" in output
+    assert "World: ExampleWorld" not in output
 
 
 def test_prompt_uninstall_mode_uses_arrows_and_enter(monkeypatch):
@@ -299,6 +364,21 @@ def test_prompt_uninstall_flags_uses_prompt_when_not_interactive(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "1,2")
 
     assert cli.prompt_uninstall_flags(candidates) == {"--uninstall-pack=bp:bp-uuid:1.0.0", "--uninstall-pack=rp:rp-uuid:1.0.0"}
+
+
+def test_prompt_uninstall_flags_shows_selected_world_in_prompt_mode(monkeypatch, capsys):
+    candidates = [
+        {"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"},
+    ]
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+
+    assert cli.prompt_uninstall_flags(candidates, Path("/tmp/ExampleWorld")) == {"--uninstall-pack=bp:bp-uuid:1.0.0"}
+    output = capsys.readouterr().out
+    assert "Worlds" in output
+    assert "Selected:" in output
+    assert "ExampleWorld" in output
+    assert "World: ExampleWorld" not in output
 
 
 def test_mode_menu_lines_show_primary_choices():
@@ -397,6 +477,13 @@ def test_pause_before_exit_waits_in_interactive_terminal(monkeypatch):
 
     assert len(calls) == 1
     assert "Press Enter to exit..." in calls[0]
+
+
+def test_pause_before_exit_ignores_ctrl_c(monkeypatch):
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    cli.pause_before_exit()
 
 
 def test_pause_before_exit_is_noop_when_not_interactive(monkeypatch):

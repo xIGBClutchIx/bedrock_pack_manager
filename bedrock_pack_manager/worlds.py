@@ -1,7 +1,6 @@
 """World selection and world pack JSON helpers."""
 
 import json
-import sys
 from pathlib import Path
 
 from .console import C, TerminalListMenu, app_header_lines, dim_text, display_path, title_text
@@ -191,9 +190,7 @@ def select_world(worlds_dir: Path) -> Path:
     )
 
     if not worlds:
-        print(f"\n  {title_text('Worlds')}")
-        print(f"  {C.RED}No worlds found in {display_path(worlds_dir)}.{C.RESET}")
-        sys.exit(1)
+        raise ValueError(f"No worlds found in {display_path(worlds_dir)}.")
 
     if len(worlds) == 1:
         print(f"\n  {title_text('Worlds')}")

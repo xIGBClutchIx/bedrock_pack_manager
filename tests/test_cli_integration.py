@@ -146,7 +146,7 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "install")
-    monkeypatch.setattr(cli, "prompt_zip_name", lambda: "world.zip")
+    monkeypatch.setattr(cli, "prompt_zip_name", lambda _world=None: "world.zip")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: paths.worlds_dir / "ExampleWorld")
 
     calls = []
@@ -165,7 +165,7 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
     assert calls[1] == ("pause", None)
 
 
-def test_main_selects_world_before_showing_interactive_mode_menu(tmp_path, monkeypatch):
+def test_main_shows_interactive_mode_menu_before_selecting_world(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
     selected_world = paths.worlds_dir / "ExampleWorld"
     selected_world.mkdir(parents=True)
@@ -183,14 +183,131 @@ def test_main_selects_world_before_showing_interactive_mode_menu(tmp_path, monke
 
     monkeypatch.setattr(cli, "select_world", fake_select_world)
     monkeypatch.setattr(cli, "prompt_mode", fake_prompt_mode)
-    monkeypatch.setattr(cli, "prompt_zip_name", lambda: None)
+    monkeypatch.setattr(cli, "prompt_zip_name", lambda _world=None: None)
     monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
     monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
     monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
-    assert events[:2] == ["select_world", "prompt_mode"]
+    assert events[:2] == ["prompt_mode", "select_world"]
+
+
+def test_main_interactive_install_selects_world_before_prompting_for_zip_name(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    events = []
+
+    def fake_prompt_mode(_world=None):
+        events.append("prompt_mode")
+        return "install"
+
+    def fake_select_world(_worlds_dir):
+        events.append("select_world")
+        return selected_world
+
+    def fake_prompt_zip_name(_world=None):
+        events.append("prompt_zip_name")
+        return None
+
+    monkeypatch.setattr(cli, "prompt_mode", fake_prompt_mode)
+    monkeypatch.setattr(cli, "select_world", fake_select_world)
+    monkeypatch.setattr(cli, "prompt_zip_name", fake_prompt_zip_name)
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
+
+    cli.main()
+
+    assert events[:3] == ["prompt_mode", "select_world", "prompt_zip_name"]
+
+
+def test_main_interactive_edit_selects_world_before_prompting_for_edit_options(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    events = []
+
+    def fake_prompt_mode(_world=None):
+        events.append("prompt_mode")
+        return "edit"
+
+    def fake_select_world(_worlds_dir):
+        events.append("select_world")
+        return selected_world
+
+    def fake_prompt_edit_world_flags(_world=None):
+        events.append("prompt_edit_world_flags")
+        return {"--beta"}
+
+    monkeypatch.setattr(cli, "prompt_mode", fake_prompt_mode)
+    monkeypatch.setattr(cli, "select_world", fake_select_world)
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", fake_prompt_edit_world_flags)
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
+
+    cli.main()
+
+    assert events[:3] == ["prompt_mode", "select_world", "prompt_edit_world_flags"]
+
+
+def test_main_interactive_uninstall_selects_world_before_prompting_for_uninstall_mode(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    selected_world = paths.worlds_dir / "ExampleWorld"
+    selected_world.mkdir(parents=True)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    events = []
+    candidates = [{"flag": "--uninstall-pack=bp:bp-uuid:1.0.0", "label": "[BP] BP One (v1.0.0)", "details": "behavior_packs/BP One-BP"}]
+
+    def fake_prompt_mode(_world=None):
+        events.append("prompt_mode")
+        return "uninstall"
+
+    def fake_select_world(_worlds_dir):
+        events.append("select_world")
+        return selected_world
+
+    def fake_prompt_uninstall_mode(_world=None):
+        events.append("prompt_uninstall_mode")
+        return "remove"
+
+    monkeypatch.setattr(cli, "prompt_mode", fake_prompt_mode)
+    monkeypatch.setattr(cli, "select_world", fake_select_world)
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", fake_prompt_uninstall_mode)
+    monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates, _world=None: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
+
+    cli.main()
+
+    assert events[:3] == ["prompt_mode", "select_world", "prompt_uninstall_mode"]
+
+
+def test_main_interactive_mode_shows_missing_world_error_and_pauses(tmp_path, monkeypatch, capsys):
+    paths = build_paths(tmp_path)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "--doctor")
+    pause_calls = []
+
+    monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert "No worlds found in" in output
+    assert "run/worlds" in output
+    assert pause_calls == ["pause"]
 
 
 def test_main_uses_interactive_rebuild_mode(tmp_path, monkeypatch):
@@ -223,8 +340,8 @@ def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_pa
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "edit")
-    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: {"--beta", "--gamemode"})
-    monkeypatch.setattr(cli, "prompt_gamemode", lambda: "creative")
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda _world=None: {"--beta", "--gamemode"})
+    monkeypatch.setattr(cli, "prompt_gamemode", lambda _world=None: "creative")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: paths.worlds_dir / "ExampleWorld")
 
     calls = []
@@ -251,10 +368,10 @@ def test_main_uses_interactive_uninstall_menu_and_applies_selection(tmp_path, mo
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
-    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "remove")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda _world=None: "remove")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
-    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates, _world=None: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
 
     calls = []
 
@@ -280,10 +397,10 @@ def test_main_uses_interactive_uninstall_json_only_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
-    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "keep-files")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda _world=None: "keep-files")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
-    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates, _world=None: {"--uninstall-pack=bp:bp-uuid:1.0.0"})
 
     calls = []
 
@@ -309,10 +426,10 @@ def test_main_rejects_empty_uninstall_selection(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "uninstall")
-    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda: "remove")
+    monkeypatch.setattr(cli, "prompt_uninstall_mode", lambda _world=None: "remove")
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(cli, "collect_uninstall_candidates", lambda _world_dir, _paths: candidates)
-    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates: set())
+    monkeypatch.setattr(cli, "prompt_uninstall_flags", lambda _candidates, _world=None: set())
     monkeypatch.setattr(
         cli,
         "run",
@@ -385,7 +502,7 @@ def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, ca
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(cli, "prompt_mode", lambda _world=None: "edit")
-    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda: set())
+    monkeypatch.setattr(cli, "prompt_edit_world_flags", lambda _world=None: set())
     monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: selected_world)
     monkeypatch.setattr(
         cli,
