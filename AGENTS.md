@@ -9,10 +9,10 @@ The current architecture is a small Python package with a thin top-level script:
 - `bedrock_pack_manager.py`: entrypoint
 - `bedrock_pack_manager/cli.py`: CLI parsing and startup
 - `bedrock_pack_manager/install.py`: install flow
-- `bedrock_pack_manager/commands.py`: rebuild, zip, beta commands
+- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, audit, and world-edit commands
 - `bedrock_pack_manager/worlds.py`: world JSON helpers and selection
 - `bedrock_pack_manager/manifests.py`: manifest parsing and classification
-- `bedrock_pack_manager/nbt.py`: `level.dat` experiment toggles
+- `bedrock_pack_manager/nbt.py`: `level.dat` beta and gamemode helpers
 - `bedrock_pack_manager/logger.py`: run log capture
 - `bedrock_pack_manager/paths.py`: runtime path layout
 - `bedrock_pack_manager/console.py`: console output helpers
@@ -25,12 +25,15 @@ All runtime data belongs under `run/`:
 
 - `run/install/`
 - `run/installed/`
+- `run/uninstall/`
+- `run/uninstalled/`
 - `run/behavior_packs/`
 - `run/resource_packs/`
 - `run/worlds/`
 - `run/logs/`
 
 If you add any new operational output, cache, report, or temp artifact, place it under `run/` unless there is a strong reason not to.
+Startup currently creates the full runtime tree before logging, world selection, install, or uninstall logic runs.
 
 ## CLI Conventions
 
@@ -41,7 +44,17 @@ Current public commands:
 - default install: `python bedrock_pack_manager.py`
 - rebuild: `python bedrock_pack_manager.py --rebuild`
 - zip: `python bedrock_pack_manager.py --zip`
+- audit: `python bedrock_pack_manager.py --doctor`
+- uninstall: `python bedrock_pack_manager.py --uninstall`
 - beta toggle: `python bedrock_pack_manager.py --beta`
+- gamemode set: `python bedrock_pack_manager.py --gamemode creative`
+
+Current public selection and install modifiers:
+
+- duplicate handling: `--duplicate-mode skip|replace|keep-both`
+- world selection: `--world-name <name>` or `--world-path <path>`
+- uninstall keep files: `--uninstall-keep-files`
+- zip name: `--zip-name world.zip`
 
 When adding CLI options:
 
@@ -79,6 +92,8 @@ Expected outputs:
 
 If stdout capture behaves oddly in the current environment, `pytest -s` is acceptable for diagnosis, but normal work should keep `pytest` green.
 
+CI currently runs in GitHub Actions from `.github/workflows/ci.yml` and checks Ruff plus pytest on Ubuntu with Python 3.12.
+
 ## Linting
 
 Primary command:
@@ -99,6 +114,7 @@ Rules:
 - keep lint configuration in `pyproject.toml`
 - keep the current Ruff line length at `180` unless there is a project-level reason to change it
 - if lint dependencies change, keep `requirements.txt` in sync
+- if `make lint` or `make lint-fix` depends on tooling, keep the local `.venv` workflow accurate in docs
 
 ## Test Data
 
@@ -151,6 +167,7 @@ Keep:
 - test dependencies in `[project.optional-dependencies].test`
 
 `requirements.txt` still exists for convenience, so if dependencies change, keep it in sync with the current practical workflow.
+The current convenience file includes runtime, test, and lint tooling.
 
 Development workflow should assume a local `.venv` when documenting setup, testing, linting, or build steps.
 Before running project Python tools directly in the shell, activate the local virtual environment with:

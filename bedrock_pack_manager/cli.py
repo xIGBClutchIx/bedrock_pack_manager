@@ -1,3 +1,5 @@
+"""CLI argument parsing, interactive menus, and startup orchestration."""
+
 import argparse
 import sys
 from pathlib import Path
@@ -172,6 +174,8 @@ def log_run_settings(flags: set[str], selection_source: str) -> None:
 
 
 def resolve_world(args: argparse.Namespace, paths) -> tuple[Path | None, str]:
+    """Resolve world selection from explicit args first, then fall back to prompting."""
+
     if args.world_name and args.world_path:
         raise ValueError("Use either --world-name or --world-path, not both")
 
@@ -489,6 +493,7 @@ def main() -> None:
     args = parse_args(argv)
     flags = flags_from_args(args)
     paths = build_paths(get_base_dir())
+    # Bootstrap the runtime layout before logging or world selection touches the filesystem.
     ensure_runtime_dirs(paths)
     state = AppState()
 
@@ -500,6 +505,7 @@ def main() -> None:
             world_selection_source = ""
 
             if interactive_launch:
+                # Interactive startup chooses a world first so the mode menu can show context.
                 world_dir, world_selection_source = resolve_world(args, paths)
                 log_only(f"  World source: {world_selection_source}\n")
                 log_only(f"  World: {world_dir}\n")

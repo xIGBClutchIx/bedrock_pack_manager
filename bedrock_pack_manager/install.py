@@ -1,3 +1,5 @@
+"""Install flow for archives and extracted Bedrock packs."""
+
 import os
 import re
 import shutil
@@ -35,6 +37,8 @@ class UnsafeArchivePathError(Exception):
 
 
 def _safe_extract_archive(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Reject archive members that would escape the target directory when extracted."""
+
     dest_root = dest.resolve()
     for member in zf.infolist():
         member_path = Path(member.filename)
@@ -99,6 +103,8 @@ def _clean_source_name(source_name: str) -> str:
 
 
 def _effective_pack_name(pack_name: str, pack_folder: Path, source_name: str = "") -> str:
+    """Prefer manifest names, but fall back to cleaner source names for generic pack titles."""
+
     if _normalize_pack_name(pack_name) not in GENERIC_PACK_NAMES:
         return pack_name
 
@@ -111,6 +117,8 @@ def _effective_pack_name(pack_name: str, pack_folder: Path, source_name: str = "
 
 
 def move_pack(pack_folder: Path, dest_dir: Path, pack_name: str, pack_type: str, source_name: str = "") -> Path:
+    """Copy a pack folder into the runtime install location with a stable human-readable name."""
+
     pack_name = _effective_pack_name(pack_name, pack_folder, source_name)
     safe_name = "".join(char if char.isalnum() or char in " -_" else "" for char in pack_name).strip()
     if not safe_name:
@@ -217,6 +225,8 @@ def process_pack(
     source_name: str = "",
     beta_enabled: bool | None = None,
 ) -> None:
+    """Validate, copy, and register one pack folder from an install source."""
+
     manifest_path = pack_folder / "manifest.json"
     if not manifest_path.exists():
         warn(state, f"Folder '{pack_folder.name}' has no manifest.json - not a valid pack")

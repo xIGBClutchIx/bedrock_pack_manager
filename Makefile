@@ -22,4 +22,5 @@ build-windows:
 	pwsh -File scripts/build_windows.ps1
 
 clean:
-	rm -rf build dist __pycache__ .pytest_cache .coverage coverage.xml *.spec
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+	rm -rf build dist .pytest_cache .ruff_cache .coverage coverage.xml htmlcov

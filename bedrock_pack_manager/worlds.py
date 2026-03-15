@@ -1,3 +1,5 @@
+"""World selection and world pack JSON helpers."""
+
 import json
 import sys
 from pathlib import Path
@@ -7,6 +9,8 @@ from .terminal import read_keypress
 
 
 def load_world_json(path: Path) -> list:
+    """Load a world pack registration file with helpful errors for bad JSON."""
+
     if not path.exists():
         return []
     try:
@@ -32,6 +36,8 @@ def is_already_registered(world_packs: list, uuid: str) -> bool:
 
 
 def upsert_pack(world_json_path: Path, uuid: str, version: list) -> str:
+    """Add a pack to world JSON or update its version if it is already registered."""
+
     packs = load_world_json(world_json_path)
     for pack in packs:
         if pack.get("pack_id") != uuid:
@@ -100,6 +106,8 @@ def _move_cursor(index: int, size: int, direction: str) -> int:
 
 
 def _world_details(world: Path) -> str:
+    """Build the small metadata suffix shown in the world picker."""
+
     extras = []
     if (world / "level.dat").exists():
         extras.append("level.dat")
@@ -175,6 +183,7 @@ def select_world(worlds_dir: Path) -> Path:
     if not worlds_dir.exists():
         worlds_dir.mkdir(parents=True, exist_ok=True)
 
+    # Hidden folders are ignored so runtime/system directories do not appear in the picker.
     worlds = sorted(
         directory
         for directory in worlds_dir.iterdir()

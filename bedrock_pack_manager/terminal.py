@@ -1,3 +1,5 @@
+"""Cross-platform terminal input and ANSI setup helpers."""
+
 import os
 import sys
 from typing import Callable
@@ -17,6 +19,8 @@ def _is_windows() -> bool:
 
 
 def _translate_windows_keypress(first: str, read_char: Callable[[], str]) -> str:
+    """Normalize Windows extended key codes to the same escape sequences used on POSIX."""
+
     if first not in {"\x00", "\xe0"}:
         return first
     second = read_char()
@@ -31,6 +35,8 @@ def _read_windows_keypress() -> str:
 
 
 def _read_posix_keypress() -> str:
+    """Read raw key presses so arrow-driven menus work without waiting for Enter."""
+
     import termios
     import tty
 

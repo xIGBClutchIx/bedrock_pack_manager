@@ -1,3 +1,5 @@
+"""Top-level command handlers for install, uninstall, rebuild, audit, zip, and world edits."""
+
 import os
 import shutil
 import zipfile
@@ -66,6 +68,8 @@ def _matching_installed_packs(dest_dir: Path, uuid: str, version: list) -> list[
 
 
 def collect_uninstall_candidates(world_dir: Path, paths: ProjectPaths) -> list[dict]:
+    """Collect registered packs and the matching on-disk details shown in uninstall mode."""
+
     candidates = []
     for pack_type, world_json_name, dest_dir in [
         ("bp", "world_behavior_packs.json", paths.behavior_packs_dir),
@@ -208,6 +212,8 @@ def _collect_uninstall_source_packs(entry: Path, paths: ProjectPaths, state: App
 
 
 def _collect_uninstall_queue_candidates(world_dir: Path, paths: ProjectPaths, state: AppState) -> list[dict]:
+    """Resolve `run/uninstall/` inputs into uninstall flags for the selected world."""
+
     if not paths.uninstall_dir.exists():
         return []
 

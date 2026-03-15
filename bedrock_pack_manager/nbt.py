@@ -1,3 +1,5 @@
+"""Helpers for editing Bedrock `level.dat` values."""
+
 import io
 import shutil
 import struct
@@ -11,6 +13,8 @@ GAMEMODE_VALUES = {
 
 
 def _read_level_dat(dat_path: Path):
+    """Read the Bedrock header and payload, then parse the NBT body as little-endian."""
+
     import nbtlib
 
     with open(dat_path, "rb") as f:
@@ -33,6 +37,8 @@ def _write_level_dat(dat_path: Path, version: int, nbt_file) -> None:
 
 
 def _backup_level_dat(dat_path: Path) -> None:
+    """Keep a simple sibling backup before mutating the world file."""
+
     shutil.copy2(dat_path, dat_path.with_suffix(".dat.backup"))
 
 

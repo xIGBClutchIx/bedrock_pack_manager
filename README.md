@@ -12,6 +12,7 @@ pip install -r requirements.txt
 ```
 
 Use the local `.venv` for normal development, testing, linting, and builds instead of installing tools into the system Python environment.
+`requirements.txt` includes the runtime dependency plus the project's current test and lint tooling.
 
 ## Project Commands
 
@@ -31,6 +32,16 @@ make build-linux
 make build-windows
 make clean
 ```
+
+## GitHub Actions
+
+This repo includes a GitHub Actions workflow at `.github/workflows/ci.yml`.
+
+It currently:
+
+- installs dependencies from `requirements.txt`
+- runs `ruff check .`
+- runs `pytest`
 
 ## Testing
 
@@ -109,8 +120,7 @@ python bedrock_pack_manager.py --rebuild --beta --zip
 
 When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
 
-- first choose `Install Packs`, `Uninstall Packs`, `Edit World`, or `Audit World`
-- `Rebuild World Pack JSONs` is a top-level mode
+- first choose `Install Packs`, `Edit World`, `Uninstall Packs`, `Audit World`, or `Rebuild World`
 - if you choose install, it asks for a zip output name
 - leave the zip name blank to skip zipping
 - enter a name like `world.zip` to run zip mode with that filename
@@ -127,6 +137,7 @@ When launched without flags in an interactive terminal, the app shows a keyboard
 The interactive menus work in POSIX terminals and on modern Windows consoles such as Windows Terminal and PowerShell.
 
 When the app finishes in an interactive terminal, it waits for `Enter` before closing.
+On startup, the app creates the full runtime folder tree under `run/` before logging, world selection, install, or uninstall logic runs.
 
 Install mode can also control how duplicate pack UUIDs are handled:
 
@@ -201,3 +212,10 @@ World selection can also be driven directly from the CLI:
 - `pytest>=8.0.0` and `pytest-cov>=5.0.0` for testing
 - `ruff>=0.9.0` for linting
 - `pyinstaller>=6.0.0` for standalone builds
+
+Project dependency layout in `pyproject.toml`:
+
+- runtime dependency: `nbtlib`
+- optional `test` extras: `pytest`, `pytest-cov`, `ruff`
+- optional `lint` extras: `ruff`
+- optional `build` extras: `pyinstaller`

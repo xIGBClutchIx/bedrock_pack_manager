@@ -1,9 +1,13 @@
+"""Project path helpers for the runtime `run/` layout."""
+
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class ProjectPaths:
+    """Resolved filesystem locations used by the app at runtime."""
+
     base_dir: Path
     run_dir: Path
     logs_dir: Path
@@ -33,6 +37,8 @@ def build_paths(base_dir: Path) -> ProjectPaths:
 
 
 def ensure_runtime_dirs(paths: ProjectPaths) -> None:
+    """Create the full runtime tree up front so every command can assume it exists."""
+
     for directory in [
         paths.run_dir,
         paths.logs_dir,

@@ -1,3 +1,5 @@
+"""Run-log mirroring for terminal output."""
+
 import io
 import re
 import sys
@@ -10,6 +12,8 @@ _active_log_mirror = None
 
 
 class TeeStream:
+    """Write terminal output to the console and the in-memory run log at once."""
+
     def __init__(self, primary, mirror) -> None:
         self.primary = primary
         self.mirror = mirror
@@ -33,6 +37,8 @@ def _strip_ansi(text: str) -> str:
 
 
 def _prune_old_logs(logs_dir: Path, keep: int) -> None:
+    """Keep `latest.txt` plus only the most recent timestamped log files."""
+
     timestamped_logs = sorted(
         logs_dir.glob("*.txt"),
         key=lambda path: path.stat().st_mtime,
@@ -51,6 +57,8 @@ def log_only(text: str) -> None:
 
 @contextmanager
 def capture_run_logs(logs_dir: Path):
+    """Mirror stdout/stderr into `run/logs/latest.txt` and a timestamped log."""
+
     global _active_log_mirror
     logs_dir.mkdir(parents=True, exist_ok=True)
 

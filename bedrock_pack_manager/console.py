@@ -1,3 +1,5 @@
+"""Terminal presentation helpers and run-state tracking."""
+
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +30,8 @@ def prompt_text(text: str) -> str:
 
 @dataclass
 class ActionRecord:
+    """Structured record of a notable action taken during a run."""
+
     kind: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
@@ -35,6 +39,8 @@ class ActionRecord:
 
 @dataclass
 class AppState:
+    """Mutable run state shared across commands for warnings and action summaries."""
+
     warnings: list[str] = field(default_factory=list)
     installed_packs: list[dict] = field(default_factory=list)
     actions: list[ActionRecord] = field(default_factory=list)
@@ -46,6 +52,8 @@ class AppState:
 
 
 class TerminalListMenu:
+    """Small redraw-based menu renderer used by interactive CLI prompts."""
+
     def __init__(
         self,
         static_lines: list[str],
@@ -66,6 +74,7 @@ class TerminalListMenu:
         self._render_dynamic_lines()
 
     def redraw(self) -> None:
+        # Rewind over the previously rendered dynamic block and paint the next frame in place.
         if self._rendered_dynamic_lines:
             sys.stdout.write(f"\033[{self._rendered_dynamic_lines}F")
         self._render_dynamic_lines()
