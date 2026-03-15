@@ -79,6 +79,31 @@ def test_process_pack_skips_when_registered_and_already_on_disk(tmp_path):
     assert any(action.kind == "skip_pack" for action in state.actions)
 
 
+def test_process_pack_uses_source_name_when_manifest_name_is_generic(tmp_path):
+    paths = build_paths(tmp_path)
+    world_dir = paths.worlds_dir / "ExampleWorld"
+    world_dir.mkdir(parents=True)
+
+    source_pack = tmp_path / "source" / "test_pack"
+    write_manifest(source_pack, uuid=PACK_UUID, name="pack.name")
+
+    stats = {"installed": 0, "skipped": 0, "errors": 0}
+    state = AppState()
+
+    process_pack(
+        source_pack,
+        stats,
+        world_dir,
+        paths,
+        state,
+        source_name="True Armor and Tools Expansion [BP] v1.4.1.mcpack",
+    )
+
+    installed_dirs = [path.name for path in paths.behavior_packs_dir.iterdir() if path.is_dir()]
+    assert installed_dirs == ["True Armor and Tools Expansion-BP"]
+    assert state.installed_packs[0]["name"] == "True Armor and Tools Expansion"
+
+
 def test_process_pack_replaces_existing_uuid_with_new_version_by_default(tmp_path):
     paths = build_paths(tmp_path)
     world_dir = paths.worlds_dir / "ExampleWorld"

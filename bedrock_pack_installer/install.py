@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -16,6 +17,17 @@ from .worlds import (
 )
 
 DuplicateMode = Literal["skip", "replace", "keep-both"]
+GENERIC_PACK_NAMES = {
+    "",
+    "addon",
+    "addonname",
+    "behaviorpack",
+    "name",
+    "pack",
+    "packname",
+    "resourcepack",
+    "unknown",
+}
 
 
 class UnsafeArchivePathError(Exception):
@@ -74,7 +86,32 @@ def find_all_packs(folder: Path) -> list[Path]:
     return packs
 
 
-def move_pack(pack_folder: Path, dest_dir: Path, pack_name: str, pack_type: str) -> Path:
+def _normalize_pack_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def _clean_source_name(source_name: str) -> str:
+    cleaned = Path(source_name).stem
+    cleaned = re.sub(r"\s*[\[(](?:bp|rp|beh|res|bh|rs)[\])]\s*", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?i)\s+v\d+(?:\.\d+)*$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" -_")
+
+
+def _effective_pack_name(pack_name: str, pack_folder: Path, source_name: str = "") -> str:
+    if _normalize_pack_name(pack_name) not in GENERIC_PACK_NAMES:
+        return pack_name
+
+    if source_name:
+        cleaned_source_name = _clean_source_name(source_name)
+        if cleaned_source_name:
+            return cleaned_source_name
+
+    return pack_folder.name
+
+
+def move_pack(pack_folder: Path, dest_dir: Path, pack_name: str, pack_type: str, source_name: str = "") -> Path:
+    pack_name = _effective_pack_name(pack_name, pack_folder, source_name)
     safe_name = "".join(char if char.isalnum() or char in " -_" else "" for char in pack_name).strip()
     if not safe_name:
         safe_name = pack_folder.name
@@ -194,27 +231,28 @@ def process_pack(
     pack_type = classify_pack(manifest)
     uuid, version, name = get_pack_info(manifest)
     deps = get_pack_dependencies(manifest)
+    display_name = _effective_pack_name(name, pack_folder, source_name)
 
     if not pack_type:
         modules = manifest.get("modules", [])
         types = [module.get("type", "???") for module in modules]
-        warn(state, f"Cannot determine type for '{name}' (module types: {types}) - skipping")
+        warn(state, f"Cannot determine type for '{display_name}' (module types: {types}) - skipping")
         stats["errors"] += 1
         return
 
     if not uuid:
-        warn(state, f"Pack '{name}' has no UUID in manifest - skipping (broken pack?)")
+        warn(state, f"Pack '{display_name}' has no UUID in manifest - skipping (broken pack?)")
         stats["errors"] += 1
         return
 
     fmt_ver = manifest.get("format_version")
     if fmt_ver is None:
-        warn(state, f"Pack '{name}' is missing format_version - may be an old/broken pack")
+        warn(state, f"Pack '{display_name}' is missing format_version - may be an old/broken pack")
     elif fmt_ver < 2:
-        warn(state, f"Pack '{name}' uses format_version {fmt_ver} (old format, may have issues)")
+        warn(state, f"Pack '{display_name}' uses format_version {fmt_ver} (old format, may have issues)")
 
     if any("beta" in str(dep.get("version", "")).lower() for dep in manifest.get("dependencies", [])) and beta_enabled is not True:
-        warn(state, f"Pack '{name}' uses beta API versions - run with --beta to enable experiments")
+        warn(state, f"Pack '{display_name}' uses beta API versions - run with --beta to enable experiments")
 
     type_label = "Behavior Pack" if pack_type == "bp" else "Resource Pack"
     dest_dir = paths.behavior_packs_dir if pack_type == "bp" else paths.resource_packs_dir
@@ -223,7 +261,7 @@ def process_pack(
     )
     ver_str = _format_version(version)
 
-    print(f"\n    {C.BOLD}[{type_label}]{C.RESET} {name} (v{ver_str})")
+    print(f"\n    {C.BOLD}[{type_label}]{C.RESET} {display_name} (v{ver_str})")
     print(f"    UUID: {C.DIM}{uuid}{C.RESET}")
 
     existing_packs = find_packs_on_disk(dest_dir, uuid)
@@ -250,7 +288,7 @@ def process_pack(
                 source=source_name,
             )
             stats["installed"] += 1
-            _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
+            _record_installed_pack(state, uuid, display_name, pack_type, version, deps, source_name)
             return
         if registration_action == "updated":
             info(
@@ -271,7 +309,7 @@ def process_pack(
                 source=source_name,
             )
             stats["installed"] += 1
-            _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
+            _record_installed_pack(state, uuid, display_name, pack_type, version, deps, source_name)
             return
         info(
             "Matching UUID and version already installed - skipping",
@@ -287,10 +325,7 @@ def process_pack(
 
     if existing_packs and duplicate_mode == "skip":
         existing_versions = ", ".join(_format_version(existing_pack["version"]) for existing_pack in existing_packs)
-        warn(
-            state,
-            f"Pack '{name}' already exists on disk with UUID {uuid} (installed: {existing_versions}) - skipping incoming v{ver_str}",
-        )
+        warn(state, f"Pack '{display_name}' already exists on disk with UUID {uuid} (installed: {existing_versions}) - skipping incoming v{ver_str}")
         stats["skipped"] += 1
         return
 
@@ -314,7 +349,7 @@ def process_pack(
             existing_paths=[str(existing_pack["path"]) for existing_pack in existing_packs],
         )
 
-    final_path = move_pack(pack_folder, dest_dir, name, pack_type)
+    final_path = move_pack(pack_folder, dest_dir, display_name, pack_type, source_name=source_name)
     ok(
         f"Copied to {final_path.relative_to(paths.base_dir)}",
         state=state,
@@ -367,7 +402,7 @@ def process_pack(
         )
 
     stats["installed"] += 1
-    _record_installed_pack(state, uuid, name, pack_type, version, deps, source_name)
+    _record_installed_pack(state, uuid, display_name, pack_type, version, deps, source_name)
 
 
 def move_to_processed(entry: Path, processed_dir: Path) -> None:
