@@ -92,7 +92,7 @@ Expected outputs:
 
 If stdout capture behaves oddly in the current environment, `pytest -s` is acceptable for diagnosis, but normal work should keep `pytest` green.
 
-CI currently runs in GitHub Actions from `.github/workflows/ci.yml` and checks Ruff plus pytest on Ubuntu with Python 3.12.
+CI currently runs in GitHub Actions with `.github/workflows/quality-checks.yml` for Ruff and pytest, plus `.github/workflows/build-artifacts.yml` for Linux and Windows one-file builds.
 Local Git hooks can be installed with `make install-hooks` on POSIX or `scripts/install_git_hooks.ps1` on Windows; they run Ruff on `pre-commit` and pytest on `pre-push` using the local `.venv`.
 
 ## Linting
