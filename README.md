@@ -42,6 +42,9 @@ It currently:
 - installs dependencies from `requirements.txt`
 - runs `ruff check .`
 - runs `pytest`
+- builds the Linux one-file executable on `ubuntu-latest`
+- builds the Windows one-file executable on `windows-latest`
+- uploads both executables from `dist/` as workflow artifacts
 
 ## Testing
 
