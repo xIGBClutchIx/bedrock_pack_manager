@@ -45,7 +45,7 @@ def configure_output() -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="bedrock_pack_installer.py",
+        prog="bedrock_pack_manager.py",
         description=(
             "Install Minecraft Bedrock packs from run/install/, rebuild world pack JSONs, "
             "zip runtime data, uninstall world packs, and edit a selected world's level.dat."

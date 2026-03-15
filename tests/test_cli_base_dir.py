@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-import bedrock_pack_installer.cli as cli
+import bedrock_pack_manager.cli as cli
 
 
 def test_get_base_dir_uses_project_root_when_not_frozen(monkeypatch):
@@ -12,6 +12,6 @@ def test_get_base_dir_uses_project_root_when_not_frozen(monkeypatch):
 
 def test_get_base_dir_uses_executable_parent_when_frozen(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", "/tmp/app/bedrock-pack-installer")
+    monkeypatch.setattr(sys, "executable", "/tmp/app/bedrock-pack-manager")
 
     assert cli.get_base_dir() == Path("/tmp/app")

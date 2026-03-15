@@ -1,8 +1,8 @@
 import sys
 
-import bedrock_pack_installer.cli as cli
-from bedrock_pack_installer.cli import parse_args
-from bedrock_pack_installer.logger import capture_run_logs
+import bedrock_pack_manager.cli as cli
+from bedrock_pack_manager.cli import parse_args
+from bedrock_pack_manager.logger import capture_run_logs
 
 
 def test_parse_args_defaults_to_no_flags():

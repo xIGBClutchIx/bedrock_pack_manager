@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bedrock-pack-installer"
+name = "bedrock-pack-manager"
 version = "0.1.0"
-description = "Minecraft Bedrock pack installer for worlds, behavior packs, and resource packs."
+description = "Minecraft Bedrock pack manager for worlds, behavior packs, and resource packs."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -28,11 +28,11 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--cov=bedrock_pack_installer --cov-report=term-missing --cov-report=xml"
+addopts = "--cov=bedrock_pack_manager --cov-report=term-missing --cov-report=xml"
 
 [tool.coverage.run]
 branch = true
-source = ["bedrock_pack_installer"]
+source = ["bedrock_pack_manager"]
 
 [tool.coverage.report]
 skip_covered = false
@@ -41,10 +41,10 @@ show_missing = true
 [tool.ruff]
 target-version = "py310"
 line-length = 180
-src = ["bedrock_pack_installer", "tests"]
+src = ["bedrock_pack_manager", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
 [tool.setuptools]
-packages = ["bedrock_pack_installer"]
+packages = ["bedrock_pack_manager"]

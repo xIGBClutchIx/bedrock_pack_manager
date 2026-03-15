@@ -1,6 +1,6 @@
 import sys
 
-from bedrock_pack_installer import terminal
+from bedrock_pack_manager import terminal
 
 
 def test_read_keypress_uses_windows_reader_when_running_on_windows(monkeypatch):

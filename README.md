@@ -1,4 +1,4 @@
-# Bedrock Pack Installer
+# Bedrock Pack Manager
 
 Install Minecraft Bedrock behavior packs and resource packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
 All runtime data lives under `run/` so the project root stays clean.
@@ -61,7 +61,7 @@ python -m pip install pyinstaller
 bash scripts/build_linux.sh
 ```
 
-This produces a single-file Linux executable at `dist/bedrock-pack-installer`.
+This produces a single-file Linux executable at `dist/bedrock-pack-manager`.
 
 When running the packaged binary, runtime data is still created under a `run/` folder beside the executable.
 
@@ -82,29 +82,29 @@ call .venv\Scripts\activate.bat
 scripts\build_windows.bat
 ```
 
-This produces `dist\bedrock-pack-installer.exe`.
+This produces `dist\bedrock-pack-manager.exe`.
 
 PyInstaller does not reliably cross-build Windows executables from Linux, so use the Windows script on a Windows machine.
 
 ## Usage
 
 ```bash
-python bedrock_pack_installer.py --help
-python bedrock_pack_installer.py
-python bedrock_pack_installer.py --uninstall
-python bedrock_pack_installer.py --uninstall --uninstall-keep-files
-python bedrock_pack_installer.py --rebuild
-python bedrock_pack_installer.py --zip
-python bedrock_pack_installer.py --zip-name world.zip
-python bedrock_pack_installer.py --beta
-python bedrock_pack_installer.py --gamemode creative
-python bedrock_pack_installer.py --beta --gamemode creative
-python bedrock_pack_installer.py --doctor
-python bedrock_pack_installer.py --doctor --world-name "My World"
-python bedrock_pack_installer.py --rebuild --world-path "My World"
-python bedrock_pack_installer.py --duplicate-mode replace
-python bedrock_pack_installer.py --rebuild --beta
-python bedrock_pack_installer.py --rebuild --beta --zip
+python bedrock_pack_manager.py --help
+python bedrock_pack_manager.py
+python bedrock_pack_manager.py --uninstall
+python bedrock_pack_manager.py --uninstall --uninstall-keep-files
+python bedrock_pack_manager.py --rebuild
+python bedrock_pack_manager.py --zip
+python bedrock_pack_manager.py --zip-name world.zip
+python bedrock_pack_manager.py --beta
+python bedrock_pack_manager.py --gamemode creative
+python bedrock_pack_manager.py --beta --gamemode creative
+python bedrock_pack_manager.py --doctor
+python bedrock_pack_manager.py --doctor --world-name "My World"
+python bedrock_pack_manager.py --rebuild --world-path "My World"
+python bedrock_pack_manager.py --duplicate-mode replace
+python bedrock_pack_manager.py --rebuild --beta
+python bedrock_pack_manager.py --rebuild --beta --zip
 ```
 
 When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
@@ -183,16 +183,16 @@ World selection can also be driven directly from the CLI:
 
 ## Project Layout
 
-- `bedrock_pack_installer.py`: thin CLI entrypoint
-- `bedrock_pack_installer/cli.py`: startup and argument handling
-- `bedrock_pack_installer/commands.py`: install, uninstall, rebuild, zip, world edit, and audit command handlers
-- `bedrock_pack_installer/install.py`: install workflow and dependency checks
-- `bedrock_pack_installer/worlds.py`: world selection and world JSON helpers
-- `bedrock_pack_installer/manifests.py`: manifest parsing and pack classification
-- `bedrock_pack_installer/nbt.py`: `level.dat` NBT helpers for world edits
-- `bedrock_pack_installer/paths.py`: shared project paths
-- `bedrock_pack_installer/console.py`: console output and shared app state
-- `bedrock_pack_installer/constants.py`: shared pack/archive constants
+- `bedrock_pack_manager.py`: thin CLI entrypoint
+- `bedrock_pack_manager/cli.py`: startup and argument handling
+- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, world edit, and audit command handlers
+- `bedrock_pack_manager/install.py`: install workflow and dependency checks
+- `bedrock_pack_manager/worlds.py`: world selection and world JSON helpers
+- `bedrock_pack_manager/manifests.py`: manifest parsing and pack classification
+- `bedrock_pack_manager/nbt.py`: `level.dat` NBT helpers for world edits
+- `bedrock_pack_manager/paths.py`: shared project paths
+- `bedrock_pack_manager/console.py`: console output and shared app state
+- `bedrock_pack_manager/constants.py`: shared pack/archive constants
 
 ## Requirements
 

@@ -3,7 +3,7 @@ import struct
 import sys
 import types
 
-from bedrock_pack_installer.nbt import enable_beta_apis, set_world_gamemode
+from bedrock_pack_manager.nbt import enable_beta_apis, set_world_gamemode
 
 
 class FakeByte(int):

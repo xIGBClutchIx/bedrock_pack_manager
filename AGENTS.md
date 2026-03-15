@@ -6,16 +6,16 @@ This project installs Minecraft Bedrock packs into a world from `.mcaddon`, `.mc
 
 The current architecture is a small Python package with a thin top-level script:
 
-- `bedrock_pack_installer.py`: entrypoint
-- `bedrock_pack_installer/cli.py`: CLI parsing and startup
-- `bedrock_pack_installer/install.py`: install flow
-- `bedrock_pack_installer/commands.py`: rebuild, zip, beta commands
-- `bedrock_pack_installer/worlds.py`: world JSON helpers and selection
-- `bedrock_pack_installer/manifests.py`: manifest parsing and classification
-- `bedrock_pack_installer/nbt.py`: `level.dat` experiment toggles
-- `bedrock_pack_installer/logger.py`: run log capture
-- `bedrock_pack_installer/paths.py`: runtime path layout
-- `bedrock_pack_installer/console.py`: console output helpers
+- `bedrock_pack_manager.py`: entrypoint
+- `bedrock_pack_manager/cli.py`: CLI parsing and startup
+- `bedrock_pack_manager/install.py`: install flow
+- `bedrock_pack_manager/commands.py`: rebuild, zip, beta commands
+- `bedrock_pack_manager/worlds.py`: world JSON helpers and selection
+- `bedrock_pack_manager/manifests.py`: manifest parsing and classification
+- `bedrock_pack_manager/nbt.py`: `level.dat` experiment toggles
+- `bedrock_pack_manager/logger.py`: run log capture
+- `bedrock_pack_manager/paths.py`: runtime path layout
+- `bedrock_pack_manager/console.py`: console output helpers
 
 ## Runtime Layout
 
@@ -34,24 +34,24 @@ If you add any new operational output, cache, report, or temp artifact, place it
 
 ## CLI Conventions
 
-Use `argparse` in `bedrock_pack_installer/cli.py`.
+Use `argparse` in `bedrock_pack_manager/cli.py`.
 
 Current public commands:
 
-- default install: `python bedrock_pack_installer.py`
-- rebuild: `python bedrock_pack_installer.py --rebuild`
-- zip: `python bedrock_pack_installer.py --zip`
-- beta toggle: `python bedrock_pack_installer.py --beta`
+- default install: `python bedrock_pack_manager.py`
+- rebuild: `python bedrock_pack_manager.py --rebuild`
+- zip: `python bedrock_pack_manager.py --zip`
+- beta toggle: `python bedrock_pack_manager.py --beta`
 
 When adding CLI options:
 
-- keep `python bedrock_pack_installer.py --help` accurate
+- keep `python bedrock_pack_manager.py --help` accurate
 - prefer explicit flags over implicit behavior
 - preserve existing workflows unless the user asked for a breaking change
 
 ## Logging
 
-Run logs are captured automatically through `bedrock_pack_installer/logger.py`.
+Run logs are captured automatically through `bedrock_pack_manager/logger.py`.
 
 Rules:
 
@@ -133,9 +133,9 @@ Prefer a mix of:
 
 Good targets for future tests:
 
-- install edge cases in `bedrock_pack_installer/install.py`
-- dispatch and error paths in `bedrock_pack_installer/commands.py`
-- world selection and world JSON handling in `bedrock_pack_installer/worlds.py`
+- install edge cases in `bedrock_pack_manager/install.py`
+- dispatch and error paths in `bedrock_pack_manager/commands.py`
+- world selection and world JSON handling in `bedrock_pack_manager/worlds.py`
 - logger and CLI integration
 
 Avoid brittle tests that only assert colored terminal formatting unless the formatting itself is the feature under test.

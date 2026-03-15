@@ -3,10 +3,10 @@ import sys
 import types
 import zipfile
 
-import bedrock_pack_installer.commands as commands
-from bedrock_pack_installer.commands import collect_uninstall_candidates, do_beta, do_doctor, do_rebuild, do_set_gamemode, do_uninstall, do_zip
-from bedrock_pack_installer.console import AppState
-from bedrock_pack_installer.paths import build_paths
+import bedrock_pack_manager.commands as commands
+from bedrock_pack_manager.commands import collect_uninstall_candidates, do_beta, do_doctor, do_rebuild, do_set_gamemode, do_uninstall, do_zip
+from bedrock_pack_manager.console import AppState
+from bedrock_pack_manager.paths import build_paths
 from tests.helpers import PACK_UUID, PACK_VERSION, write_manifest, write_world_json
 
 
@@ -98,7 +98,7 @@ def test_do_beta_enables_world_when_helper_returns_true(tmp_path, monkeypatch, c
     (world_dir / "level.dat").write_bytes(b"dummy")
 
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_installer.commands.enable_beta_apis", lambda _path: True)
+    monkeypatch.setattr("bedrock_pack_manager.commands.enable_beta_apis", lambda _path: True)
 
     state = AppState()
     do_beta(world_dir, state)
@@ -116,7 +116,7 @@ def test_do_beta_reports_already_enabled_when_helper_returns_false(tmp_path, mon
     (world_dir / "level.dat").write_bytes(b"dummy")
 
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_installer.commands.enable_beta_apis", lambda _path: False)
+    monkeypatch.setattr("bedrock_pack_manager.commands.enable_beta_apis", lambda _path: False)
 
     state = AppState()
     do_beta(world_dir, state)
@@ -160,7 +160,7 @@ def test_do_set_gamemode_updates_world_when_helper_returns_true(tmp_path, monkey
     (world_dir / "level.dat").write_bytes(b"dummy")
 
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_installer.commands.set_world_gamemode", lambda _path, _gamemode: True)
+    monkeypatch.setattr("bedrock_pack_manager.commands.set_world_gamemode", lambda _path, _gamemode: True)
 
     state = AppState()
     do_set_gamemode(world_dir, "creative", state)
@@ -178,7 +178,7 @@ def test_do_set_gamemode_reports_already_set_when_helper_returns_false(tmp_path,
     (world_dir / "level.dat").write_bytes(b"dummy")
 
     monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_installer.commands.set_world_gamemode", lambda _path, _gamemode: False)
+    monkeypatch.setattr("bedrock_pack_manager.commands.set_world_gamemode", lambda _path, _gamemode: False)
 
     state = AppState()
     do_set_gamemode(world_dir, "survival", state)

@@ -1,7 +1,7 @@
 .PHONY: run test test-verbose lint lint-fix build-linux build-windows clean
 
 run:
-	python bedrock_pack_installer.py
+	python bedrock_pack_manager.py
 
 test:
 	pytest

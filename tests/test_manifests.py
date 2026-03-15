@@ -1,6 +1,6 @@
 import json
 
-from bedrock_pack_installer.manifests import (
+from bedrock_pack_manager.manifests import (
     classify_pack,
     get_pack_dependencies,
     get_pack_info,

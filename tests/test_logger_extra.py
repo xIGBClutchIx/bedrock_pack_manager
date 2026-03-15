@@ -1,6 +1,6 @@
 import io
 
-from bedrock_pack_installer.logger import TeeStream
+from bedrock_pack_manager.logger import TeeStream
 
 
 class FakePrimary(io.StringIO):

@@ -1,7 +1,7 @@
 import sys
 
-from bedrock_pack_installer import cli
-from bedrock_pack_installer.paths import build_paths
+from bedrock_pack_manager import cli
+from bedrock_pack_manager.paths import build_paths
 
 
 def test_main_writes_log_file_for_cli_run(tmp_path, monkeypatch):
@@ -19,7 +19,7 @@ def test_main_writes_log_file_for_cli_run(tmp_path, monkeypatch):
         print(f"duplicate mode: {duplicate_mode}")
 
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--zip"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--zip"])
 
     cli.main()
 
@@ -32,7 +32,7 @@ def test_main_writes_log_file_for_cli_run(tmp_path, monkeypatch):
     assert "Run Settings" in log_text
     assert "Selection source: cli args/defaults" in log_text
     assert "Effective flags: --zip" in log_text
-    assert "Bedrock Pack Installer" in log_text
+    assert "Bedrock Pack Manager" in log_text
     assert "CLI run output" in log_text
     assert "duplicate mode: replace" in log_text
 
@@ -50,7 +50,7 @@ def test_main_selects_world_for_doctor(tmp_path, monkeypatch):
         calls.append((flags, world_dir, duplicate_mode))
 
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--doctor"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--doctor"])
 
     cli.main()
 
@@ -75,7 +75,7 @@ def test_main_uses_world_name_without_prompt(tmp_path, monkeypatch):
         calls.append((flags, world_dir, duplicate_mode))
 
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--doctor", "--world-name", "ExampleWorld"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--doctor", "--world-name", "ExampleWorld"])
 
     cli.main()
 
@@ -91,7 +91,7 @@ def test_main_prints_error_for_conflicting_world_flags(tmp_path, monkeypatch, ca
         "run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
     )
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--doctor", "--world-name", "A", "--world-path", "B"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--doctor", "--world-name", "A", "--world-path", "B"])
 
     cli.main()
 
@@ -111,7 +111,7 @@ def test_main_prints_clear_error_for_corrupt_world_pack_json(tmp_path, monkeypat
         "run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run should not execute")),
     )
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--uninstall"])
 
     cli.main()
 
@@ -135,7 +135,7 @@ def test_main_uses_interactive_menu_and_pauses_before_exit(tmp_path, monkeypatch
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -165,7 +165,7 @@ def test_main_selects_world_before_showing_interactive_mode_menu(tmp_path, monke
     monkeypatch.setattr(cli, "prompt_zip_name", lambda: None)
     monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: events.append("run"))
     monkeypatch.setattr(cli, "pause_before_exit", lambda: events.append("pause"))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -188,7 +188,7 @@ def test_main_uses_interactive_rebuild_mode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -213,7 +213,7 @@ def test_main_uses_interactive_edit_menu_and_applies_multiple_world_edits(tmp_pa
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -242,7 +242,7 @@ def test_main_uses_interactive_uninstall_menu_and_applies_selection(tmp_path, mo
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -271,7 +271,7 @@ def test_main_uses_interactive_uninstall_json_only_mode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "pause_before_exit", lambda: calls.append(("pause", None)))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -299,7 +299,7 @@ def test_main_rejects_empty_uninstall_selection(tmp_path, monkeypatch, capsys):
     )
     pause_calls = []
     monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -322,7 +322,7 @@ def test_main_reports_when_world_has_no_packs_to_uninstall(tmp_path, monkeypatch
     )
     pause_calls = []
     monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--uninstall"])
 
     cli.main()
 
@@ -350,7 +350,7 @@ def test_main_skips_uninstall_picker_when_queue_folder_has_entries(tmp_path, mon
         calls.append((flags, world_dir, duplicate_mode))
 
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py", "--uninstall", "--uninstall-keep-files"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--uninstall", "--uninstall-keep-files"])
 
     cli.main()
 
@@ -373,7 +373,7 @@ def test_main_rejects_empty_interactive_edit_selection(tmp_path, monkeypatch, ca
     )
     pause_calls = []
     monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 
@@ -400,7 +400,7 @@ def test_main_cancels_cleanly_from_interactive_menu(tmp_path, monkeypatch, capsy
     )
     pause_calls = []
     monkeypatch.setattr(cli, "pause_before_exit", lambda: pause_calls.append("pause"))
-    monkeypatch.setattr(sys, "argv", ["bedrock_pack_installer.py"])
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py"])
 
     cli.main()
 

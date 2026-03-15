@@ -111,7 +111,7 @@ def section(title: str, state: AppState | None = None, **details: Any) -> None:
 def app_header_lines() -> list[str]:
     return [
         "",
-        title_text("Bedrock Pack Installer"),
+        title_text("Bedrock Pack Manager"),
         f"  {dim_text('Minecraft world pack setup, uninstall, repair, zip, and level.dat edit tools')}",
     ]
 

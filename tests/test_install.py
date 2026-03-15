@@ -2,8 +2,8 @@ import json
 import shutil
 import zipfile
 
-from bedrock_pack_installer.console import AppState
-from bedrock_pack_installer.install import (
+from bedrock_pack_manager.console import AppState
+from bedrock_pack_manager.install import (
     UnsafeArchivePathError,
     _safe_extract_archive,
     check_dependencies,
@@ -15,7 +15,7 @@ from bedrock_pack_installer.install import (
     process_entry,
     process_pack,
 )
-from bedrock_pack_installer.paths import build_paths
+from bedrock_pack_manager.paths import build_paths
 from tests.conftest import FIXTURES
 from tests.helpers import (
     PACK_UUID,

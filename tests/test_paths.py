@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from bedrock_pack_installer.paths import build_paths
+from bedrock_pack_manager.paths import build_paths
 
 
 def test_build_paths_uses_run_directory():
-    base_dir = Path("/tmp/bedrock_pack_installer")
+    base_dir = Path("/tmp/bedrock_pack_manager")
 
     paths = build_paths(base_dir)
 

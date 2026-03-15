@@ -1,4 +1,4 @@
-from bedrock_pack_installer.console import (
+from bedrock_pack_manager.console import (
     AppState,
     TerminalListMenu,
     app_header,
@@ -30,7 +30,7 @@ def test_console_helpers_print_expected_output(capsys):
     assert "error msg" in output
     assert "ok msg" in output
     assert "info msg" in output
-    assert "Bedrock Pack Installer" in output
+    assert "Bedrock Pack Manager" in output
     assert "Section" in output
     assert "Subsection" in output
     assert "Warnings (1)" in output

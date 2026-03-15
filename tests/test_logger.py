@@ -1,4 +1,4 @@
-from bedrock_pack_installer.logger import _prune_old_logs, _strip_ansi, capture_run_logs, log_only
+from bedrock_pack_manager.logger import _prune_old_logs, _strip_ansi, capture_run_logs, log_only
 
 
 def test_strip_ansi_removes_color_codes():

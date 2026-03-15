@@ -1,5 +1,5 @@
 import pytest
-from bedrock_pack_installer.worlds import (
+from bedrock_pack_manager.worlds import (
     _move_cursor,
     find_world_by_name,
     is_already_registered,
@@ -76,7 +76,7 @@ def test_select_world_uses_prompt_when_multiple_worlds(tmp_path, monkeypatch):
     world_a.mkdir()
     world_b.mkdir()
 
-    monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("bedrock_pack_manager.worlds.is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "2")
 
     assert select_world(tmp_path) == world_b
@@ -90,7 +90,7 @@ def test_select_world_shows_level_dat_and_pack_counts(tmp_path, monkeypatch, cap
     (world_a / "level.dat").write_bytes(b"x")
     save_world_json(world_a / "world_behavior_packs.json", [{"pack_id": "bp", "version": [1, 0, 0]}])
     save_world_json(world_a / "world_resource_packs.json", [{"pack_id": "rp", "version": [1, 0, 0]}])
-    monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("bedrock_pack_manager.worlds.is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "1")
 
     select_world(tmp_path)
@@ -108,7 +108,7 @@ def test_select_world_retries_until_valid_choice(tmp_path, monkeypatch):
     world_b.mkdir()
 
     responses = iter(["x", "3", "1"])
-    monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: False)
+    monkeypatch.setattr("bedrock_pack_manager.worlds.is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: next(responses))
 
     assert select_world(tmp_path) == world_a
@@ -120,9 +120,9 @@ def test_select_world_interactive_uses_arrows_and_enter(tmp_path, monkeypatch, c
     world_a.mkdir()
     world_b.mkdir()
 
-    monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: True)
+    monkeypatch.setattr("bedrock_pack_manager.worlds.is_interactive_terminal", lambda: True)
     keys = iter(["\x1b[B", "\n"])
-    monkeypatch.setattr("bedrock_pack_installer.worlds.read_keypress", lambda: next(keys))
+    monkeypatch.setattr("bedrock_pack_manager.worlds.read_keypress", lambda: next(keys))
 
     assert select_world(tmp_path) == world_b
     output = capsys.readouterr().out
@@ -136,8 +136,8 @@ def test_select_world_interactive_quits_on_q(tmp_path, monkeypatch):
     world_a.mkdir()
     world_b.mkdir()
 
-    monkeypatch.setattr("bedrock_pack_installer.worlds.is_interactive_terminal", lambda: True)
-    monkeypatch.setattr("bedrock_pack_installer.worlds.read_keypress", lambda: "q")
+    monkeypatch.setattr("bedrock_pack_manager.worlds.is_interactive_terminal", lambda: True)
+    monkeypatch.setattr("bedrock_pack_manager.worlds.read_keypress", lambda: "q")
 
     with pytest.raises(KeyboardInterrupt):
         select_world(tmp_path)

@@ -6,9 +6,9 @@ cd "$ROOT_DIR"
 
 python -m PyInstaller \
   --onefile \
-  --name bedrock-pack-installer \
-  bedrock_pack_installer.py
+  --name bedrock-pack-manager \
+  bedrock_pack_manager.py
 
 echo
 echo "Built executable:"
-echo "  $ROOT_DIR/dist/bedrock-pack-installer"
+echo "  $ROOT_DIR/dist/bedrock-pack-manager"
