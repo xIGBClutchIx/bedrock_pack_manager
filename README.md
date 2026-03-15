@@ -30,8 +30,30 @@ make lint
 make lint-fix
 make build-linux
 make build-windows
+make install-hooks
 make clean
 ```
+
+## Local Git Hooks
+
+For practical local enforcement on every change:
+
+```bash
+make install-hooks
+```
+
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_git_hooks.ps1
+```
+
+That configures Git to use the tracked hooks in `.githooks/`:
+
+- `pre-commit`: runs `python -m ruff check .` from the local `.venv`
+- `pre-push`: runs `python -m pytest` from the local `.venv`
+
+The hooks work with either `.venv/bin/python` or `.venv\Scripts\python.exe`.
 
 ## GitHub Actions
 

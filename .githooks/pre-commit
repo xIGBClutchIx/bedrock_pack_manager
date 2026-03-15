@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+def project_python(root_dir: Path) -> Path:
+    scripts_python = root_dir / ".venv" / "Scripts" / "python.exe"
+    if scripts_python.exists():
+        return scripts_python
+
+    bin_python = root_dir / ".venv" / "bin" / "python"
+    if bin_python.exists():
+        return bin_python
+
+    raise FileNotFoundError("Local .venv Python was not found. Create the virtual environment before committing.")
+
+
+def main() -> int:
+    root_dir = Path(__file__).resolve().parents[1]
+    try:
+        python = project_python(root_dir)
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    result = subprocess.run([str(python), "-m", "ruff", "check", "."], cwd=root_dir)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

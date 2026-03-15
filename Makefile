@@ -1,4 +1,4 @@
-.PHONY: run test test-verbose lint lint-fix build-linux build-windows clean
+.PHONY: run test test-verbose lint lint-fix build-linux build-windows install-hooks clean
 
 run:
 	python bedrock_pack_manager.py
@@ -20,6 +20,9 @@ build-linux:
 
 build-windows:
 	pwsh -File scripts/build_windows.ps1
+
+install-hooks:
+	bash scripts/install_git_hooks.sh
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

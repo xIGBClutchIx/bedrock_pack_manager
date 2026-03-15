@@ -1,6 +1,7 @@
 """World selection and world pack JSON helpers."""
 
 import json
+import sys
 from pathlib import Path
 
 from .console import C, TerminalListMenu, app_header_lines, dim_text, display_path, title_text
