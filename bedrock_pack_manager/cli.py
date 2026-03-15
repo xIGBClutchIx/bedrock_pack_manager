@@ -6,7 +6,7 @@ from .commands import collect_uninstall_candidates, has_uninstall_queue_entries,
 from .console import AppState, C, TerminalListMenu, app_header, app_header_lines, dim_text, prompt_text, title_text
 from .logger import capture_run_logs, log_only
 from .nbt import GAMEMODE_VALUES
-from .paths import build_paths
+from .paths import build_paths, ensure_runtime_dirs
 from .terminal import enable_virtual_terminal, read_keypress
 from .worlds import find_world_by_name, resolve_world_path, select_world
 
@@ -489,6 +489,7 @@ def main() -> None:
     args = parse_args(argv)
     flags = flags_from_args(args)
     paths = build_paths(get_base_dir())
+    ensure_runtime_dirs(paths)
     state = AppState()
 
     try:

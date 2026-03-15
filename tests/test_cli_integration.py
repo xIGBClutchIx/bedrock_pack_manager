@@ -37,6 +37,27 @@ def test_main_writes_log_file_for_cli_run(tmp_path, monkeypatch):
     assert "duplicate mode: replace" in log_text
 
 
+def test_main_creates_runtime_directories_on_startup(tmp_path, monkeypatch):
+    paths = build_paths(tmp_path)
+    monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: (_ for _ in ()).throw(AssertionError("select_world should not be called for --zip")))
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["bedrock_pack_manager.py", "--zip"])
+
+    cli.main()
+
+    assert paths.run_dir.is_dir()
+    assert paths.logs_dir.is_dir()
+    assert paths.install_dir.is_dir()
+    assert paths.uninstall_dir.is_dir()
+    assert paths.installed_dir.is_dir()
+    assert paths.uninstalled_dir.is_dir()
+    assert paths.behavior_packs_dir.is_dir()
+    assert paths.resource_packs_dir.is_dir()
+    assert paths.worlds_dir.is_dir()
+
+
 def test_main_selects_world_for_doctor(tmp_path, monkeypatch):
     paths = build_paths(tmp_path)
     monkeypatch.setattr(cli, "build_paths", lambda _base_dir: paths)

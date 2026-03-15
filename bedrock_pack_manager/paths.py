@@ -30,3 +30,18 @@ def build_paths(base_dir: Path) -> ProjectPaths:
         installed_dir=run_dir / "installed",
         uninstalled_dir=run_dir / "uninstalled",
     )
+
+
+def ensure_runtime_dirs(paths: ProjectPaths) -> None:
+    for directory in [
+        paths.run_dir,
+        paths.logs_dir,
+        paths.install_dir,
+        paths.uninstall_dir,
+        paths.behavior_packs_dir,
+        paths.resource_packs_dir,
+        paths.worlds_dir,
+        paths.installed_dir,
+        paths.uninstalled_dir,
+    ]:
+        directory.mkdir(parents=True, exist_ok=True)
