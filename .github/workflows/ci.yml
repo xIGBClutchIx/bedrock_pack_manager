@@ -61,9 +61,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build executable
-        shell: ${{ matrix.os == 'windows-latest' && 'pwsh' || 'bash' }}
-        run: ${{ matrix.build_command }}
+      - name: Build executable (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/build_linux.sh
+
+      - name: Build executable (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
