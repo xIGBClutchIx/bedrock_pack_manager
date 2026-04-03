@@ -1,5 +1,7 @@
 # Bedrock Pack Manager
 
+## 100% Vibe Coded - Make backups!
+
 Install Minecraft Bedrock behavior packs and resource packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
 All runtime data lives under `run/` so the project root stays clean.
 
