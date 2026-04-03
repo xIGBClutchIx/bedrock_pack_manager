@@ -16,6 +16,8 @@ The current architecture is a small Python package with a thin top-level script:
 - `bedrock_pack_manager/logger.py`: run log capture
 - `bedrock_pack_manager/paths.py`: runtime path layout
 - `bedrock_pack_manager/console.py`: console output helpers
+- `bedrock_pack_manager/terminal.py`: terminal capability and keypress helpers
+- `bedrock_pack_manager/constants.py`: shared pack/archive constants
 
 ## Runtime Layout
 
@@ -45,10 +47,12 @@ Current public commands:
 - rebuild: `python bedrock_pack_manager.py --rebuild`
 - cleanup pack folders: `python bedrock_pack_manager.py --cleanup-pack-folders`
 - zip: `python bedrock_pack_manager.py --zip`
+- zip with custom name: `python bedrock_pack_manager.py --zip-name world.zip`
 - audit: `python bedrock_pack_manager.py --doctor`
 - uninstall: `python bedrock_pack_manager.py --uninstall`
 - beta toggle: `python bedrock_pack_manager.py --beta`
 - gamemode set: `python bedrock_pack_manager.py --gamemode creative`
+- combined world edit: `python bedrock_pack_manager.py --beta --gamemode creative`
 
 Current public selection and install modifiers:
 
@@ -56,6 +60,15 @@ Current public selection and install modifiers:
 - world selection: `--world-name <name>` or `--world-path <path>`
 - uninstall keep files: `--uninstall-keep-files`
 - zip name: `--zip-name world.zip`
+
+Current interactive menu actions:
+
+- install packs
+- edit world
+- uninstall packs
+- audit world
+- rebuild JSONs
+- cleanup pack folders
 
 When adding CLI options:
 
@@ -65,6 +78,7 @@ When adding CLI options:
 - keep CLI flags and the interactive prompt/menu in sync
 - if you add a CLI action or option, add the corresponding interactive prompt path when it makes sense for interactive use
 - if you add or change an interactive action or option, add or update the corresponding CLI flag or argument unless the user explicitly wants it to stay interactive-only
+- keep the README command examples and menu descriptions in sync with the code
 
 ## Logging
 

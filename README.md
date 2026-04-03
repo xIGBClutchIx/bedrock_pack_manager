@@ -3,6 +3,12 @@
 Install Minecraft Bedrock behavior packs and resource packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
 All runtime data lives under `run/` so the project root stays clean.
 
+## Interactive Menu
+
+The default interactive mode opens a keyboard-driven menu for install, uninstall, rebuild, audit, cleanup, and world-edit flows.
+
+![Interactive terminal menu](docs/images/interactive-menu.png)
+
 ## Setup
 
 ```bash
@@ -144,7 +150,9 @@ python bedrock_pack_manager.py --rebuild --beta
 python bedrock_pack_manager.py --rebuild --beta --zip
 ```
 
-When launched without flags in an interactive terminal, the app shows a keyboard-driven prompt flow:
+`--zip-name` implies `--zip`, so `python bedrock_pack_manager.py --zip-name world.zip` is valid on its own.
+
+When launched without flags in an interactive terminal, the app shows a keyboard-driven menu flow:
 
 - first choose `Install Packs`, `Edit World`, `Uninstall Packs`, `Audit World`, `Rebuild JSONs`, or `Cleanup Pack Folders`
 - if you choose install, it asks for a zip output name
@@ -159,6 +167,8 @@ When launched without flags in an interactive terminal, the app shows a keyboard
 - press `Enter` to continue
 - press `Q` or `Ctrl+C` to quit
 - leave all install options unchecked to continue with normal install mode
+
+When stdin/stdout is not a fully interactive terminal, the app falls back to plain prompt-based input instead of the arrow-key menu UI.
 
 The interactive menus work in POSIX terminals and on modern Windows consoles such as Windows Terminal and PowerShell.
 
@@ -207,6 +217,7 @@ World selection can also be driven directly from the CLI:
 
 - Extracts archive files, including nested `.mcpack` files inside `.mcaddon` archives
 - Detects whether a pack is a behavior pack or resource pack from `manifest.json`
+- Accepts `manifest.json` files that include `//` or `/* ... */` comments
 - Copies packs into `run/behavior_packs/` or `run/resource_packs/`
 - Registers packs in the selected world's JSON files
 - Rebuilds world pack JSON files from installed pack folders on demand
@@ -236,8 +247,10 @@ World selection can also be driven directly from the CLI:
 - `bedrock_pack_manager/worlds.py`: world selection and world JSON helpers
 - `bedrock_pack_manager/manifests.py`: manifest parsing and pack classification
 - `bedrock_pack_manager/nbt.py`: `level.dat` NBT helpers for world edits
+- `bedrock_pack_manager/logger.py`: run log capture and retention
 - `bedrock_pack_manager/paths.py`: shared project paths
 - `bedrock_pack_manager/console.py`: console output and shared app state
+- `bedrock_pack_manager/terminal.py`: terminal capability and keypress helpers
 - `bedrock_pack_manager/constants.py`: shared pack/archive constants
 
 ## Requirements
