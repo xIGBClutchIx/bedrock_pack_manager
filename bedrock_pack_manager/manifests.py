@@ -14,10 +14,61 @@ def strip_mc_formatting(text: str) -> str:
     return re.sub(r"§.", "", text)
 
 
+def strip_json_comments(text: str) -> str:
+    """Remove ``//`` and ``/* ... */`` comments outside JSON strings."""
+
+    result: list[str] = []
+    i = 0
+    in_string = False
+    escaped = False
+    length = len(text)
+
+    while i < length:
+        char = text[i]
+
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            result.append(char)
+            i += 1
+            continue
+
+        if char == "/" and i + 1 < length:
+            next_char = text[i + 1]
+
+            if next_char == "/":
+                i += 2
+                while i < length and text[i] not in "\r\n":
+                    i += 1
+                continue
+
+            if next_char == "*":
+                i += 2
+                while i + 1 < length and text[i : i + 2] != "*/":
+                    i += 1
+                i = i + 2 if i + 1 < length else length
+                continue
+
+        result.append(char)
+        i += 1
+
+    return "".join(result)
+
+
 def read_manifest(manifest_path: Path) -> dict | None:
     try:
         with open(manifest_path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+            return json.loads(strip_json_comments(f.read()))
     except json.JSONDecodeError as exc:
         error(f"Corrupt manifest.json in {manifest_path.parent.name}: {exc}")
         return None

@@ -5,12 +5,19 @@ from bedrock_pack_manager.manifests import (
     get_pack_dependencies,
     get_pack_info,
     read_manifest,
+    strip_json_comments,
     strip_mc_formatting,
 )
 
 
 def test_strip_mc_formatting_removes_section_codes():
     assert strip_mc_formatting("§aCool §bPack") == "Cool Pack"
+
+
+def test_strip_json_comments_preserves_comment_markers_inside_strings():
+    manifest_text = r'{"url":"https://example.com","text":"/* keep */ // keep"}'
+
+    assert strip_json_comments(manifest_text) == manifest_text
 
 
 def test_classify_pack_returns_bp_for_data_module():
@@ -60,6 +67,32 @@ def test_read_manifest_reads_valid_json(tmp_path):
     manifest_path.write_text(json.dumps({"header": {"uuid": "abc"}}), encoding="utf-8")
 
     assert read_manifest(manifest_path) == {"header": {"uuid": "abc"}}
+
+
+def test_read_manifest_accepts_json_with_comments(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        """
+        {
+          // top-level comment
+          "header": {
+            "uuid": "abc" /* inline block comment */
+          },
+          "dependencies": [
+            {
+              "uuid": "dep-1", // dependency comment
+              "version": [1, 0, 0]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    assert read_manifest(manifest_path) == {
+        "header": {"uuid": "abc"},
+        "dependencies": [{"uuid": "dep-1", "version": [1, 0, 0]}],
+    }
 
 
 def test_read_manifest_returns_none_for_invalid_json(tmp_path):
