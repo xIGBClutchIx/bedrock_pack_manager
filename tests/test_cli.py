@@ -398,8 +398,8 @@ def test_mode_menu_lines_show_primary_choices():
     assert "Edit World" in lines[3]
     assert "Uninstall Packs" in lines[4]
     assert "Audit World" in lines[5]
-    assert "Rebuild JSONs" in lines[6]
-    assert "Cleanup Pack Folders" in lines[7]
+    assert "Rebuild JSONs (overwrites world pack JSONs)" in lines[6]
+    assert "Cleanup Pack Folders (deletes unregistered pack folders)" in lines[7]
 
 
 def test_edit_world_menu_lines_show_selection_count():
@@ -407,7 +407,7 @@ def test_edit_world_menu_lines_show_selection_count():
 
     assert lines[0] == ""
     assert "World Edits (1 change(s))" in lines[1]
-    assert "Select one or more world edits" in lines[2]
+    assert "write them to level.dat" in lines[2]
     assert "Enable Beta APIs" in lines[4]
 
 
@@ -429,9 +429,17 @@ def test_uninstall_mode_menu_lines_show_choices():
 
     assert lines[0] == ""
     assert "Uninstall Mode" in lines[1]
-    assert "delete pack folders" in lines[2]
+    assert "removes now-unused pack folders from disk" in lines[2]
     assert "Remove From World And Delete Unused Files" in lines[4]
     assert "Remove From World JSON Only" in lines[5]
+
+
+def test_prompt_gamemode_menu_warns_about_level_dat_write(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    assert cli.prompt_gamemode() == "survival"
+    output = capsys.readouterr().out
+    assert "write to level.dat" in output
 
 
 def test_prompt_mode_quits_on_q(monkeypatch):

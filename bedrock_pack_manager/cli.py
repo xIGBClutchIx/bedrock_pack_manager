@@ -17,8 +17,8 @@ MODE_OPTIONS = [
     ("edit", "Edit World"),
     ("uninstall", "Uninstall Packs"),
     ("--doctor", "Audit World"),
-    ("--rebuild", "Rebuild JSONs"),
-    ("--cleanup-pack-folders", "Cleanup Pack Folders"),
+    ("--rebuild", "Rebuild JSONs (overwrites world pack JSONs)"),
+    ("--cleanup-pack-folders", "Cleanup Pack Folders (deletes unregistered pack folders)"),
 ]
 EDIT_WORLD_OPTIONS = [
     ("--beta", "Enable Beta APIs"),
@@ -235,7 +235,7 @@ def _edit_world_menu_lines(selected: set[str], cursor: int) -> list[str]:
     lines = [
         "",
         f"  {title_text(selection_label)}",
-        f"  {dim_text('Select one or more world edits, then press Enter to apply them')}",
+        f"  {dim_text('Select one or more world edits, then press Enter to write them to level.dat')}",
         "",
     ]
     for index, (flag, label) in enumerate(EDIT_WORLD_OPTIONS):
@@ -272,7 +272,7 @@ def _uninstall_mode_menu_lines(cursor: int) -> list[str]:
         UNINSTALL_MODE_OPTIONS,
         cursor,
         "Uninstall Mode",
-        "Choose whether uninstall should also delete pack folders when possible",
+        "Delete mode removes now-unused pack folders from disk; JSON-only keeps files",
     )
 
 
@@ -392,7 +392,7 @@ def prompt_gamemode(selected_world: Path | None = None) -> str:
     static_lines.extend(_selected_world_lines(selected_world))
     menu = TerminalListMenu(
         static_lines,
-        lambda: _single_select_menu_lines(GAMEMODE_OPTIONS, cursor, "Gamemode", "Choose the world's default gamemode"),
+        lambda: _single_select_menu_lines(GAMEMODE_OPTIONS, cursor, "Gamemode", "Choose the world's default gamemode to write to level.dat"),
     )
     menu.render_initial()
 

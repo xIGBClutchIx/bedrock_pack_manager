@@ -156,13 +156,15 @@ python bedrock_pack_manager.py --rebuild --beta --zip
 
 When launched without flags in an interactive terminal, the app shows a keyboard-driven menu flow:
 
-- first choose `Install Packs`, `Edit World`, `Uninstall Packs`, `Audit World`, `Rebuild JSONs`, or `Cleanup Pack Folders`
+- first choose install, edit world, uninstall, audit, rebuild, or cleanup from the menu
 - if you choose install, it asks for a zip output name
 - leave the zip name blank to skip zipping
 - enter a name like `world.zip` to run zip mode with that filename
 - if you choose uninstall packs, a second menu lets you toggle one or more registered behavior/resource packs to remove from that world
-- uninstall mode now asks whether to delete unused pack folders or keep files and edit world JSON only
+- uninstall mode warns before removing now-unused pack folders from disk and lets you keep files with JSON-only removal instead
+- rebuild and cleanup menu entries include warnings because rebuild overwrites world pack JSONs and cleanup deletes unregistered pack folders
 - if you choose edit world, a second menu lets you toggle one or more world edits, then submit them together
+- world edit prompts warn that selected changes are written directly to `level.dat`
 - if `Set Gamemode` is selected, a final menu asks which gamemode to write to `level.dat`
 - use `Up` and `Down` to move
 - press `Space` to toggle options in multi-select menus
