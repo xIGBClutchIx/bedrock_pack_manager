@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  package-onefile-binaries:
+  single-executable:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,24 +25,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Set up Node
+        uses: actions/setup-node@v6
         with:
-          python-version: "3.12"
+          node-version: "24"
+          cache: npm
 
-      - name: Install build dependencies
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build single executable
+        run: npm run build:sea
+
+      - name: Smoke-test the executable
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
-
-      - name: Build Linux executable
-        if: matrix.os == 'ubuntu-latest'
-        run: bash scripts/build_linux.sh
-
-      - name: Build Windows executable
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: ./scripts/build_windows.ps1
+          ./${{ matrix.artifact_path }} --help
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v6

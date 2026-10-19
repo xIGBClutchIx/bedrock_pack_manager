@@ -264,14 +264,16 @@ export abstract class Storage {
 
   // ---- trees ------------------------------------------------------------------------------------
 
-  /** Every folder (top-down) and file under `path`, listing a whole level at a time. */
-  async scanTree(path: string, signal?: AbortSignal): Promise<{ dirs: string[]; files: string[] }> {
+  /** Every folder (top-down, grouped by depth in `levels`) and file under `path`, listing a whole level at a time. */
+  async scanTree(path: string, signal?: AbortSignal): Promise<{ dirs: string[]; files: string[]; levels: string[][] }> {
     const dirs: string[] = [];
     const files: string[] = [];
+    const levels: string[][] = [];
     let frontier = [join(path)];
     while (frontier.length) {
       throwIfAborted(signal);
       dirs.push(...frontier);
+      levels.push(frontier);
       const listings = await this.map(frontier, (folder) => this.rawList(folder), signal);
       const next: string[] = [];
       frontier.forEach((folder, index) => {
@@ -287,7 +289,7 @@ export abstract class Storage {
       });
       frontier = next;
     }
-    return { dirs, files };
+    return { dirs, files, levels };
   }
 
   async removeTree(path: string, options: BulkOptions = {}): Promise<void> {
@@ -297,7 +299,7 @@ export abstract class Storage {
     if (!entry) return;
     if (!entry.isDir) return this.removeFile(key);
     try {
-      const { dirs, files } = await this.scanTree(key, options.signal);
+      const { files, levels } = await this.scanTree(key, options.signal);
       let done = 0;
       const results = await this.map(
         files,
@@ -308,9 +310,10 @@ export abstract class Storage {
         options.signal,
       );
       Storage.raiseFirst(results, isNotFound);
-      for (const folder of dirs.reverse()) {
+      // Deepest folders first; every folder at one depth can go at once.
+      for (const level of levels.reverse()) {
         throwIfAborted(options.signal);
-        await this.limiter(() => this.rawRemoveDir(folder));
+        Storage.raiseFirst(await this.map(level, (folder) => this.rawRemoveDir(folder), options.signal));
       }
     } finally {
       this.invalidate(key);
@@ -356,18 +359,22 @@ export abstract class Storage {
     };
 
     try {
-      for (const folder of folders) {
-        throwIfAborted(options.signal);
-        if (fresh) {
-          // Brand-new tree: nothing can exist yet, so skip the existence checks.
-          try {
-            await this.limiter(() => this.rawMkdir(folder));
-            continue;
-          } catch {
-            this.invalidate(folder);
-          }
+      if (fresh) {
+        // Brand-new tree: nothing can exist yet, so skip existence checks and create a whole depth level at once.
+        const depth = (folder: string) => folder.split("/").length;
+        const byDepth = new Map<number, string[]>();
+        for (const folder of folders) byDepth.set(depth(folder), [...(byDepth.get(depth(folder)) ?? []), folder]);
+        for (const level of [...byDepth.keys()].sort((a, b) => a - b).map((key) => byDepth.get(key)!)) {
+          throwIfAborted(options.signal);
+          const results = await this.map(level, (folder) => this.rawMkdir(folder), options.signal);
+          // A failed fast create (odd server) falls back to the careful path for that folder.
+          for (const [index, result] of results.entries()) if (result instanceof Error) await this.mkdirs(level[index]!);
         }
-        await this.mkdirs(folder);
+      } else {
+        for (const folder of folders) {
+          throwIfAborted(options.signal);
+          await this.mkdirs(folder);
+        }
       }
       Storage.raiseFirst(await this.map(uploads, put, options.signal));
       manifests.sort((a, b) => b[1].length - a[1].length);

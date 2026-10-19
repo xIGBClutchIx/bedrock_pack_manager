@@ -1337,8 +1337,34 @@ table.packs td.empty {
 .console {
   border-top: 1px solid var(--line);
   background: var(--console);
-  position: sticky;
-  bottom: 0;
+}
+
+/* Wide screens: the window is the app. Sidebar and panels scroll on their own and the console stays
+   as the bottom row, never covering content. Narrow screens: the page simply scrolls. */
+@media (min-width: 861px) {
+  .app {
+    height: 100vh;
+  }
+  .body {
+    min-height: 0;
+    overflow: hidden;
+    flex-wrap: nowrap;
+  }
+  .sidebar {
+    overflow-y: auto;
+  }
+  .content {
+    min-height: 0;
+  }
+  .panels {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .selection-bar {
+    position: sticky;
+    bottom: 0;
+  }
 }
 .console-head {
   display: flex;

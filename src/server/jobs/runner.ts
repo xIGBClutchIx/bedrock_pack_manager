@@ -144,7 +144,8 @@ export class JobRunner {
           job.errorCode = failure?.code ?? (error instanceof Error ? error.name : "error");
           job.errorData = failure?.data;
           if (!failure) job.log("error", error instanceof Error ? (error.stack ?? error.message) : String(error));
-          else job.log("error", job.error);
+          // A first-time host key is a question for the user, not a failure.
+          else job.log(failure.code === ERROR_CODES.unknownHostKey ? "info" : "error", job.error);
         }
       } finally {
         job.finish();

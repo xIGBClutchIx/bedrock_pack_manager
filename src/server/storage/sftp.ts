@@ -13,6 +13,8 @@ import { join } from "./path";
 import { Storage, type Entry } from "./storage";
 
 const NO_SUCH_FILE = 2;
+/** SFTP servers commonly cap a single read at 32-64 KB. */
+const READ_CHUNK = 32 * 1024;
 
 export interface SftpOptions {
   host: string;
@@ -47,7 +49,9 @@ export class SftpStorage extends Storage {
   private readonly port: number;
 
   private constructor(private readonly options: SftpOptions) {
-    super(options.concurrency ?? 16);
+    // Requests are pipelined, so many can be in flight cheaply; spread over a few channels so one
+    // slow server-side request does not hold up the rest.
+    super(options.concurrency ?? 48);
     this.port = options.port ?? 22;
     this.knownHosts = new KnownHosts(options.knownHostsFile ?? null);
   }
@@ -137,7 +141,7 @@ export class SftpStorage extends Storage {
     client.on("error", () => undefined);
     this.client = client;
 
-    const wanted = Math.max(1, this.options.channels ?? 3);
+    const wanted = Math.max(1, this.options.channels ?? 4);
     for (let index = 0; index < wanted; index++) {
       try {
         this.channels.push(
@@ -214,10 +218,51 @@ export class SftpStorage extends Storage {
     );
   }
 
+  /**
+   * Read a whole file in as few round trips as possible: open, then the size and the first chunk
+   * together, and the close is sent without waiting for it. Small files (manifests, world JSONs)
+   * cost two round trips instead of four.
+   */
+  private readWhole(sftp: SFTPWrapper, target: string): Promise<Buffer> {
+    const ask = <T>(fn: (done: (error: Error | null | undefined, value?: T) => void) => void) =>
+      new Promise<T>((resolve, reject) => fn((error, value) => (error ? reject(error) : resolve(value as T))));
+    return ask<Buffer>((done) => sftp.open(target, "r", done)).then(async (handle) => {
+      try {
+        const first = Buffer.alloc(READ_CHUNK);
+        const [stats, firstRead] = await Promise.all([
+          ask<{ size?: number }>((done) => sftp.fstat(handle, done)),
+          ask<number>((done) => sftp.read(handle, first, 0, READ_CHUNK, 0, (error, bytes) => done(error, bytes))),
+        ]);
+        const size = typeof stats.size === "number" ? stats.size : firstRead;
+        if (size <= firstRead) return first.subarray(0, firstRead);
+        // Bigger file: fetch the remaining chunks in parallel.
+        const whole = Buffer.alloc(size);
+        first.copy(whole, 0, 0, firstRead);
+        const offsets: number[] = [];
+        for (let offset = firstRead; offset < size; offset += READ_CHUNK) offsets.push(offset);
+        await Promise.all(
+          offsets.map((offset) =>
+            ask<number>((done) =>
+              sftp.read(handle, whole, offset, Math.min(READ_CHUNK, size - offset), offset, (error, bytes) => done(error, bytes)),
+            ),
+          ),
+        );
+        return whole;
+      } finally {
+        sftp.close(handle, () => undefined);
+      }
+    });
+  }
+
   protected async rawRead(path: string): Promise<Buffer> {
     const target = this.abs(path);
     try {
-      return await this.call<Buffer>((sftp, done) => sftp.readFile(target, done));
+      return await this.call<Buffer>((sftp, done) => {
+        this.readWhole(sftp, target).then(
+          (data) => done(null, data),
+          (error: Error) => done(error),
+        );
+      });
     } catch (error) {
       if (isMissing(error)) throw new NotFoundError(target);
       throw new StorageError(`Reading ${target} failed: ${(error as Error).message}`);

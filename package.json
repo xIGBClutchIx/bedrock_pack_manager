@@ -16,8 +16,10 @@
     "start": "node dist/server.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "vite build && playwright test smoke",
+    "screenshots": "vite build && playwright test screenshots",
     "bench": "tsx scripts/bench.ts",
+    "demo": "tsx scripts/demo-servers.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit"
