@@ -1,0 +1,481 @@
+/**
+ * The HTTP API and static UI. Bound to 127.0.0.1; every /api call needs the per-launch token and
+ * a loopback Host header, so other websites open in the browser cannot drive it.
+ */
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createWriteStream, existsSync, readFileSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { dirname, extname, join, normalize, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
+
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+
+import type {
+  AppStateResponse,
+  CleanupRequest,
+  ConnectRequest,
+  FixNestingRequest,
+  InstallRequest,
+  LayoutRequest,
+  SaveProfileRequest,
+  StatusRequest,
+  UninstallRequest,
+  WorldEditRequest,
+} from "../../shared/api";
+import { ROUTES, TOKEN_HEADER } from "../../shared/api";
+import { ERROR_CODES, type LogLevel } from "../../shared/events";
+import type { ConnectResult, DuplicateMode, Gamemode, LayoutOverrides, UploadEntry } from "../../shared/model";
+import { GAMEMODES, PROTOCOLS, publicSettings } from "../../shared/model";
+import type { AppPaths } from "../app/paths";
+import { ProfileStore } from "../app/profiles";
+import { backupFileName, runBackup } from "../core/commands/backup";
+import { runAudit, runCleanup, runFixNesting, runRebuild } from "../core/commands/maintenance";
+import { worldStatus } from "../core/commands/status";
+import { runUninstall } from "../core/commands/uninstall";
+import { runWorldEdit } from "../core/commands/worldEdit";
+import { runInstall, type CommandContext } from "../core/install";
+import { BusyError, JobFailure, JobRunner, type Job } from "../jobs/runner";
+import { JUNK_NAMES } from "../storage/path";
+import { Session, mapJobError } from "./session";
+
+export interface AppOptions {
+  paths: AppPaths;
+  token?: string;
+  /** Folder with the built UI (index.html + assets). Omit to serve none (dev: Vite serves it). */
+  webDir?: string | null;
+  /** Read an embedded asset (single-file exe). */
+  readAsset?: (path: string) => Buffer | null;
+  /** Extra Host values to accept, e.g. the Vite dev server. */
+  extraHosts?: string[];
+  /** Mirror of every job log line, for run/logs. */
+  onLog?: (level: LogLevel, text: string) => void;
+}
+
+export interface App {
+  fastify: FastifyInstance;
+  token: string;
+  session: Session;
+  runner: JobRunner;
+  setPort(port: number): void;
+}
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".json": "application/json",
+};
+const CSP =
+  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+/** A browser-supplied relative path, made safe, or null. */
+export function safeRelative(path: string): string | null {
+  const parts = path
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((part) => part && part !== ".");
+  if (!parts.length || parts.some((part) => part === ".." || part.includes(":") || part.includes("\0"))) return null;
+  return parts.join("/");
+}
+
+const str = (value: unknown) => (typeof value === "string" ? value : "");
+
+function cleanOverrides(raw: unknown): LayoutOverrides {
+  const data = (raw ?? {}) as Record<string, unknown>;
+  const pick = (key: string) => str(data[key]).trim() || undefined;
+  return {
+    serverRoot: pick("serverRoot"),
+    worldsDir: pick("worldsDir"),
+    bpDir: pick("bpDir"),
+    rpDir: pick("rpDir"),
+    packScope: data.packScope === "world" ? "world" : "shared",
+  };
+}
+
+export function createApp(options: AppOptions): App {
+  const { paths } = options;
+  const token = options.token ?? randomBytes(24).toString("base64url");
+  const tokenBytes = Buffer.from(token);
+  const session = new Session(paths);
+  const runner = new JobRunner(options.onLog);
+  const profiles = new ProfileStore(paths.profilesFile);
+  const allowedHosts = new Set<string>(options.extraHosts ?? []);
+  const fastify = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
+
+  const context = (job: Job): CommandContext => ({
+    target: session.requireTarget(),
+    log: job,
+    signal: job.signal,
+    scratchDir: paths.unpackDir,
+  });
+
+  // ---- guards -------------------------------------------------------------------------------------
+
+  const tokenOk = (request: FastifyRequest) => {
+    const supplied = Buffer.from(str(request.headers[TOKEN_HEADER]) || str((request.query as Record<string, unknown>)?.t));
+    return supplied.length === tokenBytes.length && timingSafeEqual(supplied, tokenBytes);
+  };
+
+  fastify.addHook("onRequest", async (request, reply) => {
+    const host = str(request.headers.host).toLowerCase();
+    if (!allowedHosts.has(host)) return reply.code(403).send({ error: "Bad Host header", code: "bad_host" });
+    if (request.url.startsWith("/api/") && !tokenOk(request)) {
+      return reply.code(403).send({ error: "Missing or wrong token. Open the link printed when the app started.", code: "bad_token" });
+    }
+    reply.header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer");
+  });
+
+  // Uploads arrive as raw bodies; leave the stream for the handler.
+  fastify.addContentTypeParser("application/octet-stream", (_request, _payload, done) => done(null));
+
+  fastify.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) => {
+    if (error instanceof BusyError) return reply.code(409).send({ error: error.message, code: ERROR_CODES.busy });
+    if (error instanceof JobFailure) return reply.code(400).send({ error: error.message, code: error.code });
+    const status = error.statusCode && error.statusCode < 500 ? error.statusCode : 500;
+    return reply.code(status).send({ error: error.message, code: status === 400 ? ERROR_CODES.badRequest : "error" });
+  });
+
+  /** Start a job and answer with its id; the UI follows it over SSE. */
+  const startJob = (reply: FastifyReply, kind: string, title: string, run: (job: Job) => Promise<unknown>) => {
+    const job = runner.start(kind, title, run, mapJobError);
+    return reply.code(202).send({ job: job.id });
+  };
+  const body = <T>(request: FastifyRequest) => (request.body ?? {}) as T;
+
+  // ---- state & connection -------------------------------------------------------------------------
+
+  fastify.get(ROUTES.state, async (): Promise<AppStateResponse> => {
+    const target = session.target;
+    return {
+      connected: !!target,
+      label: target?.label ?? null,
+      settings: session.settings ? publicSettings(session.settings) : null,
+      layout: target?.layoutInfo() ?? null,
+      overrides: session.overrides,
+      worlds: session.worlds,
+      defaultWorld: session.defaultWorld,
+      activeJob: runner.busy ? runner.active!.info() : null,
+      uploads: await listUploads(),
+      profiles: profiles.list(),
+    };
+  });
+
+  fastify.post(ROUTES.connect, async (request, reply) => {
+    const { settings, layout } = body<ConnectRequest>(request);
+    if (!settings || !PROTOCOLS.includes(settings.protocol)) throw new JobFailure("Unknown protocol", ERROR_CODES.badRequest);
+    const clean = {
+      protocol: settings.protocol,
+      host: str(settings.host).trim(),
+      port: Number.isFinite(Number(settings.port)) && settings.port ? Number(settings.port) : null,
+      username: str(settings.username).trim(),
+      root: str(settings.root).trim(),
+      password: str(settings.password) || undefined,
+      keyFile: str(settings.keyFile).trim() || undefined,
+      keyPassphrase: str(settings.keyPassphrase) || undefined,
+      tlsVerify: settings.tlsVerify !== false,
+      passive: settings.passive !== false,
+      trustedFingerprint: str(settings.trustedFingerprint).trim() || undefined,
+    };
+    const where = clean.protocol === "local" ? clean.root || "run/" : clean.host;
+    return startJob(reply, "connect", `Connecting to ${where}`, async (job): Promise<ConnectResult> => {
+      job.log("plain", `Connecting to ${where} over ${clean.protocol.toUpperCase()} ...`);
+      const target = await session.connect(clean, cleanOverrides(layout));
+      job.log("ok", `Connected: ${target.label}`);
+      job.log("plain", `Server folder: ${target.describe(target.layout.serverRoot)}`);
+      for (const note of target.layout.notes) job.log("info", note);
+      job.log("plain", `Found ${session.worlds.length} world(s)`);
+      return { label: target.label, layout: target.layoutInfo(), worlds: session.worlds, defaultWorld: session.defaultWorld };
+    });
+  });
+
+  fastify.post(ROUTES.disconnect, async (_request, reply) => {
+    if (runner.busy) return reply.code(409).send({ error: "A task is still running", code: ERROR_CODES.busy });
+    await session.disconnect();
+    return { ok: true };
+  });
+
+  fastify.post(ROUTES.layout, async (request, reply) => {
+    session.requireTarget();
+    const overrides = cleanOverrides(body<LayoutRequest>(request).layout);
+    return startJob(reply, "layout", "Updating layout", async (job): Promise<ConnectResult> => {
+      const target = await session.relayout(overrides);
+      job.log("ok", `Layout updated. Found ${session.worlds.length} world(s)`);
+      return { label: target.label, layout: target.layoutInfo(), worlds: session.worlds, defaultWorld: session.defaultWorld };
+    });
+  });
+
+  // ---- world commands -----------------------------------------------------------------------------
+
+  fastify.post(ROUTES.status, async (request, reply) => {
+    const { world, refreshWorlds } = body<StatusRequest>(request);
+    session.requireTarget();
+    return startJob(reply, "status", "Reading world", async (job) => {
+      const target = session.requireTarget();
+      target.storage.clearCache();
+      if (refreshWorlds) await session.refreshWorlds();
+      const path = await session.requireWorld(world);
+      const status = await worldStatus(target, path);
+      job.log("plain", `${status.packs.length} pack(s), ${status.problems.length} problem(s)`);
+      return status;
+    });
+  });
+
+  fastify.post(ROUTES.install, async (request, reply) => {
+    const input = body<InstallRequest>(request);
+    const mode: DuplicateMode = input.duplicateMode === "skip" || input.duplicateMode === "keep-both" ? input.duplicateMode : "replace";
+    session.requireTarget();
+    const sources = (await readdir(paths.uploadsDir))
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+      .map((name) => join(paths.uploadsDir, name));
+    if (!sources.length) throw new JobFailure("Add some packs first", ERROR_CODES.noUploads);
+    return startJob(reply, "install", input.dryRun ? "Planning install" : `Installing ${sources.length} item(s)`, async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      const world = await session.requireWorld(input.world);
+      const result = await runInstall(ctx, { world, sources, duplicateMode: mode, reupload: !!input.reupload, dryRun: !!input.dryRun });
+      if (result.applied) {
+        await session.refreshWorlds(result.worlds);
+        if (result.stats.errors === 0) await clearUploads();
+      }
+      return result;
+    });
+  });
+
+  fastify.post(ROUTES.uninstall, async (request, reply) => {
+    const input = body<UninstallRequest>(request);
+    const keys = Array.isArray(input.keys) ? input.keys.filter((key): key is string => typeof key === "string") : [];
+    if (!keys.length) throw new JobFailure("Select at least one pack", ERROR_CODES.nothingSelected);
+    session.requireTarget();
+    return startJob(reply, "uninstall", input.keepFiles ? "Removing from world" : "Uninstalling", async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      const result = await runUninstall(ctx, await session.requireWorld(input.world), keys, !!input.keepFiles);
+      await session.refreshWorlds(result.worlds);
+      return result;
+    });
+  });
+
+  fastify.post(ROUTES.rebuild, async (request, reply) => {
+    const { world } = body<StatusRequest>(request);
+    session.requireTarget();
+    return startJob(reply, "rebuild", "Rebuilding world JSONs", async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      const result = await runRebuild(ctx, await session.requireWorld(world));
+      await session.refreshWorlds(result.worlds);
+      return result;
+    });
+  });
+
+  fastify.post(ROUTES.cleanup, async (request, reply) => {
+    const { world, dryRun } = body<CleanupRequest>(request);
+    session.requireTarget();
+    return startJob(reply, "cleanup", dryRun ? "Previewing cleanup" : "Cleaning up", async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      return runCleanup(ctx, await session.requireWorld(world), !!dryRun);
+    });
+  });
+
+  fastify.post(ROUTES.audit, async (request, reply) => {
+    const { world } = body<StatusRequest>(request);
+    session.requireTarget();
+    return startJob(reply, "audit", "Auditing", async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      return runAudit(ctx, await session.requireWorld(world));
+    });
+  });
+
+  fastify.post(ROUTES.fixNesting, async (request, reply) => {
+    const { world, paths: picked, dryRun } = body<FixNestingRequest>(request);
+    session.requireTarget();
+    const wanted = Array.isArray(picked) ? picked.filter((path): path is string => typeof path === "string") : [];
+    return startJob(reply, "fix-nesting", dryRun ? "Previewing nesting fix" : "Fixing nested packs", async (job) => {
+      const ctx = context(job);
+      ctx.target.storage.clearCache();
+      return runFixNesting(ctx, await session.requireWorld(world), wanted, !!dryRun);
+    });
+  });
+
+  fastify.post(ROUTES.worldEdit, async (request, reply) => {
+    const { world, beta, gamemode } = body<WorldEditRequest>(request);
+    if (gamemode && !GAMEMODES.includes(gamemode)) throw new JobFailure(`Unknown gamemode ${gamemode}`, ERROR_CODES.badRequest);
+    session.requireTarget();
+    return startJob(reply, "world-edit", "Saving world settings", async (job) =>
+      runWorldEdit(context(job), await session.requireWorld(world), { beta: !!beta, gamemode: (gamemode as Gamemode) || null }),
+    );
+  });
+
+  /** The zip is generated straight from the server into the download: no temp file. */
+  fastify.get(ROUTES.backup, async (request, reply) => {
+    const worldParam = str((request.query as Record<string, unknown>).world);
+    session.requireTarget();
+    const world = worldParam ? await session.requireWorld(worldParam) : null;
+    const name = backupFileName(world);
+    const job = runner.start(
+      "backup",
+      world ? "Backing up world" : "Backing up the server",
+      async (j) => {
+        reply.raw.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="${name}"`,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        return runBackup(context(j), world, reply.raw);
+      },
+      mapJobError,
+    );
+    reply.hijack();
+    await job.promise;
+    if (job.status !== "done" && !reply.raw.headersSent) {
+      reply.raw.writeHead(500, { "Content-Type": "application/json" });
+      reply.raw.end(JSON.stringify({ error: job.error, code: job.errorCode }));
+    } else if (!reply.raw.writableEnded) {
+      reply.raw.end();
+    }
+  });
+
+  // ---- jobs ---------------------------------------------------------------------------------------
+
+  fastify.get("/api/jobs/:id", async (request, reply) => {
+    const job = runner.get((request.params as { id: string }).id);
+    if (!job) return reply.code(404).send({ error: "Unknown job", code: "not_found" });
+    return job.info();
+  });
+
+  fastify.post("/api/jobs/:id/cancel", async (request) => ({ cancelled: runner.cancel((request.params as { id: string }).id) }));
+
+  fastify.get("/api/jobs/:id/events", async (request, reply) => {
+    const job = runner.get((request.params as { id: string }).id);
+    if (!job) return reply.code(404).send({ error: "Unknown job", code: "not_found" });
+    const since = Math.max(0, Number((request.query as Record<string, unknown>).since) || 0);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    const send = (event: unknown) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    const unsubscribe = job.subscribe(since, (event) => {
+      send(event);
+      if (event.type === "end") reply.raw.end();
+    });
+    if (job.status !== "running") reply.raw.end();
+    request.raw.on("close", unsubscribe);
+  });
+
+  // ---- uploads ------------------------------------------------------------------------------------
+
+  async function listUploads(): Promise<UploadEntry[]> {
+    const entries: UploadEntry[] = [];
+    for (const name of (await readdir(paths.uploadsDir).catch(() => [])).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))) {
+      const full = join(paths.uploadsDir, name);
+      const info = await stat(full);
+      if (info.isDirectory()) {
+        const files = (readdirSync(full, { recursive: true, withFileTypes: true }) as Dirent[]).filter((entry) => entry.isFile());
+        const size = files.reduce((sum, file) => sum + statSync(join(file.parentPath, file.name)).size, 0);
+        entries.push({ name, isDir: true, files: files.length, size });
+      } else {
+        entries.push({ name, isDir: false, files: 1, size: info.size });
+      }
+    }
+    return entries;
+  }
+
+  async function clearUploads(name?: string): Promise<void> {
+    if (name) {
+      const relative = safeRelative(name);
+      if (!relative || relative.includes("/")) throw new JobFailure("Bad upload name", ERROR_CODES.badRequest);
+      await rm(join(paths.uploadsDir, relative), { recursive: true, force: true });
+      return;
+    }
+    rmSync(paths.uploadsDir, { recursive: true, force: true });
+    await mkdir(paths.uploadsDir, { recursive: true });
+  }
+
+  fastify.get(ROUTES.uploads, async () => ({ uploads: await listUploads() }));
+
+  fastify.put(ROUTES.uploads, async (request, reply) => {
+    if (runner.busy && runner.active?.kind === "install")
+      return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
+    const relative = safeRelative(str((request.query as Record<string, unknown>).path));
+    if (!relative || relative.split("/").some((part) => JUNK_NAMES.has(part))) {
+      if (relative) {
+        request.raw.resume();
+        return { ok: true, skipped: true };
+      }
+      return reply.code(400).send({ error: "Bad upload path", code: ERROR_CODES.badRequest });
+    }
+    const destination = resolve(paths.uploadsDir, relative);
+    if (!destination.startsWith(resolve(paths.uploadsDir) + sep))
+      return reply.code(400).send({ error: "Bad upload path", code: ERROR_CODES.badRequest });
+    await mkdir(dirname(destination), { recursive: true });
+    await pipeline(request.raw, createWriteStream(destination));
+    return { ok: true };
+  });
+
+  fastify.delete(ROUTES.uploads, async (request, reply) => {
+    if (runner.busy && runner.active?.kind === "install")
+      return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
+    await clearUploads(str((request.query as Record<string, unknown>).name) || undefined);
+    return { uploads: await listUploads() };
+  });
+
+  // ---- profiles -----------------------------------------------------------------------------------
+
+  fastify.get(ROUTES.profiles, async () => ({ profiles: profiles.list() }));
+  fastify.post(ROUTES.profiles, async (request, reply) => {
+    const input = body<SaveProfileRequest>(request);
+    const name = str(input.name).trim();
+    if (!name || !input.settings)
+      return reply.code(400).send({ error: "A profile needs a name and settings", code: ERROR_CODES.badRequest });
+    return { profiles: profiles.save(name, input.settings, cleanOverrides(input.layout)) };
+  });
+  fastify.delete(ROUTES.profiles, async (request) => ({ profiles: profiles.delete(str((request.query as Record<string, unknown>).name)) }));
+
+  // ---- static UI ----------------------------------------------------------------------------------
+
+  const readStatic = (relative: string): Buffer | null => {
+    if (options.readAsset) return options.readAsset(relative);
+    if (!options.webDir) return null;
+    const full = normalize(join(options.webDir, relative));
+    if (!full.startsWith(normalize(options.webDir)) || !existsSync(full) || !statSync(full).isFile()) return null;
+    return readFileSync(full);
+  };
+
+  fastify.get("/*", async (request, reply) => {
+    const path = request.url.split("?")[0]!;
+    if (path.startsWith("/api/")) return reply.code(404).send({ error: "Not found", code: "not_found" });
+    const relative = safeRelative(decodeURIComponent(path)) ?? "index.html";
+    let file = readStatic(relative);
+    let served = relative;
+    if (!file && !extname(relative)) {
+      file = readStatic("index.html"); // client-side routes
+      served = "index.html";
+    }
+    if (!file) return reply.code(404).send("Not found");
+    return reply
+      .header("Content-Type", MIME[extname(served)] ?? "application/octet-stream")
+      .header("Content-Security-Policy", CSP)
+      .header("Cache-Control", served.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-store")
+      .send(file);
+  });
+
+  return {
+    fastify,
+    token,
+    session,
+    runner,
+    setPort(port: number) {
+      allowedHosts.add(`127.0.0.1:${port}`);
+      allowedHosts.add(`localhost:${port}`);
+    },
+  };
+}

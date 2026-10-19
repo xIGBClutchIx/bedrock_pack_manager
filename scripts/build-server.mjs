@@ -8,6 +8,8 @@ await build({
   platform: "node",
   target: "node24",
   format: "cjs",
+  // Prefer ESM entry points: some packages (jsonc-parser) ship a UMD "main" that esbuild cannot follow.
+  mainFields: ["module", "main"],
   sourcemap: false,
   minify: false,
   legalComments: "none",
