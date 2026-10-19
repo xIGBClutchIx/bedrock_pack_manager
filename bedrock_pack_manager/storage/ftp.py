@@ -48,6 +48,8 @@ def _is_missing(exc: Exception) -> bool:
 
 class FTPStorage(Storage):
     cache_listings = True
+    # Every FTP worker is a separate login; many hosts allow only a handful per user.
+    max_workers = 4
 
     def __init__(
         self,
@@ -123,7 +125,24 @@ class FTPStorage(Storage):
             self.root = join(home, self.root) or "/"
         self._ftp = ftp
 
+    def _spawn(self) -> "FTPStorage":
+        """A second logged-in connection. Hosts often cap these, so callers tolerate failure."""
+
+        return FTPStorage(
+            self.host,
+            port=self.port,
+            username=self.username,
+            password=self._password,
+            root=self.root,
+            tls=self.tls,
+            tls_verify=self.tls_verify,
+            passive=self.passive,
+            timeout=self.timeout,
+            ftp_factory=self._ftp_factory,
+        )
+
     def close(self) -> None:
+        super().close()
         if self._ftp is None:
             return
         try:

@@ -5,10 +5,16 @@ storage root (the server folder the user pointed at); absolute paths are used as
 """
 
 import posixpath
+import queue
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator, TypeVar
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 JUNK_NAMES = {"__MACOSX", ".DS_Store", "Thumbs.db", "desktop.ini"}
 
@@ -59,9 +65,13 @@ class Storage(ABC):
     label: str = ""
     #: whether directory listings can be cached for the lifetime of an operation
     cache_listings: bool = False
+    #: how many connections bulk operations may use at once (1 = no parallelism)
+    max_workers: int = 1
 
     def __init__(self) -> None:
         self._listing_cache: dict[str, list[Entry]] = {}
+        self._workers: list["Storage"] = []
+        self._workers_lock = threading.Lock()
 
     # ---- primitives each backend implements -------------------------------------------------
 
@@ -94,6 +104,80 @@ class Storage(ABC):
 
     def close(self) -> None:
         """Release the connection, if any."""
+
+        self.close_workers()
+
+    def _spawn(self) -> "Storage | None":
+        """Open one more independent connection to the same place, for parallel work."""
+
+        return None
+
+    def close_workers(self) -> None:
+        with self._workers_lock:
+            workers, self._workers = self._workers, []
+        for worker in workers:
+            try:
+                worker.close()
+            except Exception:
+                pass
+
+    def _ensure_workers(self, wanted: int) -> list["Storage"]:
+        """Extra connections, opened lazily and kept until ``close``. Fewer if the server refuses more."""
+
+        with self._workers_lock:
+            while len(self._workers) < wanted:
+                try:
+                    worker = self._spawn()
+                except Exception:
+                    worker = None
+                if worker is None:
+                    break
+                self._workers.append(worker)
+            workers = list(self._workers[:wanted])
+        # Writes go through the main connection, so a worker's listings may be stale: start each batch fresh.
+        for worker in workers:
+            worker.clear_cache()
+        return workers
+
+    def parallel(self, func: Callable[["Storage", T], R], items: Iterable[T]) -> list[R | BaseException]:
+        """Run ``func(storage, item)`` for each item over several connections, keeping order.
+
+        Each connection is used by one thread at a time. Exceptions are returned in place of
+        results so callers decide what a failure means.
+        """
+
+        items = list(items)
+        extra = min(self.max_workers, len(items)) - 1
+        workers = [self, *self._ensure_workers(extra)] if extra > 0 else [self]
+
+        def _run(storage: "Storage", item: T) -> R | BaseException:
+            try:
+                return func(storage, item)
+            except Exception as exc:  # returned to the caller, which decides
+                return exc
+
+        if len(workers) == 1:
+            return [_run(self, item) for item in items]
+
+        pool: queue.Queue = queue.Queue()
+        for worker in workers:
+            pool.put(worker)
+
+        def _task(item: T) -> R | BaseException:
+            storage = pool.get()
+            try:
+                return _run(storage, item)
+            finally:
+                pool.put(storage)
+
+        with ThreadPoolExecutor(max_workers=len(workers)) as executor:
+            return list(executor.map(_task, items))
+
+    def read_many(self, paths: Iterable[str]) -> dict[str, bytes | BaseException]:
+        """Read several files at once. Missing files map to ``FileNotFoundError``."""
+
+        paths = [join(path) for path in paths]
+        return dict(zip(paths, self.parallel(lambda storage, path: storage._read_bytes(path), paths)))
 
     def describe(self, path: str) -> str:
         """Human-readable location used in console output."""
@@ -255,6 +339,34 @@ class Storage(ABC):
         for name in dirs:
             yield from self.walk(join(path, name))
 
+    def scan_tree(self, path: str) -> tuple[list[str], list[str]]:
+        """All folders (top-down) and files under ``path``, listing a whole level at a time in parallel."""
+
+        dirs: list[str] = []
+        files: list[str] = []
+        frontier = [join(path)]
+        while frontier:
+            dirs.extend(frontier)
+            listings = self.parallel(lambda storage, folder: storage._list_dir(folder), frontier)
+            next_frontier = []
+            for folder, listing in zip(frontier, listings):
+                if isinstance(listing, (FileNotFoundError, NotADirectoryError)):
+                    continue
+                if isinstance(listing, BaseException):
+                    raise listing
+                for entry in listing:
+                    if entry.name in (".", ".."):
+                        continue
+                    (next_frontier if entry.is_dir else files).append(join(folder, entry.name))
+            frontier = next_frontier
+        return dirs, files
+
+    @staticmethod
+    def _raise_first(results: list, *, ignore: tuple = ()) -> None:
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, ignore):
+                raise result
+
     def remove_tree(self, path: str) -> None:
         path = join(path)
         if path in ("", "/", "."):
@@ -265,15 +377,13 @@ class Storage(ABC):
         if not entry.is_dir:
             self.remove_file(path)
             return
-        for child in self.list_dir(path):
-            child_path = join(path, child.name)
-            if child.is_dir:
-                self.remove_tree(child_path)
-            else:
-                self._remove_file(child_path)
-        self._invalidate(path)
-        self._remove_dir(path)
-        self._invalidate(path)
+        dirs, files = self.scan_tree(path)
+        try:
+            self._raise_first(self.parallel(lambda storage, file: storage._remove_file(file), files), ignore=(FileNotFoundError,))
+            for folder in reversed(dirs):
+                self._remove_dir(folder)
+        finally:
+            self._invalidate(path)
 
     def upload_tree(
         self,
@@ -283,50 +393,69 @@ class Storage(ABC):
         exclude: set[Path] | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> int:
-        """Upload a local folder. ``manifest.json`` files are written last so a broken
-        transfer never leaves a folder that looks like a complete pack."""
+        """Upload a local folder, several files at a time. ``manifest.json`` files are written
+        last so a broken transfer never leaves a folder that looks like a complete pack."""
 
         exclude = {path.resolve() for path in (exclude or set())}
         remote_dir = join(remote_dir)
+        fresh = not self.exists(remote_dir)
         self.mkdirs(remote_dir)
-        file_count = 0
-        deferred: list[tuple[Path, str]] = []
 
-        def _upload_dir(local: Path, remote: str) -> None:
-            nonlocal file_count
+        folders: list[str] = []
+        uploads: list[tuple[Path, str]] = []
+        manifests: list[tuple[Path, str]] = []
+
+        def _collect(local: Path, remote: str) -> None:
             for child in sorted(local.iterdir(), key=lambda item: item.name.lower()):
                 if child.name in JUNK_NAMES or child.resolve() in exclude:
                     continue
                 child_remote = join(remote, child.name)
                 if child.is_dir():
-                    self.mkdirs(child_remote)
-                    _upload_dir(child, child_remote)
-                    continue
-                if child.name.lower() == "manifest.json":
-                    deferred.append((child, child_remote))
-                    continue
-                self.write_bytes(child_remote, child.read_bytes(), atomic=False)
-                file_count += 1
-                if progress:
-                    progress(child_remote)
+                    folders.append(child_remote)
+                    _collect(child, child_remote)
+                elif child.name.lower() == "manifest.json":
+                    manifests.append((child, child_remote))
+                else:
+                    uploads.append((child, child_remote))
 
-        _upload_dir(local_dir, remote_dir)
-        for local_file, remote_file in sorted(deferred, key=lambda pair: -len(pair[1])):
-            self.write_bytes(remote_file, local_file.read_bytes(), atomic=False)
-            file_count += 1
-            if progress:
-                progress(remote_file)
-        return file_count
+        _collect(local_dir, remote_dir)
+
+        try:
+            for folder in folders:
+                if fresh:
+                    # Brand-new tree: nothing can exist yet, so skip the existence checks.
+                    try:
+                        self._make_dir(folder)
+                        continue
+                    except Exception:
+                        self._invalidate(folder)
+                self.mkdirs(folder)
+
+            def _put(storage: "Storage", pair: tuple[Path, str]) -> None:
+                storage._write_bytes(pair[1], pair[0].read_bytes())
+                if progress:
+                    progress(pair[1])
+
+            self._raise_first(self.parallel(_put, uploads))
+            for local_file, remote_file in sorted(manifests, key=lambda pair: -len(pair[1])):
+                _put(self, (local_file, remote_file))
+        finally:
+            self._invalidate(remote_dir)
+        return len(uploads) + len(manifests)
 
     def download_files(self, path: str) -> Iterator[tuple[str, bytes]]:
-        """Yield ``(relative_path, data)`` for every file under ``path``."""
+        """Yield ``(relative_path, data)`` for every file under ``path``, fetching in parallel batches."""
 
         root = join(path)
-        for dir_path, _dirs, files in self.walk(root):
-            for file_entry in files:
-                file_path = join(dir_path, file_entry.name)
+        _dirs, files = self.scan_tree(root)
+        batch = max(1, self.max_workers) * 8
+        for start in range(0, len(files), batch):
+            chunk = files[start : start + batch]
+            for file_path, data in zip(chunk, self.parallel(lambda storage, file: storage._read_bytes(file), chunk)):
+                if isinstance(data, BaseException):
+                    raise data
                 relative = posixpath.relpath(file_path, root) if root else file_path
-                yield relative, self.read_bytes(file_path)
+                yield relative, data
 
     def __enter__(self) -> "Storage":
         return self

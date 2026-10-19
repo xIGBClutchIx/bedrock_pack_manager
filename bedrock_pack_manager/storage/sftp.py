@@ -36,6 +36,8 @@ def _host_entry(host: str, port: int) -> str:
 
 class SFTPStorage(Storage):
     cache_listings = True
+    # OpenSSH allows 10 sessions per connection by default; stay well under it.
+    max_workers = 6
 
     def __init__(
         self,
@@ -70,7 +72,13 @@ class SFTPStorage(Storage):
     # ---- connection ---------------------------------------------------------------------------
 
     def _connect(self) -> None:
-        import paramiko
+        try:
+            import paramiko
+        except ImportError as exc:
+            raise StorageError(
+                "SFTP needs the 'paramiko' package, which this Python does not have. "
+                "Run the tool from the project's .venv, or install it with: pip install -r requirements.txt"
+            ) from exc
 
         storage = self
 
@@ -138,6 +146,7 @@ class SFTPStorage(Storage):
                 home = "/"
             self.root = join(home, self.root) or "/"
         self._client = client
+        self._owns_client = True
         self._sftp = sftp
 
     def _remember_host_key(self, key) -> None:
@@ -148,8 +157,22 @@ class SFTPStorage(Storage):
         with open(self.known_hosts_file, "a", encoding="utf-8") as handle:
             handle.write(line)
 
+    def _spawn(self) -> "SFTPStorage | None":
+        """Another SFTP channel over the same SSH connection: no new login, just one round trip."""
+
+        if self._client is None:
+            return None
+        worker = SFTPStorage.__new__(SFTPStorage)
+        Storage.__init__(worker)
+        worker.__dict__.update({key: value for key, value in self.__dict__.items() if not key.startswith("_listing") and key not in ("_workers", "_workers_lock")})
+        worker._owns_client = False
+        worker._sftp = self._client.open_sftp()
+        return worker
+
     def close(self) -> None:
-        for resource in (self._sftp, self._client):
+        super().close()
+        resources = [self._sftp] + ([self._client] if getattr(self, "_owns_client", True) else [])
+        for resource in resources:
             if resource is not None:
                 try:
                     resource.close()

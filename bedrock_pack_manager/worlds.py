@@ -97,28 +97,32 @@ def _move_cursor(index: int, size: int, direction: str) -> int:
     return index
 
 
-def world_details(target: Target, world: str) -> str:
+def world_details(target: Target, world: str, storage: Storage | None = None) -> str:
     """Build the small metadata suffix shown in the world picker."""
 
+    storage = storage or target.storage
     extras = []
-    names = {entry.name.lower() for entry in _safe_list(target, world)}
+    try:
+        names = {entry.name.lower() for entry in storage.list_dir(world)}
+    except (FileNotFoundError, NotADirectoryError):
+        names = set()
     if "level.dat" in names:
         extras.append("level.dat")
     for kind, label in (("bp", "BP"), ("rp", "RP")):
         json_name = target.world_json(world, kind)
         if basename(json_name).lower() in names:
             try:
-                extras.append(f"{len(load_world_json(target.storage, json_name))} {label}")
+                extras.append(f"{len(load_world_json(storage, json_name))} {label}")
             except ValueError:
                 extras.append(f"bad {label} json")
     return f" {C.DIM}({', '.join(extras)}){C.RESET}" if extras else ""
 
 
-def _safe_list(target: Target, world: str):
-    try:
-        return target.storage.list_dir(world)
-    except (FileNotFoundError, NotADirectoryError):
-        return []
+def all_world_details(target: Target, worlds: list[str]) -> dict[str, str]:
+    """``world_details`` for many worlds at once, over parallel connections."""
+
+    results = target.storage.parallel(lambda storage, world: world_details(target, world, storage), worlds)
+    return {world: "" if isinstance(result, BaseException) else result for world, result in zip(worlds, results)}
 
 
 def _world_menu_lines(target: Target, worlds: list[str], details: dict[str, str], cursor: int) -> list[str]:
@@ -193,7 +197,7 @@ def select_world(target: Target) -> str:
         print(f"  Selected: {C.CYAN}{basename(worlds[0])}{C.RESET}")
         return worlds[0]
 
-    details = {world: world_details(target, world) for world in worlds}
+    details = all_world_details(target, worlds)
     default = target.default_world()
     cursor = worlds.index(default) if default in worlds else 0
     if is_interactive_terminal():

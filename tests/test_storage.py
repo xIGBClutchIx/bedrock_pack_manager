@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,73 @@ def test_listing_cache_is_invalidated_by_writes(any_storage):
     assert [entry.name for entry in storage.list_dir("dir")] == ["new.txt"]
 
 
+def test_parallel_keeps_order_and_returns_errors(any_storage):
+    storage, root = any_storage
+    for index in range(12):
+        (root / f"f{index}.txt").write_text(str(index))
+
+    results = storage.read_many([f"f{index}.txt" for index in range(12)] + ["missing.txt"])
+
+    assert [results[f"f{index}.txt"] for index in range(12)] == [str(index).encode() for index in range(12)]
+    assert isinstance(results["missing.txt"], FileNotFoundError)
+    storage.close_workers()
+
+
+def test_scan_tree_lists_everything(any_storage):
+    storage, root = any_storage
+    (root / "a" / "b" / "c").mkdir(parents=True)
+    (root / "a" / "x.txt").write_text("x")
+    (root / "a" / "b" / "c" / "y.txt").write_text("y")
+
+    dirs, files = storage.scan_tree("a")
+
+    assert dirs == ["a", "a/b", "a/b/c"]
+    assert sorted(files) == ["a/b/c/y.txt", "a/x.txt"]
+
+
+def test_workers_never_see_stale_listings(sftp_storage, tmp_path):
+    (tmp_path / "sftp" / "d").mkdir()
+    for _ in range(2):
+        sftp_storage.parallel(lambda storage, _item: storage.list_dir("d"), range(6))
+
+    sftp_storage.write_text("d/new.txt", "x")
+    listings = sftp_storage.parallel(lambda storage, _item: [entry.name for entry in storage.list_dir("d")], range(6))
+
+    assert all(listing == ["new.txt"] for listing in listings)
+
+
+def test_remote_storages_open_extra_workers(ftp_storage, sftp_storage):
+    for storage in (ftp_storage, sftp_storage):
+        storage.read_many(["a", "b", "c", "d"])
+        assert len(storage._workers) == 3
+        storage.close()
+        assert storage._workers == []
+
+
+def test_parallel_falls_back_when_server_refuses_more_connections(sftp_storage, monkeypatch, tmp_path):
+    (tmp_path / "sftp" / "a.txt").write_text("a")
+    monkeypatch.setattr(sftp_storage, "_spawn", lambda: (_ for _ in ()).throw(StorageError("too many connections")))
+
+    assert sftp_storage.read_many(["a.txt", "a.txt"])["a.txt"] == b"a"
+    assert sftp_storage._workers == []
+
+
+def test_upload_tree_reports_failed_files(sftp_storage, tmp_path, monkeypatch):
+    source = tmp_path / "pack"
+    source.mkdir()
+    (source / "a.txt").write_text("a")
+    (source / "manifest.json").write_text("{}")
+
+    def broken_write(path, data):
+        raise StorageError(f"disk full writing {path}")
+
+    monkeypatch.setattr(sftp_storage, "_write_bytes", broken_write)
+
+    with pytest.raises(StorageError, match="disk full"):
+        sftp_storage.upload_tree(source, "packs/P")
+    assert not (tmp_path / "sftp" / "packs" / "P" / "manifest.json").exists()
+
+
 # ---- local specifics ------------------------------------------------------------------------------
 
 
@@ -245,6 +313,15 @@ def test_sftp_trusted_fingerprint_is_remembered(tmp_path):
     storage.close()
 
     assert host_key().get_base64() in known_hosts.read_text()
+
+
+def test_sftp_without_paramiko_explains_how_to_fix(tmp_path, monkeypatch):
+    from bedrock_pack_manager.storage.sftp import SFTPStorage
+
+    monkeypatch.setitem(sys.modules, "paramiko", None)
+
+    with pytest.raises(StorageError, match="pip install -r requirements.txt"):
+        SFTPStorage("sftp.test", username="mc", password="pw")
 
 
 def test_sftp_bad_password_raises_storage_error(tmp_path):
