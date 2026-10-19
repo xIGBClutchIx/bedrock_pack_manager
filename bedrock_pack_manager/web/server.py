@@ -33,7 +33,7 @@ from ..paths import ProjectPaths
 from ..storage import ConnectionSettings, LocalStorage, StorageError, basename, open_storage
 from ..storage.connect import PROTOCOLS
 from ..storage.sftp import HostKeyMismatchError, UnknownHostKeyError
-from ..worlds import world_details
+from ..worlds import all_world_details
 from .jobs import Busy, Job, JobFailure, JobRunner
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -150,7 +150,8 @@ class WebApp:
     def _refresh_worlds(self) -> None:
         target = self._require_target()
         worlds = target.list_worlds()
-        self.worlds = [{"path": world, "name": basename(world), "details": _strip(world_details(target, world))} for world in worlds]
+        details = all_world_details(target, worlds)
+        self.worlds = [{"path": world, "name": basename(world), "details": _strip(details[world])} for world in worlds]
         self.default_world = target.default_world()
 
     # ---- job bodies ----------------------------------------------------------------------------

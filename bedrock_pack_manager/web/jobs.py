@@ -1,5 +1,6 @@
 """Background jobs for the web UI, with per-job console capture."""
 
+import re
 import sys
 import threading
 import time
@@ -9,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..console import AppState
-from ..logger import _strip_ansi
+
+# Cursor movement and clearing codes (anything that is not a colour "m" code) mean nothing in a log.
+_ANSI_OTHER_RE = re.compile(r"\x1b\[[0-9;]*[A-LN-Za-ln-z]")
 
 
 class Busy(Exception):
@@ -41,7 +44,9 @@ class Job:
     _partial: str = ""
 
     def write(self, text: str) -> None:
-        text = _strip_ansi(text)
+        """Collect console output line by line. ANSI colour codes are kept; the browser renders them."""
+
+        text = _ANSI_OTHER_RE.sub("", text.replace("\r", ""))
         if not text:
             return
         combined = self._partial + text

@@ -3,72 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Bedrock Pack Manager</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
-      <div>
-        <h1>Bedrock Pack Manager</h1>
-        <p class="muted" id="conn-label">Not connected</p>
-      </div>
-    </div>
-    <div class="topbar-actions">
-      <span class="badge" id="conn-badge">Offline</span>
-      <button class="ghost" id="disconnect-btn" hidden>Disconnect</button>
-    </div>
-  </header>
+  <!-- ============ Connect screen ============ -->
+  <div id="connect-view" class="connect-screen">
+    <aside class="connect-side">
+      <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Bedrock Pack Manager</span></div>
+      <h2 class="eyebrow">Saved servers</h2>
+      <div id="profile-list" class="profile-list"></div>
+      <button type="button" class="btn dashed" id="new-server">+ New server</button>
+      <p class="side-foot">Passwords are never saved. Trusted SFTP host keys are kept in <code>run/known_hosts</code>.</p>
+    </aside>
 
-  <main>
-    <!-- Connect -->
-    <section id="connect-view" class="card narrow">
-      <div class="card-head">
-        <h2>Connect to a server</h2>
-        <div class="row tight">
-          <select id="profile-select" aria-label="Saved profiles"><option value="">Saved profiles…</option></select>
-          <button class="ghost small" id="profile-delete" title="Delete selected profile">Delete</button>
-        </div>
-      </div>
-
-      <form id="connect-form" autocomplete="off">
-        <div class="segmented" role="radiogroup" aria-label="Protocol">
-          <label><input type="radio" name="protocol" value="sftp" checked><span>SFTP</span></label>
-          <label><input type="radio" name="protocol" value="ftp"><span>FTP</span></label>
-          <label><input type="radio" name="protocol" value="ftps"><span>FTPS</span></label>
-          <label><input type="radio" name="protocol" value="local"><span>This computer</span></label>
+    <main class="connect-main">
+      <form id="connect-form" class="connect-form" autocomplete="off">
+        <div>
+          <h1>Connect to a server</h1>
+          <p class="muted">The server folder, worlds and pack folders are found automatically.</p>
         </div>
 
-        <div class="grid remote-only">
-          <label class="span-3">Host<input name="host" placeholder="play.example.com or 192.168.1.20" required></label>
-          <label>Port<input name="port" inputmode="numeric" placeholder="22"></label>
-          <label class="span-2">Username<input name="username" autocomplete="username"></label>
-          <label class="span-2">Password<input name="password" type="password" autocomplete="current-password" placeholder="Not saved anywhere"></label>
+        <div class="proto-grid" role="radiogroup" aria-label="Protocol">
+          <label class="proto"><input type="radio" name="protocol" value="sftp" checked><span><b>SFTP</b><small>SSH, port 22</small></span></label>
+          <label class="proto"><input type="radio" name="protocol" value="ftp"><span><b>FTP</b><small>Port 21</small></span></label>
+          <label class="proto"><input type="radio" name="protocol" value="ftps"><span><b>FTPS</b><small>FTP over TLS</small></span></label>
+          <label class="proto"><input type="radio" name="protocol" value="local"><span><b>This PC</b><small>A local folder</small></span></label>
         </div>
-        <div class="grid sftp-only">
-          <label class="span-2">SSH key file <span class="muted">(optional)</span><input name="key_file" placeholder="C:\Users\me\.ssh\id_ed25519"></label>
-          <label class="span-2">Key passphrase<input name="key_passphrase" type="password"></label>
+
+        <div class="grid4 remote-only">
+          <label class="field span3">Host<input name="host" placeholder="play.example.com or 192.168.1.20" required></label>
+          <label class="field">Port<input name="port" inputmode="numeric" placeholder="22"></label>
+          <label class="field span2">Username<input name="username" autocomplete="username"></label>
+          <label class="field span2">Password<input name="password" type="password" autocomplete="current-password" placeholder="Kept in memory only"></label>
         </div>
-        <div class="grid">
-          <label class="span-4"><span id="root-label">Folder on the server</span>
-            <input name="root" placeholder="Leave empty for the login folder, e.g. /home/container or bedrock">
-          </label>
-        </div>
-        <div class="checks">
-          <label class="ftps-only"><input type="checkbox" name="allow_self_signed"> Allow self-signed certificate</label>
-          <label class="ftp-only"><input type="checkbox" name="active_mode"> Active mode (only if passive fails)</label>
-        </div>
+
+        <label class="field"><span id="root-label">Folder on the server</span>
+          <input name="root" class="mono" placeholder="Empty = login folder, e.g. /home/container">
+        </label>
 
         <details class="advanced">
-          <summary>Layout overrides <span class="muted">— leave empty to auto-detect</span></summary>
-          <div class="grid">
-            <label class="span-2">Server folder<input name="server_root" placeholder="auto"></label>
-            <label class="span-2">Worlds folder<input name="worlds_dir" placeholder="auto (worlds)"></label>
-            <label class="span-2">Behavior packs folder<input name="bp_dir" placeholder="auto (behavior_packs)"></label>
-            <label class="span-2">Resource packs folder<input name="rp_dir" placeholder="auto (resource_packs)"></label>
-            <label class="span-4">Install packs into
+          <summary>Advanced <span class="muted">— SSH key, FTP mode, layout overrides</span></summary>
+          <div class="grid4">
+            <label class="field span2 sftp-only">SSH key file<input name="key_file" class="mono" placeholder="C:\Users\me\.ssh\id_ed25519"></label>
+            <label class="field span2 sftp-only">Key passphrase<input name="key_passphrase" type="password"></label>
+            <label class="check span2 ftps-only"><input type="checkbox" name="allow_self_signed"> Allow self-signed certificate</label>
+            <label class="check span2 ftp-only"><input type="checkbox" name="active_mode"> Active mode (only if passive fails)</label>
+            <label class="field span2">Server folder<input name="server_root" class="mono" placeholder="auto"></label>
+            <label class="field span2">Worlds folder<input name="worlds_dir" class="mono" placeholder="auto (worlds)"></label>
+            <label class="field span2">Behavior packs folder<input name="bp_dir" class="mono" placeholder="auto (behavior_packs)"></label>
+            <label class="field span2">Resource packs folder<input name="rp_dir" class="mono" placeholder="auto (resource_packs)"></label>
+            <label class="field span4">New packs go to
               <select name="pack_scope">
                 <option value="shared">Shared server folders (behavior_packs / resource_packs)</option>
                 <option value="world">The world's own folders (worlds/&lt;world&gt;/behavior_packs)</option>
@@ -77,164 +64,229 @@
           </div>
         </details>
 
-        <div class="row end">
-          <input class="profile-name" name="profile_name" placeholder="Profile name">
-          <button type="button" class="ghost" id="profile-save">Save profile</button>
-          <button type="submit" class="primary" id="connect-btn">Connect</button>
+        <div id="hostkey" class="hostkey" hidden>
+          <b>First time connecting to <span id="hostkey-host"></span></b>
+          <span>Check this matches the SSH fingerprint your host shows before trusting it.</span>
+          <code id="hostkey-fp"></code>
+          <div class="row end">
+            <button type="button" class="btn warn-ghost" id="hostkey-cancel">Cancel</button>
+            <button type="button" class="btn warn" id="hostkey-trust">Trust and connect</button>
+          </div>
         </div>
-        <p class="hint">Passwords stay in memory only. SFTP host keys are remembered in <code>run/known_hosts</code> after you confirm them.</p>
+
+        <div id="connect-error" class="banner danger" hidden></div>
+
+        <div class="row">
+          <label class="check"><input type="checkbox" id="save-profile" checked> Save as a server (no password)</label>
+          <input class="profile-name" id="profile-name" placeholder="Name, e.g. SMP (main)" aria-label="Server name">
+          <span class="grow"></span>
+          <button type="submit" class="btn primary lg" id="connect-btn">Connect</button>
+        </div>
       </form>
-    </section>
+    </main>
+  </div>
 
-    <!-- Connected -->
-    <section id="server-view" hidden>
-      <div class="card world-bar">
-        <label class="world-pick">World
-          <select id="world-select"></select>
-        </label>
-        <div class="layout-summary" id="layout-summary"></div>
-        <div class="row tight">
-          <button class="ghost small" id="refresh-btn">Refresh</button>
-          <button class="ghost small" id="layout-btn">Layout…</button>
-        </div>
-      </div>
+  <!-- ============ Dashboard ============ -->
+  <div id="server-view" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Bedrock Pack Manager</span></div>
+      <div class="conn-chip"><span class="dot ok" aria-hidden="true"></span><span class="proto-tag" id="conn-proto"></span><span class="mono" id="conn-label"></span></div>
+      <span class="grow"></span>
+      <button class="btn" id="top-backup">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Backup
+      </button>
+      <button class="btn ghost" id="disconnect-btn">Disconnect</button>
+    </header>
 
-      <nav class="tabs" role="tablist">
-        <button role="tab" data-tab="packs" class="active">Packs</button>
-        <button role="tab" data-tab="install">Install</button>
-        <button role="tab" data-tab="world">World settings</button>
-        <button role="tab" data-tab="tools">Tools</button>
-      </nav>
+    <div class="body">
+      <aside class="sidebar">
+        <section>
+          <div class="side-head"><h2 class="eyebrow">Worlds</h2><span class="muted small" id="world-count"></span></div>
+          <div id="world-list" class="world-list"></div>
+        </section>
+        <section class="pad">
+          <h2 class="eyebrow">Server layout</h2>
+          <dl class="layout-dl" id="layout-dl"></dl>
+          <button class="btn sm ghost" id="layout-btn">Edit layout…</button>
+        </section>
+        <section class="pad side-bottom" id="hidden-section" hidden>
+          <h2 class="eyebrow">Hidden</h2>
+          <ul class="hidden-list" id="hidden-list"></ul>
+        </section>
+      </aside>
 
-      <!-- Packs tab -->
-      <div class="tab-panel card" data-panel="packs">
-        <div class="card-head">
-          <h2>Packs in this world</h2>
-          <div class="row tight">
-            <input type="search" id="pack-filter" placeholder="Filter…">
-            <select id="status-filter" aria-label="Status filter">
-              <option value="">All statuses</option>
-              <option value="ok">Installed</option>
-              <option value="missing">Missing files</option>
-              <option value="version-mismatch">Wrong version</option>
-              <option value="unregistered">Not registered</option>
-            </select>
-          </div>
-        </div>
-        <div id="problems"></div>
-        <div class="table-wrap">
-          <table class="packs">
-            <thead><tr><th class="check"><input type="checkbox" id="select-all" aria-label="Select all"></th><th>Type</th><th>Name</th><th>Version</th><th>Status</th><th>Location</th></tr></thead>
-            <tbody id="pack-rows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
-          </table>
-        </div>
-        <div class="row end">
-          <label class="inline"><input type="checkbox" id="keep-files"> Keep files on the server</label>
-          <button class="danger" id="uninstall-btn" disabled>Uninstall selected</button>
-        </div>
-      </div>
-
-      <!-- Install tab -->
-      <div class="tab-panel card" data-panel="install" hidden>
-        <div class="card-head"><h2>Install packs</h2></div>
-        <div id="dropzone" class="dropzone" tabindex="0">
-          <strong>Drop .mcaddon, .mcpack, .zip files or pack folders here</strong>
-          <span class="muted">Nested archives and folders holding several packs are fine.</span>
-          <div class="row tight center">
-            <button class="ghost small" id="pick-files">Choose files</button>
-            <button class="ghost small" id="pick-folder">Choose folder</button>
-          </div>
-          <input type="file" id="file-input" multiple hidden>
-          <input type="file" id="folder-input" webkitdirectory multiple hidden>
-        </div>
-        <div id="upload-progress" class="progress" hidden><div></div><span></span></div>
-        <ul id="upload-list" class="upload-list"></ul>
-
-        <div class="grid options">
-          <label class="span-2">If a pack is already on the server with another version
-            <select id="duplicate-mode">
-              <option value="replace">Replace the old version</option>
-              <option value="skip">Skip the new one</option>
-              <option value="keep-both">Keep both</option>
-            </select>
-          </label>
-          <label class="span-2 inline checkbox-cell"><input type="checkbox" id="reupload"> Re-upload even if the same version is already there (fixes half-uploaded packs)</label>
-        </div>
-        <div class="row end">
-          <button class="ghost" id="clear-uploads">Clear list</button>
-          <button class="ghost" id="preview-btn">Preview changes</button>
-          <button class="primary" id="install-btn">Install</button>
-        </div>
-        <div id="plan"></div>
-      </div>
-
-      <!-- World tab -->
-      <div class="tab-panel card" data-panel="world" hidden>
-        <div class="card-head"><h2>World settings</h2></div>
-        <div class="notice warn">Stop the server before changing these, or it may overwrite <code>level.dat</code> when it shuts down. A <code>level.dat.backup</code> is written first.</div>
-        <dl class="facts" id="level-facts"></dl>
-        <div class="grid options">
-          <label class="span-2 inline checkbox-cell"><input type="checkbox" id="edit-beta"> Enable Beta APIs (experiments)</label>
-          <label class="span-2">Default gamemode
-            <select id="edit-gamemode">
-              <option value="">Leave unchanged</option>
-              <option value="survival">Survival</option>
-              <option value="creative">Creative</option>
-              <option value="adventure">Adventure</option>
-            </select>
-          </label>
-        </div>
-        <div class="row end"><button class="primary" id="edit-btn">Apply world changes</button></div>
-      </div>
-
-      <!-- Tools tab -->
-      <div class="tab-panel card" data-panel="tools" hidden>
-        <div class="card-head"><h2>Tools</h2></div>
-        <div class="tools">
-          <div class="tool">
-            <h3>Audit</h3>
-            <p class="muted">Check registrations, missing files, wrong versions, misplaced and nested packs, and missing dependencies. Changes nothing.</p>
-            <button class="ghost" id="doctor-btn">Run audit</button>
-          </div>
-          <div class="tool">
-            <h3>Rebuild world JSONs</h3>
-            <p class="muted">Overwrite this world's pack lists with every pack found on the server (newest version of each).</p>
-            <button class="ghost" id="rebuild-btn">Rebuild…</button>
-          </div>
-          <div class="tool">
-            <h3>Clean up pack folders</h3>
-            <p class="muted">Delete pack folders this world doesn't use, unless another world still does.</p>
-            <button class="ghost" id="cleanup-btn">Preview cleanup…</button>
-          </div>
-          <div class="tool">
-            <h3>Backup</h3>
-            <p class="muted">Download the world and pack folders to a zip on this computer.</p>
-            <div class="row tight">
-              <button class="ghost" id="backup-world-btn">This world</button>
-              <button class="ghost" id="backup-all-btn">Everything</button>
+      <main class="content">
+        <div class="content-head">
+          <div class="title-row">
+            <div class="title-block">
+              <h1 id="world-title">—</h1>
+              <div class="meta" id="world-meta"></div>
             </div>
-            <div id="backup-result"></div>
+            <span class="grow"></span>
+            <button class="btn primary" id="add-packs">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add packs
+            </button>
           </div>
+          <nav class="tabs" aria-label="Sections">
+            <button data-tab="packs" class="active">Packs<span class="count" id="tab-count-packs"></span></button>
+            <button data-tab="install">Install<span class="count" id="tab-count-install"></span></button>
+            <button data-tab="world">World settings</button>
+            <button data-tab="tools">Tools</button>
+          </nav>
         </div>
-      </div>
-    </section>
 
-    <section class="card log-card">
-      <div class="card-head">
-        <h2>Activity <span class="spinner" id="busy" hidden></span></h2>
-        <button class="ghost small" id="clear-log">Clear</button>
-      </div>
-      <pre id="log" aria-live="polite"></pre>
-    </section>
-  </main>
+        <div class="panels">
+          <!-- Packs -->
+          <section class="panel" data-panel="packs">
+            <div class="toolbar">
+              <div class="chips" id="filter-chips"></div>
+              <span class="grow"></span>
+              <label class="search">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.6" y2="16.6"/></svg>
+                <span class="sr">Search packs</span>
+                <input type="search" id="pack-filter" placeholder="Search name, UUID or folder">
+              </label>
+            </div>
+            <div id="problems"></div>
+            <div class="table-box">
+              <table class="packs">
+                <thead><tr>
+                  <th class="check"><input type="checkbox" id="select-all" aria-label="Select all"></th>
+                  <th>Pack</th><th>Version</th><th>Status</th><th>Folder</th>
+                </tr></thead>
+                <tbody id="pack-rows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+              </table>
+            </div>
+            <div class="selection-bar" id="selection-bar" hidden>
+              <b id="selection-label"></b>
+              <span class="grow"></span>
+              <button class="btn ghost" id="clear-selection">Clear</button>
+              <button class="btn" id="remove-only">Remove from world only</button>
+              <button class="btn danger" id="uninstall-btn">Uninstall &amp; delete files</button>
+            </div>
+          </section>
+
+          <!-- Install -->
+          <section class="panel install-grid" data-panel="install" hidden>
+            <div class="stack">
+              <div id="dropzone" class="dropzone" tabindex="0">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <b>Drop .mcaddon, .mcpack, .zip or pack folders</b>
+                <span class="muted small">Unpacked on this computer — only finished packs are uploaded</span>
+                <div class="row center tight">
+                  <button class="btn sm" id="pick-files" type="button">Choose files</button>
+                  <button class="btn sm" id="pick-folder" type="button">Choose folder</button>
+                </div>
+                <input type="file" id="file-input" multiple hidden>
+                <input type="file" id="folder-input" webkitdirectory multiple hidden>
+              </div>
+              <ul id="upload-list" class="queue"></ul>
+              <div class="grid2">
+                <label class="field">Older version already on server
+                  <select id="duplicate-mode">
+                    <option value="replace">Replace it</option>
+                    <option value="skip">Skip the new one</option>
+                    <option value="keep-both">Keep both</option>
+                  </select>
+                </label>
+                <label class="check pad-top"><input type="checkbox" id="reupload"> Re-upload same versions</label>
+              </div>
+            </div>
+
+            <div class="plan-card">
+              <div class="plan-head">
+                <h2>Plan</h2>
+                <span class="muted small" id="plan-sub">Nothing changes until you install</span>
+                <span class="grow"></span>
+                <span class="plan-counts" id="plan-counts"></span>
+              </div>
+              <div id="plan" class="plan-list"><p class="plan-empty">Add packs on the left to see exactly what will be uploaded, replaced, or only registered.</p></div>
+              <div class="plan-foot">
+                <button class="btn ghost" id="clear-uploads" type="button">Clear list</button>
+                <span class="grow"></span>
+                <button class="btn" id="preview-btn" type="button">Refresh plan</button>
+                <button class="btn primary" id="install-btn" type="button" disabled>Install</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- World -->
+          <section class="panel narrow" data-panel="world" hidden>
+            <div class="banner warn">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              Stop the server first — a running server overwrites level.dat when it shuts down. A backup is saved as level.dat.backup.
+            </div>
+            <div id="level-missing" class="banner muted-banner" hidden></div>
+            <div class="settings-card" id="level-card">
+              <div class="setting">
+                <div class="grow"><b>Beta APIs</b><div class="muted small">Turns on the experiments script add-ons need</div></div>
+                <button class="switch" id="beta-switch" role="switch" aria-checked="false" aria-label="Beta APIs"><span></span></button>
+              </div>
+              <div class="setting">
+                <div class="grow"><b>Default gamemode</b><div class="muted small">Written to level.dat</div></div>
+                <div class="segmented" role="group" aria-label="Gamemode" id="gamemode-group">
+                  <button data-mode="survival">Survival</button><button data-mode="creative">Creative</button><button data-mode="adventure">Adventure</button>
+                </div>
+              </div>
+            </div>
+            <div class="row end"><button class="btn primary" id="edit-btn">Save world settings</button></div>
+          </section>
+
+          <!-- Tools -->
+          <section class="panel tools" data-panel="tools" hidden>
+            <div class="tool">
+              <h3>Audit</h3>
+              <p>Registrations, missing files, wrong versions, nesting mistakes and missing dependencies. Changes nothing.</p>
+              <button class="btn" id="doctor-btn">Run audit</button>
+            </div>
+            <div class="tool">
+              <h3>Rebuild world JSONs</h3>
+              <p>Register every pack in the server folders, newest version of each. Game packs are skipped.</p>
+              <button class="btn" id="rebuild-btn">Rebuild…</button>
+            </div>
+            <div class="tool">
+              <h3>Clean up folders</h3>
+              <p>Delete pack folders no world uses. Shows the list before deleting anything.</p>
+              <button class="btn" id="cleanup-btn">Preview cleanup…</button>
+            </div>
+            <div class="tool">
+              <h3>Backup</h3>
+              <p>Download this world and the pack folders as a zip on this computer.</p>
+              <div class="row tight">
+                <button class="btn" id="backup-world-btn">This world</button>
+                <button class="btn ghost" id="backup-all-btn">Everything</button>
+              </div>
+              <div id="backup-result" class="small"></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Console dock -->
+        <section class="console" aria-label="Activity">
+          <div class="console-head">
+            <span class="dot" id="console-dot" aria-hidden="true"></span>
+            <b id="console-title">Idle</b>
+            <span class="muted small console-sub" id="console-sub"></span>
+            <span class="grow"></span>
+            <button class="btn xs ghost" id="copy-log">Copy log</button>
+            <button class="btn xs ghost" id="clear-log">Clear</button>
+            <button class="btn xs ghost" id="toggle-console" aria-expanded="true">Hide</button>
+          </div>
+          <pre id="log" role="log" aria-live="polite"></pre>
+        </section>
+      </main>
+    </div>
+  </div>
 
   <dialog id="confirm-dialog">
     <form method="dialog">
       <h3 id="confirm-title">Are you sure?</h3>
       <div id="confirm-body"></div>
       <div class="row end">
-        <button value="cancel" class="ghost">Cancel</button>
-        <button value="ok" class="primary" id="confirm-ok">Continue</button>
+        <button value="cancel" class="btn ghost">Cancel</button>
+        <button value="ok" class="btn primary" id="confirm-ok">Continue</button>
       </div>
     </form>
   </dialog>
@@ -242,13 +294,13 @@
   <dialog id="layout-dialog">
     <form method="dialog" id="layout-form">
       <h3>Server layout</h3>
-      <p class="muted">Leave a field empty to auto-detect it. Paths are relative to the folder you connected to.</p>
-      <div class="grid">
-        <label class="span-2">Server folder<input name="server_root"></label>
-        <label class="span-2">Worlds folder<input name="worlds_dir"></label>
-        <label class="span-2">Behavior packs folder<input name="bp_dir"></label>
-        <label class="span-2">Resource packs folder<input name="rp_dir"></label>
-        <label class="span-4">Install packs into
+      <p class="muted small">Leave a field empty to auto-detect it. Paths are relative to the folder you connected to.</p>
+      <div class="grid4">
+        <label class="field span2">Server folder<input name="server_root" class="mono"></label>
+        <label class="field span2">Worlds folder<input name="worlds_dir" class="mono"></label>
+        <label class="field span2">Behavior packs folder<input name="bp_dir" class="mono"></label>
+        <label class="field span2">Resource packs folder<input name="rp_dir" class="mono"></label>
+        <label class="field span4">New packs go to
           <select name="pack_scope">
             <option value="shared">Shared server folders</option>
             <option value="world">The world's own folders</option>
@@ -256,8 +308,8 @@
         </label>
       </div>
       <div class="row end">
-        <button value="cancel" class="ghost">Cancel</button>
-        <button value="ok" class="primary">Apply</button>
+        <button value="cancel" class="btn ghost">Cancel</button>
+        <button value="ok" class="btn primary">Apply</button>
       </div>
     </form>
   </dialog>

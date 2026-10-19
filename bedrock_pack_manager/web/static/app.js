@@ -9,6 +9,14 @@ const state = {
   world: null,
   status: null,
   busy: false,
+  filter: "all",
+  selected: new Set(),
+  plan: null, // last install preview result
+  planDirty: false, // uploads changed since the preview
+  uploading: new Map(), // top-level name -> {done, total}
+  beta: null, // pending world edits
+  mode: null,
+  activeProfile: null,
 };
 
 // ---- helpers ----------------------------------------------------------------------------------
@@ -16,6 +24,9 @@ const state = {
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 }
+
+const ANSI_RE = /\x1b\[([0-9;]*)m/;
+const stripAnsi = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -33,11 +44,56 @@ function toast(message, isError = false) {
   toastTimer = setTimeout(() => (el.hidden = true), isError ? 6000 : 3000);
 }
 
-function log(line) {
-  const pre = $("#log");
-  pre.textContent += line + "\n";
-  pre.scrollTop = pre.scrollHeight;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const icon = {
+  close: '<svg aria-hidden="true" viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+  warn: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+};
+
+// ---- console ------------------------------------------------------------------------------------
+
+// The CLI's colour codes (console.py `C`), mapped to classes in app.css.
+const ANSI_CLASSES = { 1: "ansi-bold", 2: "ansi-dim", 91: "ansi-red", 92: "ansi-green", 93: "ansi-yellow", 96: "ansi-cyan" };
+
+/** Turn one line with ANSI colour codes into safe HTML spans. */
+function ansiToHtml(line) {
+  let html = "";
+  let classes = new Set();
+  String(line)
+    .split(ANSI_RE)
+    .forEach((part, index) => {
+      if (index % 2 === 1) {
+        for (const code of (part || "0").split(";").map(Number)) {
+          if (code === 0) classes = new Set();
+          else if (ANSI_CLASSES[code]) {
+            if (code >= 90) [...classes].filter((c) => c !== "ansi-bold" && c !== "ansi-dim").forEach((c) => classes.delete(c));
+            classes.add(ANSI_CLASSES[code]);
+          }
+        }
+        return;
+      }
+      if (part) html += classes.size ? `<span class="${[...classes].join(" ")}">${esc(part)}</span>` : esc(part);
+    });
+  return html;
 }
+
+function appendLog(html) {
+  const pre = $("#log");
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+  pre.insertAdjacentHTML("beforeend", html + "\n");
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
+const log = (line) => appendLog(ansiToHtml(line));
+const logMark = (text) => appendLog(`<span class="log-mark">— ${esc(text)} —</span>`);
+
+function setConsole(status, title, sub = "") {
+  $("#console-dot").className = `dot ${status}`;
+  $("#console-title").textContent = title;
+  $("#console-sub").textContent = sub;
+}
+
+// ---- api & jobs -----------------------------------------------------------------------------------
 
 async function api(method, path, body, extraHeaders = {}) {
   const headers = { "X-BPM-Token": TOKEN, ...extraHeaders };
@@ -63,56 +119,53 @@ async function api(method, path, body, extraHeaders = {}) {
 
 function setBusy(busy) {
   state.busy = busy;
-  $("#busy").hidden = !busy;
-  $$("main button").forEach((button) => {
-    if (button.id === "clear-log") return;
+  $$("button, .proto input").forEach((el) => {
+    if (["clear-log", "copy-log", "toggle-console"].includes(el.id) || el.closest("dialog") || el.closest(".tabs")) return;
     if (busy) {
-      button.dataset.wasDisabled = button.disabled ? "1" : "";
-      button.disabled = true;
-    } else {
-      button.disabled = button.dataset.wasDisabled === "1";
+      el.dataset.wasDisabled = el.disabled ? "1" : "";
+      el.disabled = true;
+    } else if (el.dataset.wasDisabled !== undefined) {
+      el.disabled = el.dataset.wasDisabled === "1";
+      delete el.dataset.wasDisabled;
     }
   });
-  if (!busy) updateUninstallButton();
+  if (!busy) {
+    updateSelection();
+    updateInstallButtons();
+  }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Start a server job, stream its console lines into the activity log, and resolve with the job. */
-async function runJob(path, body, { quiet = false } = {}) {
+/** Start a server job, stream its console lines into the dock, and resolve with the finished job. */
+async function runJob(path, body, { quiet = false, title = "Working" } = {}) {
   if (state.busy) throw new Error("Another task is running");
   setBusy(true);
+  setConsole("busy", title);
   try {
     const { job: id } = await api("POST", path, body);
     let since = 0;
     for (;;) {
       const job = await api("GET", `/api/jobs/${id}?since=${since}`);
       if (!quiet || job.status === "error") job.lines.forEach(log);
+      const last = job.lines.filter((line) => stripAnsi(line).trim()).pop();
+      if (last) $("#console-sub").textContent = stripAnsi(last).trim();
       since = job.next;
       if (job.status !== "running") {
         if (job.status === "error") {
+          setConsole("error", `${title} failed`, job.error || "");
           const error = new Error(job.error || "Task failed");
           error.code = job.error_code;
           error.data = job.error_data;
           throw error;
         }
+        const warnings = job.warnings.length;
+        setConsole("ok", `${title} — done`, warnings ? `${warnings} warning(s)` : `${job.elapsed}s`);
         return job;
       }
-      await sleep(job.lines.length ? 150 : 400);
+      await sleep(job.lines.length ? 120 : 300);
     }
   } finally {
     setBusy(false);
   }
-}
-
-function confirmDialog(title, html, okLabel = "Continue", danger = false) {
-  const dialog = $("#confirm-dialog");
-  $("#confirm-title").textContent = title;
-  $("#confirm-body").innerHTML = html;
-  const ok = $("#confirm-ok");
-  ok.textContent = okLabel;
-  ok.className = danger ? "danger" : "primary";
-  return showDialog(dialog);
 }
 
 /** Open a <dialog> whose form uses method="dialog"; resolves true when the "ok" button submits it. */
@@ -133,13 +186,21 @@ function showDialog(dialog) {
   });
 }
 
-// ---- connect -------------------------------------------------------------------------------------
+function confirmDialog(title, html, okLabel = "Continue", danger = false) {
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").innerHTML = html;
+  const ok = $("#confirm-ok");
+  ok.textContent = okLabel;
+  ok.className = danger ? "btn danger" : "btn primary";
+  return showDialog($("#confirm-dialog"));
+}
+
+// ---- connect screen ---------------------------------------------------------------------------------
 
 const DEFAULT_PORTS = { ftp: "21", ftps: "21", sftp: "22" };
+const PROTO_LABELS = { sftp: "SFTP", ftp: "FTP", ftps: "FTPS", local: "LOCAL" };
 
-function protocol() {
-  return $("#connect-form").elements.protocol.value;
-}
+const protocol = () => $("#connect-form").elements.protocol.value;
 
 function syncProtocolFields() {
   const proto = protocol();
@@ -151,8 +212,7 @@ function syncProtocolFields() {
   form.elements.host.required = proto !== "local";
   form.elements.port.placeholder = DEFAULT_PORTS[proto] || "";
   $("#root-label").textContent = proto === "local" ? "Server folder on this computer" : "Folder on the server";
-  form.elements.root.placeholder =
-    proto === "local" ? "Empty uses the bundled run/ folder, or e.g. C:\\bedrock-server" : "Leave empty for the login folder, e.g. /home/container or bedrock";
+  form.elements.root.placeholder = proto === "local" ? "Empty = the bundled run/ folder, or e.g. C:\\servers\\bedrock" : "Empty = login folder, e.g. /home/container";
 }
 
 function formSettings() {
@@ -190,8 +250,8 @@ function fillLayout(form, layout) {
 }
 
 function fillSettings(settings) {
-  if (!settings) return;
   const f = $("#connect-form").elements;
+  settings = settings || {};
   const proto = settings.protocol || "sftp";
   $(`#connect-form input[name=protocol][value="${proto}"]`).checked = true;
   f.host.value = settings.host || "";
@@ -199,191 +259,325 @@ function fillSettings(settings) {
   f.username.value = settings.username || "";
   f.root.value = settings.root || "";
   f.key_file.value = settings.key_file || "";
+  f.key_passphrase.value = "";
   f.allow_self_signed.checked = settings.tls_verify === false;
   f.active_mode.checked = settings.passive === false;
   f.password.value = "";
   syncProtocolFields();
 }
 
-function renderProfiles(profiles) {
-  const select = $("#profile-select");
-  const current = select.value;
-  select.innerHTML = '<option value="">Saved profiles…</option>' + profiles.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join("");
-  if (profiles.some((p) => p.name === current)) select.value = current;
+function profileAddress(settings) {
+  if (!settings) return "";
+  if (settings.protocol === "local") return settings.root || "run/";
+  const user = settings.username ? `${settings.username}@` : "";
+  const port = settings.port || DEFAULT_PORTS[settings.protocol] || "";
+  return `${user}${settings.host}:${port} ${settings.root || "/"}`;
 }
+
+function renderProfiles(profiles) {
+  const list = $("#profile-list");
+  if (!profiles.length) {
+    list.innerHTML = '<p class="empty-note">No saved servers yet. Connect once with “Save as a server” ticked.</p>';
+    return;
+  }
+  list.innerHTML = profiles
+    .map((p) => {
+      const proto = (p.settings && p.settings.protocol) || "sftp";
+      return `<div class="profile ${p.name === state.activeProfile ? "active" : ""}" data-profile="${esc(p.name)}" role="button" tabindex="0">
+        <span class="proto-tag ${esc(proto)}">${esc(PROTO_LABELS[proto] || proto)}</span>
+        <span class="names"><b>${esc(p.name)}</b><span class="addr">${esc(profileAddress(p.settings))}</span></span>
+        <button type="button" class="del" data-delete="${esc(p.name)}" aria-label="Delete ${esc(p.name)}">${icon.close}</button>
+      </div>`;
+    })
+    .join("");
+}
+
+function pickProfile(name) {
+  const profile = (state.snapshot.profiles || []).find((p) => p.name === name);
+  if (!profile) return;
+  state.activeProfile = name;
+  fillSettings(profile.settings);
+  fillLayout($("#connect-form"), profile.layout);
+  $("#profile-name").value = profile.name;
+  renderProfiles(state.snapshot.profiles);
+  $("#connect-form").elements.password.focus();
+}
+
+async function saveProfileIfWanted(settings) {
+  if (!$("#save-profile").checked) return;
+  const name = $("#profile-name").value.trim() || (settings.protocol === "local" ? "Local server" : settings.host);
+  if (!name) return;
+  try {
+    await api("POST", "/api/profiles", { name, settings, layout: formLayout($("#connect-form")) });
+    state.activeProfile = name;
+  } catch (_) {
+    /* saving a profile is a convenience; never block connecting on it */
+  }
+}
+
+let pendingTrust = null;
 
 async function connect(extra = {}) {
   const settings = { ...formSettings(), ...extra };
-  if (state.snapshot && state.snapshot.has_password && !settings.password && !extra.use_initial) {
-    const initial = state.snapshot.settings || {};
+  const snap = state.snapshot;
+  if (snap && snap.has_password && !settings.password) {
+    const initial = snap.settings || {};
     if (initial.host === settings.host && initial.username === settings.username) settings.use_initial = true;
   }
+  $("#connect-error").hidden = true;
+  $("#hostkey").hidden = true;
   try {
-    log(`— Connecting to ${settings.protocol === "local" ? settings.root || "run/" : settings.host} —`);
-    await runJob("/api/connect", { settings, layout: formLayout($("#connect-form")) });
+    logMark(`Connecting to ${settings.protocol === "local" ? settings.root || "run/" : settings.host}`);
+    await runJob("/api/connect", { settings, layout: formLayout($("#connect-form")) }, { title: "Connecting" });
+    await saveProfileIfWanted(settings);
+    state.world = null;
     await refreshSnapshot();
-    toast("Connected");
   } catch (error) {
     if (error.code === "unknown_host_key") {
       const d = error.data;
-      const trusted = await confirmDialog(
-        "Trust this server?",
-        `<p>This is the first connection to <b>${esc(d.host)}:${esc(d.port)}</b>. Check that the host key matches what your host shows:</p>
-         <p><code>${esc(d.key_type)} ${esc(d.fingerprint)}</code></p>
-         <p class="muted">It will be remembered in run/known_hosts.</p>`,
-        "Trust and connect",
-      );
-      if (trusted) return connect({ ...extra, trusted_fingerprint: d.fingerprint, use_initial: settings.use_initial });
-      log("Host key not trusted - connection cancelled");
+      $("#hostkey-host").textContent = `${d.host}:${d.port}`;
+      $("#hostkey-fp").textContent = `${d.key_type}  ${d.fingerprint}`;
+      $("#hostkey").hidden = false;
+      pendingTrust = { ...extra, trusted_fingerprint: d.fingerprint };
+      $("#hostkey-trust").focus();
       return;
     }
-    toast(error.message, true);
+    $("#connect-error").textContent = error.message;
+    $("#connect-error").hidden = false;
   }
 }
 
-// ---- snapshot & world -----------------------------------------------------------------------------
+// ---- dashboard ----------------------------------------------------------------------------------------
 
-async function refreshSnapshot() {
+async function refreshSnapshot({ reloadWorld = true } = {}) {
   const snap = await api("GET", "/api/state");
   state.snapshot = snap;
   renderProfiles(snap.profiles || []);
-  renderUploads(snap.uploads || []);
-
-  $("#conn-badge").textContent = snap.connected ? "Connected" : "Offline";
-  $("#conn-badge").classList.toggle("online", snap.connected);
-  $("#conn-label").textContent = snap.connected ? snap.label : "Not connected";
-  $("#disconnect-btn").hidden = !snap.connected;
   $("#connect-view").hidden = snap.connected;
   $("#server-view").hidden = !snap.connected;
-
   if (!snap.connected) return;
 
-  const select = $("#world-select");
+  const settings = snap.settings || {};
+  const proto = settings.protocol || "local";
+  $("#conn-proto").textContent = PROTO_LABELS[proto] || proto;
+  $("#conn-proto").className = `proto-tag ${proto}`;
+  $("#conn-label").textContent = snap.label;
+  renderUploads(snap.uploads || []);
+
   const worlds = snap.worlds || [];
   if (!worlds.some((w) => w.path === state.world)) state.world = snap.default_world || (worlds[0] && worlds[0].path) || null;
-  select.innerHTML = worlds.length
-    ? worlds.map((w) => `<option value="${esc(w.path)}">${esc(w.name)}${w.details ? " — " + esc(w.details) : ""}</option>`).join("")
-    : '<option value="">No worlds found</option>';
-  if (state.world) select.value = state.world;
-  renderLayoutSummary(snap.layout);
-  if (state.world) await loadWorld();
-  else renderNoWorlds();
+  renderWorlds();
+  renderLayout(snap.layout);
+  if (!state.world) return renderNoWorlds();
+  if (reloadWorld) await loadWorld();
 }
 
-function renderLayoutSummary(layout) {
+function renderWorlds() {
+  const worlds = state.snapshot.worlds || [];
+  const levelName = state.snapshot.layout && state.snapshot.layout.level_name;
+  $("#world-count").textContent = worlds.length || "";
+  $("#world-list").innerHTML = worlds.length
+    ? worlds
+        .map(
+          (w) => `<button class="world ${w.path === state.world ? "active" : ""}" data-world="${esc(w.path)}">
+            <span class="names"><span class="name">${esc(w.name)}</span><span class="sub">${esc(w.details || "empty")}</span></span>
+            ${levelName && w.name === levelName ? '<span class="live" title="level-name in server.properties">LIVE</span>' : ""}
+          </button>`,
+        )
+        .join("")
+    : '<p class="empty-note">No worlds found. Use Edit layout… to point at the worlds folder.</p>';
+}
+
+function renderLayout(layout) {
   if (!layout) return;
-  const parts = [`Server folder <b>${esc(layout.server_root || ".")}</b>`];
-  if (layout.single_world) parts.push("single world");
-  else parts.push(`worlds <b>${esc(layout.worlds_dir || "—")}</b>`);
-  if (layout.bp_dir) parts.push(`BP <b>${esc(layout.bp_dir)}</b>`);
-  if (layout.rp_dir) parts.push(`RP <b>${esc(layout.rp_dir)}</b>`);
-  if (layout.dev_bp_dir || layout.dev_rp_dir) parts.push("dev folders found");
-  let html = parts.join(" · ");
-  if (layout.notes && layout.notes.length) html += `<br>${layout.notes.map(esc).join("<br>")}`;
-  $("#layout-summary").innerHTML = html;
+  const rows = [];
+  if (layout.single_world) rows.push(["World folder", layout.single_world]);
+  else rows.push(["Worlds", layout.worlds_dir || "—"]);
+  rows.push(["Behavior packs", layout.bp_dir || "inside the world"]);
+  rows.push(["Resource packs", layout.rp_dir || "inside the world"]);
+  if (layout.dev_bp_dir || layout.dev_rp_dir) rows.push(["Development", [layout.dev_bp_dir, layout.dev_rp_dir].filter(Boolean).join(", ")]);
+  const scope = layout.pack_scope === "world" ? "The world's own folders" : "Shared server folders";
+  $("#layout-dl").innerHTML =
+    rows.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("") +
+    `<div><dt>New packs go to</dt><dd class="plain">${esc(scope)}</dd></div>` +
+    (layout.notes || []).map((note) => `<div><dd class="plain muted">${esc(note)}</dd></div>`).join("");
 }
 
 function renderNoWorlds() {
-  $("#pack-rows").innerHTML = '<tr><td colspan="6" class="empty">No worlds found. Check the folder or use Layout… to point at the worlds folder.</td></tr>';
+  $("#world-title").textContent = "No world selected";
+  $("#world-meta").innerHTML = "";
+  $("#pack-rows").innerHTML = '<tr><td colspan="5" class="empty">No worlds found. Use Edit layout… to point at the worlds folder.</td></tr>';
   $("#problems").innerHTML = "";
+  $("#filter-chips").innerHTML = "";
 }
 
 async function loadWorld() {
+  const world = (state.snapshot.worlds || []).find((w) => w.path === state.world);
+  $("#world-title").textContent = world ? world.name : state.world;
   try {
-    const job = await runJob("/api/status", { world: state.world }, { quiet: true });
+    const job = await runJob("/api/status", { world: state.world }, { quiet: true, title: "Reading world" });
     state.status = job.result;
+    state.selected.clear();
+    state.beta = null;
+    state.mode = null;
     renderStatus();
+    if (state.planDirty || state.plan) previewInstall({ auto: true });
   } catch (error) {
     toast(error.message, true);
   }
 }
 
 const STATUS_LABELS = { ok: "Installed", missing: "Missing files", "version-mismatch": "Wrong version", unregistered: "Not registered" };
+const FILTERS = [
+  { id: "all", label: "All", color: "#c2c9bc" },
+  { id: "ok", label: "Installed", color: "#8fd486" },
+  { id: "version-mismatch", label: "Wrong version", color: "#f0cf86" },
+  { id: "missing", label: "Missing", color: "#f59a8b" },
+  { id: "unregistered", label: "Not registered", color: "#8ccaf0" },
+];
 
 function renderStatus() {
   const status = state.status;
   if (!status) return;
+  const level = status.level || {};
+  const rows = status.packs || [];
+  const registered = (kind) => rows.filter((row) => row.kind === kind && row.registered).length;
+  const meta = [];
+  if (level.exists && !level.error) {
+    meta.push(level.gamemode ? level.gamemode[0].toUpperCase() + level.gamemode.slice(1) : "Gamemode unknown");
+    meta.push(level.beta ? "Beta APIs on" : "Beta APIs off");
+  } else if (!level.exists) meta.push("No level.dat");
+  meta.push(`${registered("bp")} behavior · ${registered("rp")} resource packs registered`);
+  $("#world-meta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("");
+  $("#tab-count-packs").textContent = rows.length || "";
+
   const problems = status.problems || [];
   $("#problems").innerHTML = problems.length
-    ? `<div class="notice warn"><b>${problems.length} thing(s) to look at</b><ul>${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>`
+    ? `<div class="banner warn">${icon.warn}<div><b>${problems.length} thing${problems.length === 1 ? "" : "s"} to look at.</b>${
+        problems.length === 1 ? ` ${esc(problems[0])}` : `<ul>${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+      }</div></div>`
     : "";
+
+  const hidden = [];
+  if (status.hidden_builtin) hidden.push(`${status.hidden_builtin} built-in game pack${status.hidden_builtin === 1 ? "" : "s"}`);
+  (status.notes || []).forEach((note) => hidden.push(note));
+  $("#hidden-section").hidden = !hidden.length;
+  $("#hidden-list").innerHTML = hidden.map((item) => `<li>${esc(item)}</li>`).join("");
+
+  renderChips();
   renderPackRows();
-  renderLevel(status.level);
+  renderLevel(level);
+}
+
+function renderChips() {
+  const rows = (state.status && state.status.packs) || [];
+  const count = (id) => (id === "all" ? rows.length : rows.filter((row) => row.status === id).length);
+  $("#filter-chips").innerHTML = FILTERS.filter((f) => f.id === "all" || count(f.id))
+    .map(
+      (f) => `<button class="chip-btn ${state.filter === f.id ? "active" : ""}" data-filter="${f.id}" aria-pressed="${state.filter === f.id}">
+        <span class="dot" style="background:${f.color}"></span>${esc(f.label)}<span class="n">${count(f.id)}</span></button>`,
+    )
+    .join("");
+}
+
+function visibleRows() {
+  const rows = (state.status && state.status.packs) || [];
+  const text = $("#pack-filter").value.trim().toLowerCase();
+  return rows.filter(
+    (row) => (state.filter === "all" || row.status === state.filter) && (!text || `${row.name} ${row.uuid} ${row.paths.join(" ")}`.toLowerCase().includes(text)),
+  );
 }
 
 function renderPackRows() {
   const rows = (state.status && state.status.packs) || [];
-  const text = $("#pack-filter").value.trim().toLowerCase();
-  const statusFilter = $("#status-filter").value;
-  const visible = rows.filter(
-    (row) => (!statusFilter || row.status === statusFilter) && (!text || `${row.name} ${row.uuid} ${row.paths.join(" ")}`.toLowerCase().includes(text)),
-  );
-  $("#select-all").checked = false;
+  const visible = visibleRows();
   if (!visible.length) {
-    $("#pack-rows").innerHTML = `<tr><td colspan="6" class="empty">${rows.length ? "Nothing matches the filter." : "No packs registered or installed for this world yet."}</td></tr>`;
-    updateUninstallButton();
+    $("#pack-rows").innerHTML = `<tr><td colspan="5" class="empty">${rows.length ? "Nothing matches the filter." : "No packs registered or installed for this world yet. Use Add packs to install some."}</td></tr>`;
+    updateSelection();
     return;
   }
   $("#pack-rows").innerHTML = visible
     .map((row) => {
-      const check = row.flag ? `<input type="checkbox" class="pack-check" value="${esc(row.flag)}" aria-label="Select ${esc(row.name)}">` : "";
-      const versions = row.status === "version-mismatch" ? `<span class="sub">on server: ${esc(row.on_server_versions.join(", "))}</span>` : "";
-      const scope = row.scope && row.scope !== "shared" ? ` <span class="muted">(${esc(row.scope)})</span>` : "";
-      return `<tr>
+      const selected = row.flag && state.selected.has(row.flag);
+      const check = row.flag ? `<input type="checkbox" class="pack-check" value="${esc(row.flag)}" ${selected ? "checked" : ""} aria-label="Select ${esc(row.name)}">` : "";
+      const note = row.status === "version-mismatch" ? `<div class="version-note">server has ${esc(row.on_server_versions.join(", "))}</div>` : "";
+      const scope = row.scope && row.scope !== "shared" ? ` <span class="scope">(${esc(row.scope === "world" ? "in world" : row.scope)})</span>` : "";
+      const folders = row.paths.length ? row.paths.map(esc).join("<br>") : "—";
+      return `<tr class="${selected ? "selected" : ""}">
         <td class="check">${check}</td>
-        <td><span class="kind ${esc(row.kind)}">${esc(row.kind.toUpperCase())}</span></td>
-        <td>${esc(row.name)}<span class="sub">${esc(row.uuid)}</span></td>
-        <td>${esc(row.version_label)}${versions}</td>
-        <td><span class="chip ${esc(row.status)}">${esc(STATUS_LABELS[row.status] || row.status)}</span>${scope}</td>
-        <td class="path">${row.paths.map(esc).join("<br>") || "—"}</td>
+        <td><div class="pack-name"><span class="kind ${esc(row.kind)}">${esc(row.kind.toUpperCase())}</span>${esc(row.name)}</div><div class="uuid">${esc(row.uuid)}</div></td>
+        <td><span class="version">${esc(row.version_label)}</span>${note}</td>
+        <td><span class="status ${esc(row.status)}">${esc(STATUS_LABELS[row.status] || row.status)}</span>${scope}</td>
+        <td class="folder">${folders}</td>
       </tr>`;
     })
     .join("");
-  updateUninstallButton();
+  updateSelection();
 }
 
-function selectedFlags() {
-  return $$(".pack-check:checked").map((el) => el.value);
-}
-
-function updateUninstallButton() {
-  const count = selectedFlags().length;
-  const button = $("#uninstall-btn");
-  button.disabled = state.busy || count === 0;
-  button.textContent = count ? `Uninstall ${count} selected` : "Uninstall selected";
+function updateSelection() {
+  const count = state.selected.size;
+  $("#selection-bar").hidden = count === 0;
+  $("#selection-label").textContent = `${count} pack${count === 1 ? "" : "s"} selected`;
+  const selectable = visibleRows().filter((row) => row.flag);
+  $("#select-all").checked = selectable.length > 0 && selectable.every((row) => state.selected.has(row.flag));
 }
 
 function renderLevel(level) {
-  const facts = $("#level-facts");
-  if (!level || !level.exists) {
-    facts.innerHTML = "<dt>level.dat</dt><dd>Not found in this world folder</dd>";
-    return;
-  }
-  if (level.error) {
-    facts.innerHTML = `<dt>level.dat</dt><dd>Could not read it: ${esc(level.error)}</dd>`;
-    return;
-  }
-  facts.innerHTML = `
-    <dt>Level name</dt><dd>${esc(level.level_name || "—")}</dd>
-    <dt>Beta APIs</dt><dd>${level.beta ? "Enabled" : "Off"}</dd>
-    <dt>Gamemode</dt><dd>${esc(level.gamemode ? level.gamemode[0].toUpperCase() + level.gamemode.slice(1) : "—")}</dd>`;
-  $("#edit-beta").checked = false;
-  $("#edit-beta").disabled = !!level.beta;
+  const missing = !level || !level.exists || level.error;
+  $("#level-missing").hidden = !missing;
+  $("#level-missing").textContent = !level || !level.exists ? "This world has no level.dat, so there is nothing to change here." : `Could not read level.dat: ${level.error}`;
+  $("#level-card").hidden = !!missing;
+  $("#edit-btn").hidden = !!missing;
+  if (missing) return;
+  const beta = state.beta ?? !!level.beta;
+  const switchEl = $("#beta-switch");
+  switchEl.setAttribute("aria-checked", String(beta));
+  switchEl.disabled = !!level.beta; // the tool only turns experiments on
+  switchEl.title = level.beta ? "Already enabled" : "";
+  const mode = state.mode ?? level.gamemode;
+  $$("#gamemode-group button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
+  const changed = (state.beta !== null && state.beta !== !!level.beta) || (state.mode !== null && state.mode !== level.gamemode);
+  $("#edit-btn").disabled = state.busy || !changed;
 }
 
-// ---- uploads -------------------------------------------------------------------------------------
+// ---- uploads & install ------------------------------------------------------------------------------
 
 function renderUploads(uploads) {
-  const list = $("#upload-list");
-  list.innerHTML = uploads
-    .map(
-      (u) => `<li><span><span class="name">${u.is_dir ? "📁 " : ""}${esc(u.name)}</span>
-        <span class="meta"> ${u.is_dir ? `${u.files} files, ` : ""}${formatBytes(u.size)}</span></span>
-        <button class="ghost small" data-remove="${esc(u.name)}">Remove</button></li>`,
-    )
+  const names = new Set(uploads.map((u) => u.name));
+  const pending = [...state.uploading.entries()].filter(([name]) => !names.has(name) || state.uploading.get(name).done < state.uploading.get(name).total);
+  const items = [
+    ...uploads.map((u) => {
+      const progress = state.uploading.get(u.name);
+      return { ...u, progress };
+    }),
+    ...pending.filter(([name]) => !names.has(name)).map(([name, progress]) => ({ name, is_dir: false, files: progress.total, size: 0, progress })),
+  ];
+  $("#tab-count-install").textContent = uploads.length || "";
+  $("#upload-list").innerHTML = items
+    .map((u) => {
+      const p = u.progress;
+      const pct = p ? Math.round((p.done / Math.max(1, p.total)) * 100) : 100;
+      const meta = p && p.done < p.total ? `${p.done}/${p.total} files` : `${u.is_dir ? `folder · ${u.files} files · ` : ""}${formatBytes(u.size)}`;
+      return `<li><div class="q-row"><span class="q-name">${esc(u.name)}</span><span class="q-meta">${esc(meta)}</span>
+        <button class="icon-btn" data-remove="${esc(u.name)}" aria-label="Remove ${esc(u.name)}">${icon.close}</button></div>
+        <div class="bar ${pct >= 100 ? "done" : ""}"><div style="width:${pct}%"></div></div></li>`;
+    })
     .join("");
-  $("#install-btn").disabled = state.busy || uploads.length === 0;
-  $("#preview-btn").disabled = state.busy || uploads.length === 0;
+  updateInstallButtons();
+}
+
+function uploadCount() {
+  return ((state.snapshot && state.snapshot.uploads) || []).length;
+}
+
+function updateInstallButtons() {
+  const has = uploadCount() > 0;
+  const uploads = state.plan && !state.planDirty ? state.plan.plan.filter((item) => item.action !== "skip").length : 0;
+  $("#preview-btn").disabled = state.busy || !has;
+  $("#clear-uploads").disabled = state.busy || !has;
+  $("#install-btn").disabled = state.busy || !has || !state.plan || state.planDirty || uploads === 0;
+  $("#install-btn").textContent = uploads ? `Install ${uploads} pack${uploads === 1 ? "" : "s"}` : "Install";
 }
 
 function walkEntry(entry, prefix = "") {
@@ -399,101 +593,157 @@ function walkEntry(entry, prefix = "") {
     const reader = entry.createReader();
     const all = [];
     const readBatch = () =>
-      reader.readEntries(async (batch) => {
-        if (!batch.length) {
-          const nested = await Promise.all(all.map((child) => walkEntry(child, `${prefix}${entry.name}/`)));
-          resolve(nested.flat());
-          return;
-        }
-        all.push(...batch);
-        readBatch();
-      }, () => resolve([]));
+      reader.readEntries(
+        async (batch) => {
+          if (!batch.length) {
+            const nested = await Promise.all(all.map((child) => walkEntry(child, `${prefix}${entry.name}/`)));
+            resolve(nested.flat());
+            return;
+          }
+          all.push(...batch);
+          readBatch();
+        },
+        () => resolve([]),
+      );
     readBatch();
   });
 }
 
 async function uploadFiles(items) {
-  items = items.filter((item) => !/(^|\/)(__MACOSX|\.DS_Store|Thumbs\.db)(\/|$)/.test(item.path));
+  items = items.filter((item) => !/(^|\/)(__MACOSX|\.DS_Store|Thumbs\.db|desktop\.ini)(\/|$)/.test(item.path));
   if (!items.length) return;
-  const total = items.reduce((sum, item) => sum + item.file.size, 0);
-  const bar = $("#upload-progress");
-  bar.hidden = false;
-  let done = 0;
-  try {
-    for (let i = 0; i < items.length; i++) {
-      const { file, path } = items[i];
-      $("span", bar).textContent = `Adding ${i + 1}/${items.length}: ${path}`;
-      await api("PUT", `/api/uploads?path=${encodeURIComponent(path)}`, file, { "Content-Type": "application/octet-stream" });
-      done += file.size;
-      $("div", bar).style.width = `${total ? (done / total) * 100 : 100}%`;
-    }
-  } catch (error) {
-    toast(`Upload failed: ${error.message}`, true);
-  } finally {
-    bar.hidden = true;
-    $("div", bar).style.width = "0";
-    const { uploads } = await api("GET", "/api/uploads");
-    renderUploads(uploads);
-    $("#plan").innerHTML = "";
+  switchTab("install");
+  for (const item of items) {
+    const top = item.path.split("/")[0];
+    const entry = state.uploading.get(top) || { done: 0, total: 0 };
+    entry.total += 1;
+    state.uploading.set(top, entry);
   }
+  renderUploads(state.snapshot.uploads || []);
+  setConsole("busy", "Adding packs", `${items.length} file(s)`);
+  let failed = null;
+  // Local uploads are quick; a few at a time keeps big folders snappy without flooding the server.
+  const queue = [...items];
+  const workers = Array.from({ length: 4 }, async () => {
+    while (queue.length && !failed) {
+      const { file, path } = queue.shift();
+      try {
+        await api("PUT", `/api/uploads?path=${encodeURIComponent(path)}`, file, { "Content-Type": "application/octet-stream" });
+      } catch (error) {
+        failed = error;
+        return;
+      }
+      state.uploading.get(path.split("/")[0]).done += 1;
+      renderUploads(state.snapshot.uploads || []);
+    }
+  });
+  await Promise.all(workers);
+  state.uploading.clear();
+  const { uploads } = await api("GET", "/api/uploads");
+  state.snapshot.uploads = uploads;
+  renderUploads(uploads);
+  if (failed) {
+    setConsole("error", "Adding packs failed", failed.message);
+    toast(`Upload failed: ${failed.message}`, true);
+    return;
+  }
+  setConsole("ok", "Packs added", `${items.length} file(s)`);
+  state.planDirty = true;
+  previewInstall({ auto: true });
 }
-
-// ---- install ------------------------------------------------------------------------------------
-
-const ACTION_LABELS = { upload: "Upload", register: "Register only", skip: "Skip" };
 
 function renderPlan(result, applied) {
   const plan = result.plan || [];
-  if (!plan.length) {
-    $("#plan").innerHTML = '<div class="notice warn">No installable packs were found in what you added. See the activity log for details.</div>';
+  const counts = { upload: 0, replace: 0, register: 0, skip: 0 };
+  const items = plan.map((item) => {
+    const kind = item.action === "upload" && item.replace.length ? "replace" : item.action;
+    counts[kind] += 1;
+    return { ...item, kind };
+  });
+  const labels = { upload: "Upload", replace: "Replace", register: "Register", skip: "Skip" };
+  $("#plan-counts").innerHTML = Object.entries(counts)
+    .filter(([, n]) => n)
+    .map(([kind, n]) => `<span class="c-${kind}">${n} ${labels[kind].toLowerCase()}</span>`)
+    .join("");
+  $("#plan-sub").textContent = applied
+    ? `Done — installed ${result.stats.installed}, skipped ${result.stats.skipped}, errors ${result.stats.errors}`
+    : "Nothing changes until you install";
+  if (!items.length) {
+    $("#plan").innerHTML = '<p class="plan-empty">No installable packs were found in what you added. The activity log says why.</p>';
     return;
   }
-  const counts = plan.reduce((acc, item) => ((acc[item.action] = (acc[item.action] || 0) + 1), acc), {});
-  const summary = applied
-    ? `Done — installed ${result.stats.installed}, skipped ${result.stats.skipped}, errors ${result.stats.errors}.`
-    : `Preview — ${counts.upload || 0} to upload, ${counts.register || 0} to register, ${counts.skip || 0} to skip. Nothing has changed yet.`;
-  $("#plan").innerHTML = `<p class="plan-summary">${esc(summary)}</p>
-    <div class="table-wrap"><table><thead><tr><th>Type</th><th>Pack</th><th>Action</th><th>Details</th></tr></thead><tbody>
-    ${plan
-      .map(
-        (item) => `<tr>
-        <td><span class="kind ${esc(item.kind)}">${esc(item.kind.toUpperCase())}</span></td>
-        <td>${esc(item.name)} <span class="muted">v${esc(item.version_label)}</span><span class="sub">${esc(item.source)}</span></td>
-        <td><span class="chip ${esc(item.action)}">${esc(ACTION_LABELS[item.action] || item.action)}</span></td>
-        <td>${esc(item.reason)}${item.target ? `<span class="sub">→ ${esc(item.target)}</span>` : ""}${item.replace
-          .map((p) => `<span class="sub">removes ${esc(p)}</span>`)
-          .join("")}</td></tr>`,
-      )
-      .join("")}
-    </tbody></table></div>`;
+  $("#plan").innerHTML = items
+    .map(
+      (item) => `<div class="plan-item"><span class="action ${item.kind}">${labels[item.kind]}</span>
+        <div class="names">
+          <div><b>${esc(item.name)}</b> <span class="muted small">v${esc(item.version_label)} · ${esc(item.kind === "skip" ? item.source : item.kind === "register" ? "already on server" : item.source)}</span></div>
+          <div class="reason">${esc(item.reason)}</div>
+          ${item.target ? `<div class="target">→ ${esc(item.target)}</div>` : ""}
+          ${item.replace.map((path) => `<div class="target">removes ${esc(path)}</div>`).join("")}
+        </div></div>`,
+    )
+    .join("");
 }
 
-async function install(dryRun) {
-  if (!state.world) return toast("Pick a world first", true);
-  const body = {
-    world: state.world,
-    duplicate_mode: $("#duplicate-mode").value,
-    reupload: $("#reupload").checked,
-    dry_run: dryRun,
-  };
+function clearPlan() {
+  state.plan = null;
+  state.planDirty = false;
+  $("#plan-counts").innerHTML = "";
+  $("#plan-sub").textContent = "Nothing changes until you install";
+  $("#plan").innerHTML = '<p class="plan-empty">Add packs on the left to see exactly what will be uploaded, replaced, or only registered.</p>';
+  updateInstallButtons();
+}
+
+async function previewInstall({ auto = false } = {}) {
+  if (!state.world || !uploadCount()) return clearPlan();
+  if (state.busy) return;
   try {
-    log(dryRun ? "— Previewing install —" : "— Installing —");
-    const job = await runJob("/api/install", body);
-    renderPlan(job.result, !dryRun);
-    if (!dryRun) {
-      toast(job.result.stats.errors ? "Installed with errors - see the log" : "Installed", job.result.stats.errors > 0);
-      await refreshSnapshot();
-    }
+    if (!auto) logMark("Previewing install");
+    const job = await runJob(
+      "/api/install",
+      { world: state.world, duplicate_mode: $("#duplicate-mode").value, reupload: $("#reupload").checked, dry_run: true },
+      { quiet: auto, title: "Planning install" },
+    );
+    state.plan = job.result;
+    state.planDirty = false;
+    renderPlan(job.result, false);
+  } catch (error) {
+    toast(error.message, true);
+  }
+  updateInstallButtons();
+}
+
+async function install() {
+  const actions = state.plan.plan.filter((item) => item.action !== "skip");
+  const ok = await confirmDialog(
+    `Install ${actions.length} pack${actions.length === 1 ? "" : "s"}?`,
+    `<p>Into <b>${esc(state.status ? state.status.world_name : state.world)}</b> on <code>${esc(state.snapshot.label)}</code>.</p>`,
+    "Install",
+  );
+  if (!ok) return;
+  try {
+    logMark("Installing");
+    const job = await runJob(
+      "/api/install",
+      { world: state.world, duplicate_mode: $("#duplicate-mode").value, reupload: $("#reupload").checked, dry_run: false },
+      { title: `Installing ${actions.length} pack${actions.length === 1 ? "" : "s"}` },
+    );
+    renderPlan(job.result, true);
+    state.plan = null;
+    const errors = job.result.stats.errors;
+    toast(errors ? "Installed with errors — see the activity log" : "Installed", errors > 0);
+    await refreshSnapshot();
   } catch (error) {
     toast(error.message, true);
   }
 }
 
-// ---- other actions --------------------------------------------------------------------------------
+// ---- other actions ------------------------------------------------------------------------------------
 
-async function simpleJob(path, body, successMessage) {
+async function simpleJob(path, body, title, successMessage) {
   try {
-    const job = await runJob(path, body);
+    logMark(title);
+    const job = await runJob(path, body, { title });
     if (successMessage) toast(successMessage);
     return job;
   } catch (error) {
@@ -502,164 +752,190 @@ async function simpleJob(path, body, successMessage) {
   }
 }
 
-async function uninstall() {
-  const flags = selectedFlags();
+async function uninstall(keepFiles) {
+  const flags = [...state.selected];
   if (!flags.length) return;
-  const keep = $("#keep-files").checked;
-  const names = (state.status.packs || []).filter((row) => flags.includes(row.flag)).map((row) => `<li>${esc(row.name)} v${esc(row.version_label)}</li>`);
+  const names = (state.status.packs || []).filter((row) => flags.includes(row.flag)).map((row) => `<li>${esc(row.name)} <span class="muted">v${esc(row.version_label)}</span></li>`);
   const ok = await confirmDialog(
-    `Uninstall ${flags.length} pack(s)?`,
+    keepFiles ? `Remove ${flags.length} pack(s) from this world?` : `Uninstall ${flags.length} pack(s)?`,
     `<ul>${names.join("")}</ul><p>${
-      keep ? "They will be removed from this world's pack lists. Files stay on the server." : "They will be removed from this world, and their folders deleted unless another world still uses them."
+      keepFiles
+        ? "They are removed from this world's pack lists. Their folders stay on the server."
+        : "They are removed from this world, and their folders deleted unless another world still uses them."
     }</p>`,
-    "Uninstall",
-    !keep,
+    keepFiles ? "Remove" : "Uninstall",
+    !keepFiles,
   );
   if (!ok) return;
-  log("— Uninstalling —");
-  if (await simpleJob("/api/uninstall", { world: state.world, flags, keep_files: keep }, "Uninstalled")) await loadWorld();
+  if (await simpleJob("/api/uninstall", { world: state.world, flags, keep_files: keepFiles }, "Uninstalling", "Done")) await refreshSnapshot();
 }
 
 async function cleanup() {
-  log("— Previewing cleanup —");
-  const preview = await simpleJob("/api/cleanup", { world: state.world, dry_run: true });
+  const preview = await simpleJob("/api/cleanup", { world: state.world, dry_run: true }, "Previewing cleanup");
   if (!preview) return;
   const folders = preview.result.deleted;
   if (!folders.length) return toast("Nothing to clean up");
   const ok = await confirmDialog(
     `Delete ${folders.length} unused pack folder(s)?`,
-    `<ul>${folders.map((f) => `<li><code>${esc(f)}</code></li>`).join("")}</ul><p>These are not registered in this world and no other world uses them.</p>`,
+    `<ul>${folders.map((f) => `<li><code>${esc(f)}</code></li>`).join("")}</ul><p>No world registers these. Built-in game packs and development folders are never touched.</p>`,
     "Delete folders",
     true,
   );
   if (!ok) return;
-  log("— Cleaning up —");
-  if (await simpleJob("/api/cleanup", { world: state.world, dry_run: false }, "Cleanup done")) await loadWorld();
+  if (await simpleJob("/api/cleanup", { world: state.world, dry_run: false }, "Cleaning up", "Cleanup done")) await refreshSnapshot();
 }
 
 async function rebuild() {
   const ok = await confirmDialog(
     "Rebuild world pack JSONs?",
-    "<p>This overwrites <code>world_behavior_packs.json</code> and <code>world_resource_packs.json</code> for this world with every pack found on the server. Packs that are only listed but missing will be dropped.</p>",
+    "<p>This overwrites <code>world_behavior_packs.json</code> and <code>world_resource_packs.json</code> for this world with every pack found on the server. Packs that are listed but missing are dropped.</p>",
     "Rebuild",
     true,
   );
   if (!ok) return;
-  log("— Rebuilding JSONs —");
-  if (await simpleJob("/api/rebuild", { world: state.world }, "Rebuilt")) await loadWorld();
+  if (await simpleJob("/api/rebuild", { world: state.world }, "Rebuilding JSONs", "Rebuilt")) await refreshSnapshot();
 }
 
 async function editWorld() {
-  const beta = $("#edit-beta").checked;
-  const gamemode = $("#edit-gamemode").value;
-  if (!beta && !gamemode) return toast("Choose a change first", true);
+  const level = state.status.level || {};
+  const beta = state.beta === true && !level.beta;
+  const gamemode = state.mode && state.mode !== level.gamemode ? state.mode : null;
+  if (!beta && !gamemode) return;
   const ok = await confirmDialog(
     "Change level.dat?",
-    "<p>Make sure the server is <b>stopped</b>, otherwise it may overwrite the change. A backup is saved as <code>level.dat.backup</code>.</p>",
-    "Apply",
+    "<p>Make sure the server is <b>stopped</b>, otherwise it may overwrite the change. The current file is kept as <code>level.dat.backup</code>.</p>",
+    "Save",
   );
   if (!ok) return;
-  log("— Editing world —");
-  if (await simpleJob("/api/edit", { world: state.world, beta, gamemode: gamemode || null }, "World updated")) {
-    $("#edit-gamemode").value = "";
-    await loadWorld();
-  }
+  if (await simpleJob("/api/edit", { world: state.world, beta, gamemode }, "Saving world settings", "World updated")) await loadWorld();
 }
 
 async function backup(worldOnly) {
-  log(worldOnly ? "— Backing up this world —" : "— Backing up everything —");
-  const job = await simpleJob("/api/backup", { world: worldOnly ? state.world : null });
+  const job = await simpleJob("/api/backup", { world: worldOnly ? state.world : null }, worldOnly ? "Backing up world" : "Backing up everything");
   if (!job) return;
   const result = job.result;
   const href = `${result.download}?t=${encodeURIComponent(TOKEN)}`;
-  $("#backup-result").innerHTML = `<p>${esc(result.file_count)} files, ${esc(result.size_mb)} MB — <a href="${esc(href)}" download>Download ${esc(result.zip_name)}</a></p>`;
-  toast("Backup ready");
+  $("#backup-result").innerHTML = `${esc(result.file_count)} files, ${esc(result.size_mb)} MB — <a href="${esc(href)}" download>Download ${esc(result.zip_name)}</a>`;
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = result.zip_name;
+  link.click();
+  toast("Backup downloading");
 }
-
-// ---- wiring ---------------------------------------------------------------------------------------
 
 function switchTab(name) {
   $$(".tabs button").forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
-  $$(".tab-panel").forEach((panel) => (panel.hidden = panel.dataset.panel !== name));
+  $$(".panel").forEach((panel) => (panel.hidden = panel.dataset.panel !== name));
 }
 
-function wire() {
+// ---- wiring ------------------------------------------------------------------------------------------
+
+function wireConnect() {
   $$("#connect-form input[name=protocol]").forEach((radio) => radio.addEventListener("change", syncProtocolFields));
   $("#connect-form").addEventListener("submit", (event) => {
     event.preventDefault();
     connect();
   });
-
-  $("#profile-select").addEventListener("change", () => {
-    const profile = (state.snapshot.profiles || []).find((p) => p.name === $("#profile-select").value);
-    if (!profile) return;
-    fillSettings(profile.settings);
-    fillLayout($("#connect-form"), profile.layout);
-    $("#connect-form").elements.profile_name.value = profile.name;
-  });
-  $("#profile-save").addEventListener("click", async () => {
-    const name = $("#connect-form").elements.profile_name.value.trim() || formSettings().host || "Local";
-    try {
-      const { profiles } = await api("POST", "/api/profiles", { name, settings: formSettings(), layout: formLayout($("#connect-form")) });
+  $("#profile-list").addEventListener("click", async (event) => {
+    const del = event.target.closest("[data-delete]");
+    if (del) {
+      event.stopPropagation();
+      const { profiles } = await api("DELETE", `/api/profiles?name=${encodeURIComponent(del.dataset.delete)}`);
       state.snapshot.profiles = profiles;
+      if (state.activeProfile === del.dataset.delete) state.activeProfile = null;
       renderProfiles(profiles);
-      $("#profile-select").value = name;
-      toast(`Saved profile "${name}" (without password)`);
-    } catch (error) {
-      toast(error.message, true);
+      return;
+    }
+    const profile = event.target.closest("[data-profile]");
+    if (profile) pickProfile(profile.dataset.profile);
+  });
+  $("#profile-list").addEventListener("keydown", (event) => {
+    const profile = event.target.closest("[data-profile]");
+    if (profile && (event.key === "Enter" || event.key === " ") && event.target === profile) {
+      event.preventDefault();
+      pickProfile(profile.dataset.profile);
     }
   });
-  $("#profile-delete").addEventListener("click", async () => {
-    const name = $("#profile-select").value;
-    if (!name) return;
-    const { profiles } = await api("DELETE", `/api/profiles?name=${encodeURIComponent(name)}`);
-    state.snapshot.profiles = profiles;
-    renderProfiles(profiles);
+  $("#new-server").addEventListener("click", () => {
+    state.activeProfile = null;
+    fillSettings({ protocol: "sftp" });
+    fillLayout($("#connect-form"), {});
+    $("#profile-name").value = "";
+    renderProfiles(state.snapshot.profiles || []);
+    $("#connect-form").elements.host.focus();
   });
+  $("#hostkey-trust").addEventListener("click", () => {
+    const extra = pendingTrust;
+    pendingTrust = null;
+    $("#hostkey").hidden = true;
+    if (extra) connect(extra);
+  });
+  $("#hostkey-cancel").addEventListener("click", () => {
+    pendingTrust = null;
+    $("#hostkey").hidden = true;
+    logMark("Host key not trusted — connection cancelled");
+  });
+}
 
+function wireDashboard() {
   $("#disconnect-btn").addEventListener("click", async () => {
     try {
       await api("POST", "/api/disconnect", {});
       state.status = null;
+      clearPlan();
+      setConsole("", "Idle");
       await refreshSnapshot();
     } catch (error) {
       toast(error.message, true);
     }
   });
-
-  $("#world-select").addEventListener("change", (event) => {
-    state.world = event.target.value;
-    $("#plan").innerHTML = "";
+  $("#world-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-world]");
+    if (!button || state.busy || button.dataset.world === state.world) return;
+    state.world = button.dataset.world;
     $("#backup-result").innerHTML = "";
+    renderWorlds();
     loadWorld();
-  });
-  $("#refresh-btn").addEventListener("click", async () => {
-    try {
-      const job = await runJob("/api/status", { world: state.world, refresh_worlds: true }, { quiet: true });
-      state.status = job.result;
-      await refreshSnapshot();
-    } catch (error) {
-      toast(error.message, true);
-    }
   });
   $("#layout-btn").addEventListener("click", async () => {
     fillLayout($("#layout-form"), state.snapshot.overrides);
     if (!(await showDialog($("#layout-dialog")))) return;
-    log("— Updating layout —");
-    if (await simpleJob("/api/layout", { layout: formLayout($("#layout-form")) }, "Layout updated")) await refreshSnapshot();
+    if (await simpleJob("/api/layout", { layout: formLayout($("#layout-form")) }, "Updating layout", "Layout updated")) await refreshSnapshot();
   });
-
+  $("#add-packs").addEventListener("click", () => switchTab("install"));
+  $("#top-backup").addEventListener("click", () => backup(true));
   $$(".tabs button").forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
 
-  $("#pack-filter").addEventListener("input", renderPackRows);
-  $("#status-filter").addEventListener("change", renderPackRows);
-  $("#pack-rows").addEventListener("change", updateUninstallButton);
-  $("#select-all").addEventListener("change", (event) => {
-    $$(".pack-check").forEach((el) => (el.checked = event.target.checked));
-    updateUninstallButton();
+  // packs
+  $("#filter-chips").addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-filter]");
+    if (!chip) return;
+    state.filter = chip.dataset.filter;
+    renderChips();
+    renderPackRows();
   });
-  $("#uninstall-btn").addEventListener("click", uninstall);
+  $("#pack-filter").addEventListener("input", renderPackRows);
+  $("#pack-rows").addEventListener("change", (event) => {
+    if (!event.target.classList.contains("pack-check")) return;
+    if (event.target.checked) state.selected.add(event.target.value);
+    else state.selected.delete(event.target.value);
+    event.target.closest("tr").classList.toggle("selected", event.target.checked);
+    updateSelection();
+  });
+  $("#select-all").addEventListener("change", (event) => {
+    visibleRows()
+      .filter((row) => row.flag)
+      .forEach((row) => (event.target.checked ? state.selected.add(row.flag) : state.selected.delete(row.flag)));
+    renderPackRows();
+  });
+  $("#clear-selection").addEventListener("click", () => {
+    state.selected.clear();
+    renderPackRows();
+  });
+  $("#remove-only").addEventListener("click", () => uninstall(true));
+  $("#uninstall-btn").addEventListener("click", () => uninstall(false));
 
+  // install
   const dropzone = $("#dropzone");
   ["dragenter", "dragover"].forEach((type) =>
     dropzone.addEventListener(type, (event) => {
@@ -668,17 +944,27 @@ function wire() {
     }),
   );
   ["dragleave", "drop"].forEach((type) => dropzone.addEventListener(type, () => dropzone.classList.remove("over")));
-  dropzone.addEventListener("drop", async (event) => {
+  const handleDrop = async (event) => {
     event.preventDefault();
+    dropzone.classList.remove("over");
+    // Entries must be read synchronously, before the first await.
     const entries = Array.from(event.dataTransfer.items || [])
       .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
       .filter(Boolean);
+    const files = Array.from(event.dataTransfer.files || []);
     if (entries.length) {
       const nested = await Promise.all(entries.map((entry) => walkEntry(entry)));
       await uploadFiles(nested.flat());
     } else {
-      await uploadFiles(Array.from(event.dataTransfer.files).map((file) => ({ file, path: file.name })));
+      await uploadFiles(files.map((file) => ({ file, path: file.name })));
     }
+  };
+  // Dropping anywhere on the dashboard works, not only on the drop zone.
+  $("#server-view").addEventListener("dragover", (event) => {
+    if (event.dataTransfer && [...event.dataTransfer.types].includes("Files")) event.preventDefault();
+  });
+  $("#server-view").addEventListener("drop", (event) => {
+    if (event.dataTransfer && event.dataTransfer.files.length) handleDrop(event);
   });
   $("#pick-files").addEventListener("click", () => $("#file-input").click());
   $("#pick-folder").addEventListener("click", () => $("#folder-input").click());
@@ -691,55 +977,97 @@ function wire() {
     event.target.value = "";
   });
   $("#upload-list").addEventListener("click", async (event) => {
-    const name = event.target.dataset.remove;
-    if (!name) return;
-    const { uploads } = await api("DELETE", `/api/uploads?name=${encodeURIComponent(name)}`);
+    const button = event.target.closest("[data-remove]");
+    if (!button) return;
+    const { uploads } = await api("DELETE", `/api/uploads?name=${encodeURIComponent(button.dataset.remove)}`);
+    state.snapshot.uploads = uploads;
     renderUploads(uploads);
-    $("#plan").innerHTML = "";
+    state.planDirty = true;
+    previewInstall({ auto: true });
   });
   $("#clear-uploads").addEventListener("click", async () => {
     const { uploads } = await api("DELETE", "/api/uploads");
+    state.snapshot.uploads = uploads;
     renderUploads(uploads);
-    $("#plan").innerHTML = "";
+    clearPlan();
   });
-  $("#preview-btn").addEventListener("click", () => install(true));
-  $("#install-btn").addEventListener("click", async () => {
-    const ok = await confirmDialog("Install these packs?", `<p>Packs will be uploaded to <b>${esc(state.snapshot.label)}</b> and registered in this world.</p>`, "Install");
-    if (ok) install(false);
-  });
+  ["duplicate-mode", "reupload"].forEach((id) =>
+    $(`#${id}`).addEventListener("change", () => {
+      state.planDirty = true;
+      previewInstall({ auto: true });
+    }),
+  );
+  $("#preview-btn").addEventListener("click", () => previewInstall());
+  $("#install-btn").addEventListener("click", install);
 
+  // world
+  $("#beta-switch").addEventListener("click", () => {
+    const level = state.status.level || {};
+    state.beta = !(state.beta ?? !!level.beta);
+    renderLevel(level);
+  });
+  $("#gamemode-group").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mode]");
+    if (!button) return;
+    state.mode = button.dataset.mode;
+    renderLevel(state.status.level || {});
+  });
   $("#edit-btn").addEventListener("click", editWorld);
+
+  // tools
   $("#doctor-btn").addEventListener("click", async () => {
-    log("— Auditing —");
-    const job = await simpleJob("/api/doctor", { world: state.world });
-    if (job) {
-      state.status = job.result;
-      renderStatus();
-      toast(job.warnings.length ? `Audit found ${job.warnings.length} issue(s)` : "Audit clean", job.warnings.length > 0);
-    }
+    const job = await simpleJob("/api/doctor", { world: state.world }, "Auditing");
+    if (!job) return;
+    state.status = job.result;
+    renderStatus();
+    toast(job.warnings.length ? `Audit found ${job.warnings.length} issue(s)` : "Audit clean", job.warnings.length > 0);
   });
   $("#rebuild-btn").addEventListener("click", rebuild);
   $("#cleanup-btn").addEventListener("click", cleanup);
   $("#backup-world-btn").addEventListener("click", () => backup(true));
   $("#backup-all-btn").addEventListener("click", () => backup(false));
+
+  // console
   $("#clear-log").addEventListener("click", () => ($("#log").textContent = ""));
+  $("#copy-log").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#log").textContent);
+      toast("Log copied");
+    } catch (_) {
+      toast("Could not copy the log", true);
+    }
+  });
+  $("#toggle-console").addEventListener("click", (event) => {
+    const dock = event.target.closest(".console");
+    const collapsed = dock.classList.toggle("collapsed");
+    event.target.textContent = collapsed ? "Show" : "Hide";
+    event.target.setAttribute("aria-expanded", String(!collapsed));
+  });
 }
 
 async function init() {
-  wire();
+  wireConnect();
+  wireDashboard();
   syncProtocolFields();
   if (!TOKEN) {
-    $("#connect-view").innerHTML = '<div class="notice error">Missing access token. Open the full link printed in the terminal.</div>';
+    $("#connect-error").textContent = "Missing access token. Open the full link printed in the terminal.";
+    $("#connect-error").hidden = false;
     return;
   }
   try {
     await refreshSnapshot();
-    if (!state.snapshot.connected && state.snapshot.settings) {
-      fillSettings(state.snapshot.settings);
-      if (state.snapshot.has_password) $("#connect-form").elements.password.placeholder = "Using the password from the command line";
+    const snap = state.snapshot;
+    if (!snap.connected) {
+      if (snap.settings) {
+        fillSettings(snap.settings);
+        if (snap.has_password) $("#connect-form").elements.password.placeholder = "Using the password from the command line";
+      } else if ((snap.profiles || []).length) {
+        pickProfile(snap.profiles[0].name);
+      }
     }
   } catch (error) {
-    $("#connect-view").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+    $("#connect-error").textContent = error.message;
+    $("#connect-error").hidden = false;
   }
 }
 

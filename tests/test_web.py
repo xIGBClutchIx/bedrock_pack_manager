@@ -305,10 +305,10 @@ def test_job_runner_captures_output_per_thread(monkeypatch):
     runner.install_router()
     assert isinstance(sys.stdout, ThreadRouter)
 
-    job = runner.start("echo", lambda _job: print("\x1b[92mhello\x1b[0m\npartial", end="") or 42, background=False)
+    job = runner.start("echo", lambda _job: print("\x1b[2J\x1b[92mhello\x1b[0m\r\npartial", end="") or 42, background=False)
 
     assert job.status == "done" and job.result == 42
-    assert job.as_dict()["lines"] == ["hello", "partial"]
+    assert job.as_dict()["lines"] == ["\x1b[92mhello\x1b[0m", "partial"]  # colours kept for the browser, screen codes dropped
     assert job.as_dict(since=1)["lines"] == ["partial"]
 
     failed = runner.start("boom", lambda _job: 1 / 0, background=False)
