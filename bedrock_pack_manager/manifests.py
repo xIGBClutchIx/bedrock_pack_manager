@@ -65,11 +65,31 @@ def strip_json_comments(text: str) -> str:
     return "".join(result)
 
 
+class ManifestError(ValueError):
+    pass
+
+
+def parse_manifest(data: bytes | str) -> dict:
+    """Parse manifest bytes, tolerating BOMs, comments, and trailing commas."""
+
+    text = data.decode("utf-8-sig", errors="replace") if isinstance(data, bytes) else data.lstrip("﻿")
+    cleaned = strip_json_comments(text)
+    try:
+        manifest = json.loads(cleaned)
+    except json.JSONDecodeError:
+        try:
+            manifest = json.loads(re.sub(r",(\s*[}\]])", r"\1", cleaned))
+        except json.JSONDecodeError as exc:
+            raise ManifestError(str(exc)) from exc
+    if not isinstance(manifest, dict):
+        raise ManifestError("manifest.json is not a JSON object")
+    return manifest
+
+
 def read_manifest(manifest_path: Path) -> dict | None:
     try:
-        with open(manifest_path, "r", encoding="utf-8-sig") as f:
-            return json.loads(strip_json_comments(f.read()))
-    except json.JSONDecodeError as exc:
+        return parse_manifest(Path(manifest_path).read_bytes())
+    except ManifestError as exc:
         error(f"Corrupt manifest.json in {manifest_path.parent.name}: {exc}")
         return None
     except OSError as exc:
@@ -81,7 +101,9 @@ def classify_pack(manifest: dict) -> str | None:
     """Map manifest module types to the app's behavior/resource pack labels."""
 
     modules = manifest.get("modules", [])
-    types = {module.get("type", "").lower() for module in modules}
+    if not isinstance(modules, list):
+        return None
+    types = {str(module.get("type", "")).lower() for module in modules if isinstance(module, dict)}
 
     if types & BP_TYPES:
         return "bp"
@@ -90,11 +112,35 @@ def classify_pack(manifest: dict) -> str | None:
     return None
 
 
+def normalize_version(version) -> list:
+    """Manifests use ``[1, 0, 0]``; some newer ones use ``"1.0.0"``. World JSONs want the list."""
+
+    if isinstance(version, list):
+        return version
+    if isinstance(version, str):
+        parts = re.split(r"[.\-+]", version)
+        numbers = []
+        for part in parts[:3]:
+            numbers.append(int(part) if part.isdigit() else part)
+        while len(numbers) < 3:
+            numbers.append(0)
+        return numbers
+    if isinstance(version, int):
+        return [version, 0, 0]
+    return [0, 0, 0]
+
+
+def format_version(version) -> str:
+    if isinstance(version, list):
+        return ".".join(str(value) for value in version)
+    return str(version)
+
+
 def get_pack_info(manifest: dict) -> tuple[str, list, str]:
-    header = manifest.get("header", {})
-    uuid = header.get("uuid", "")
-    version = header.get("version", [0, 0, 0])
-    name = strip_mc_formatting(header.get("name", "unknown"))
+    header = manifest.get("header", {}) if isinstance(manifest.get("header"), dict) else {}
+    uuid = str(header.get("uuid", "") or "").strip()
+    version = normalize_version(header.get("version", [0, 0, 0]))
+    name = strip_mc_formatting(str(header.get("name", "unknown")))
     return uuid, version, name
 
 

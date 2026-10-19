@@ -3,13 +3,18 @@
 ## Project Purpose
 
 This project installs Minecraft Bedrock packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
+It works on a local folder (the classic `run/` layout or any server folder) or on a remote server over FTP, FTPS, or SFTP, from the CLI or a local web UI.
 
 The current architecture is a small Python package with a thin top-level script:
 
 - `bedrock_pack_manager.py`: entrypoint
-- `bedrock_pack_manager/cli.py`: CLI parsing and startup
-- `bedrock_pack_manager/install.py`: install flow
-- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, audit, and world-edit commands
+- `bedrock_pack_manager/cli.py`: CLI parsing, interactive menus, connecting, and startup
+- `bedrock_pack_manager/storage/`: `Storage` API (`base.py`) with `LocalStorage`, `FTPStorage` (stdlib ftplib, FTP + explicit FTPS), `SFTPStorage` (paramiko), and `connect.py` for `ConnectionSettings` / URL parsing
+- `bedrock_pack_manager/layout.py`: lenient server layout detection, `LayoutOverrides`, and `Target` (storage + layout)
+- `bedrock_pack_manager/pack_index.py`: one scan of installed packs per operation, plus problem detection
+- `bedrock_pack_manager/install.py`: unpack locally, plan, then apply an install
+- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, audit, world status, and world-edit commands
+- `bedrock_pack_manager/web/`: local web UI (`server.py`, `jobs.py`, `static/`)
 - `bedrock_pack_manager/worlds.py`: world JSON helpers and selection
 - `bedrock_pack_manager/manifests.py`: manifest parsing and classification
 - `bedrock_pack_manager/nbt.py`: `level.dat` beta and gamemode helpers
@@ -33,9 +38,21 @@ All runtime data belongs under `run/`:
 - `run/resource_packs/`
 - `run/worlds/`
 - `run/logs/`
+- `run/staging/` (local unpack scratch space and web UI uploads)
+- `run/backups/` (web UI backup zips)
+- `run/known_hosts` (trusted SFTP host keys)
+- `run/profiles.json` (web UI connection profiles, never passwords)
 
 If you add any new operational output, cache, report, or temp artifact, place it under `run/` unless there is a strong reason not to.
 Startup currently creates the full runtime tree before logging, world selection, install, or uninstall logic runs.
+
+## Storage Rules
+
+- Commands never touch `pathlib`/`shutil` for server data; they go through `Target.storage` with POSIX-style string paths relative to the connection root.
+- Local-only work (unpacking archives, queues, logs, backups) stays on the local filesystem under `run/`.
+- Build a `PackIndex` once per operation instead of re-reading manifests; remote round trips are slow.
+- Never persist or log passwords. `ConnectionSettings.public_dict()` is the only form that may be saved or returned to the UI.
+- Unknown SFTP host keys must be confirmed by the user (prompt, `--trust-host-key`, or the UI dialog), never auto-accepted.
 
 ## CLI Conventions
 
@@ -53,13 +70,19 @@ Current public commands:
 - beta toggle: `python bedrock_pack_manager.py --beta`
 - gamemode set: `python bedrock_pack_manager.py --gamemode creative`
 - combined world edit: `python bedrock_pack_manager.py --beta --gamemode creative`
+- web UI: `python bedrock_pack_manager.py --serve`
 
 Current public selection and install modifiers:
 
 - duplicate handling: `--duplicate-mode skip|replace|keep-both`
+- re-upload same version: `--reupload`
+- preview only: `--dry-run` (install and cleanup)
 - world selection: `--world-name <name>` or `--world-path <path>`
 - uninstall keep files: `--uninstall-keep-files`
 - zip name: `--zip-name world.zip`
+- server: `--remote <url-or-folder>`, `--password-env VAR`, `--key-file PATH`, `--trust-host-key FP`, `--allow-self-signed`, `--active-mode`
+- layout: `--server-root`, `--worlds-dir`, `--bp-dir`, `--rp-dir`, `--pack-scope shared|world`
+- web UI: `--port`, `--no-browser`
 
 Current interactive menu actions:
 
@@ -69,6 +92,10 @@ Current interactive menu actions:
 - audit world
 - rebuild JSONs
 - cleanup pack folders
+- connect to remote server
+- open web UI
+
+Web UI actions mirror the CLI: connect, world status, install (preview + apply), uninstall, audit, rebuild, cleanup (preview + apply), world edits, backup. Keep new CLI actions and web UI actions in sync too.
 
 When adding CLI options:
 
@@ -155,6 +182,9 @@ Fixture support files:
 
 - `tests/test_fixtures.py`: validates fixture contents
 - `tests/fixtures/build_fixtures.py`: regenerates synthetic fixture assets when needed
+- `tests/conftest.py`: `ftp_server` / `ftp_storage` (a real in-process pyftpdlib server), `sftp_storage`, and `any_storage` (runs one test against local, FTP, and SFTP)
+- `tests/fake_sftp.py`: a paramiko `SSHClient`/SFTP stand-in backed by a local folder, so `SFTPStorage` runs its real code
+- `tests/helpers.py`: `run_setup()` builds the classic `run/` layout and returns `(paths, target, world, world_dir)`
 
 When possible, use real project behavior with small fixtures instead of excessive mocking.
 

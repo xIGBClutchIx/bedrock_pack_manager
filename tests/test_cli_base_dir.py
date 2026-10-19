@@ -14,4 +14,4 @@ def test_get_base_dir_uses_executable_parent_when_frozen(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "/tmp/app/bedrock-pack-manager")
 
-    assert cli.get_base_dir() == Path("/tmp/app")
+    assert cli.get_base_dir() == Path("/tmp/app/bedrock-pack-manager").resolve().parent

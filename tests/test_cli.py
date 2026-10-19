@@ -1,9 +1,10 @@
 import sys
-from pathlib import Path
 
 import bedrock_pack_manager.cli as cli
 from bedrock_pack_manager.cli import parse_args
+from bedrock_pack_manager.layout import connect_target
 from bedrock_pack_manager.logger import capture_run_logs
+from bedrock_pack_manager.storage import LocalStorage, StorageError
 
 
 def test_parse_args_defaults_to_no_flags():
@@ -152,62 +153,209 @@ def test_log_run_settings_writes_to_log_only(tmp_path, capsys):
     assert "Effective flags: --beta, --rebuild" in log_text
 
 
-def test_resolve_world_rejects_conflicting_world_flags(tmp_path):
+def test_parse_args_accepts_remote_and_layout_flags():
+    args = parse_args(
+        [
+            "--remote",
+            "sftp://mc@host:2022/srv",
+            "--password-env",
+            "BPM_PW",
+            "--key-file",
+            "~/.ssh/id",
+            "--trust-host-key",
+            "SHA256:abc",
+            "--allow-self-signed",
+            "--active-mode",
+            "--server-root",
+            "bedrock",
+            "--worlds-dir",
+            "bedrock/worlds",
+            "--bp-dir",
+            "bp",
+            "--rp-dir",
+            "rp",
+            "--pack-scope",
+            "world",
+            "--dry-run",
+            "--reupload",
+            "--serve",
+            "--port",
+            "9000",
+            "--no-browser",
+        ]
+    )
+
+    assert args.remote == "sftp://mc@host:2022/srv"
+    assert args.pack_scope == "world"
+    assert args.dry_run and args.reupload and args.serve and args.no_browser
+    assert args.port == 9000
+    overrides = cli.layout_overrides(args)
+    assert (overrides.server_root, overrides.worlds_dir, overrides.bp_dir, overrides.rp_dir, overrides.pack_scope) == ("bedrock", "bedrock/worlds", "bp", "rp", "world")
+
+
+def test_settings_from_args_reads_password_env_and_options(monkeypatch):
+    monkeypatch.setenv("BPM_PW", "hunter2")
+    args = parse_args(["--remote", "ftps://mc@host/mc", "--password-env", "BPM_PW", "--allow-self-signed", "--active-mode", "--trust-host-key", "SHA256:x"])
+
+    settings = cli.settings_from_args(args)
+
+    assert settings.protocol == "ftps"
+    assert settings.password == "hunter2"
+    assert settings.tls_verify is False
+    assert settings.passive is False
+    assert settings.trusted_fingerprint == "SHA256:x"
+
+
+def test_settings_from_args_rejects_empty_password_env(monkeypatch):
+    monkeypatch.delenv("BPM_MISSING", raising=False)
+    args = parse_args(["--remote", "ftp://mc@host/", "--password-env", "BPM_MISSING"])
+
+    try:
+        cli.settings_from_args(args)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "BPM_MISSING" in str(exc)
+
+
+def test_log_launch_context_redacts_passwords(tmp_path):
+    argv = ["--remote", "ftp://mc:topsecret@host/"]
+    with capture_run_logs(tmp_path / "logs"):
+        cli.log_launch_context(argv, parse_args(argv))
+
+    log_text = (tmp_path / "logs" / "latest.txt").read_text(encoding="utf-8")
+    assert "topsecret" not in log_text
+    assert "ftp://mc:***@host/" in log_text
+
+
+def test_open_cli_target_defaults_to_run_folder(tmp_path):
     paths = cli.build_paths(tmp_path)
+    cli.ensure_runtime_dirs(paths)
+
+    target = cli.open_cli_target(cli.ConnectionSettings(), paths, cli.LayoutOverrides())
+
+    assert target.storage.root == paths.run_dir
+    assert target.layout.worlds_dir == "worlds"
+
+
+def test_open_cli_target_prompts_to_trust_unknown_host_key(tmp_path, monkeypatch):
+    from bedrock_pack_manager.storage.sftp import UnknownHostKeyError
+
+    paths = cli.build_paths(tmp_path)
+    calls = []
+
+    def fake_open_storage(settings, **_kwargs):
+        calls.append(settings.trusted_fingerprint)
+        if not settings.trusted_fingerprint:
+            raise UnknownHostKeyError("host", 22, "ssh-ed25519", "SHA256:abc")
+        return LocalStorage(tmp_path)
+
+    monkeypatch.setattr(cli, "open_storage", fake_open_storage)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    target = cli.open_cli_target(cli.ConnectionSettings(protocol="sftp", host="host", username="mc"), paths, cli.LayoutOverrides())
+
+    assert calls == ["", "SHA256:abc"]
+    assert target.storage.root == tmp_path
+
+
+def test_open_cli_target_explains_host_key_flag_when_not_interactive(tmp_path, monkeypatch):
+    from bedrock_pack_manager.storage.sftp import UnknownHostKeyError
+
+    def fake_open_storage(_settings, **_kwargs):
+        raise UnknownHostKeyError("host", 22, "ssh-ed25519", "SHA256:abc")
+
+    monkeypatch.setattr(cli, "open_storage", fake_open_storage)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+
+    try:
+        cli.open_cli_target(cli.ConnectionSettings(protocol="sftp", host="host"), cli.build_paths(tmp_path), cli.LayoutOverrides())
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "--trust-host-key SHA256:abc" in str(exc)
+
+
+def test_open_cli_target_turns_storage_errors_into_value_errors(tmp_path, monkeypatch):
+    def fake_open_storage(_settings, **_kwargs):
+        raise StorageError("FTP login failed")
+
+    monkeypatch.setattr(cli, "open_storage", fake_open_storage)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
+
+    try:
+        cli.open_cli_target(cli.ConnectionSettings(protocol="ftp", host="host", password="x"), cli.build_paths(tmp_path), cli.LayoutOverrides())
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "login failed" in str(exc)
+
+
+def _run_target(tmp_path):
+    paths = cli.build_paths(tmp_path)
+    cli.ensure_runtime_dirs(paths)
+    return paths, connect_target(LocalStorage(paths.run_dir))
+
+
+def test_resolve_world_rejects_conflicting_world_flags(tmp_path):
+    _paths, target = _run_target(tmp_path)
     args = parse_args(["--world-name", "WorldA", "--world-path", "WorldB"])
 
     try:
-        cli.resolve_world(args, paths)
+        cli.resolve_world(args, target)
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "either --world-name or --world-path" in str(exc)
 
 
 def test_resolve_world_uses_world_name_when_provided(tmp_path):
-    paths = cli.build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "WorldA"
-    world_dir.mkdir(parents=True)
+    paths, target = _run_target(tmp_path)
+    (paths.worlds_dir / "WorldA").mkdir(parents=True)
     args = parse_args(["--world-name", "WorldA"])
 
-    resolved_world, source = cli.resolve_world(args, paths)
+    resolved_world, source = cli.resolve_world(args, target)
 
-    assert resolved_world == world_dir
+    assert resolved_world == "worlds/WorldA"
     assert source == "--world-name"
 
 
 def test_resolve_world_raises_for_unknown_world_name(tmp_path):
-    paths = cli.build_paths(tmp_path)
+    _paths, target = _run_target(tmp_path)
     args = parse_args(["--world-name", "MissingWorld"])
 
     try:
-        cli.resolve_world(args, paths)
+        cli.resolve_world(args, target)
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "MissingWorld" in str(exc)
 
 
 def test_resolve_world_uses_world_path_when_provided(tmp_path):
-    paths = cli.build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "WorldA"
-    world_dir.mkdir(parents=True)
+    paths, target = _run_target(tmp_path)
+    (paths.worlds_dir / "WorldA").mkdir(parents=True)
     args = parse_args(["--world-path", "WorldA"])
 
-    resolved_world, source = cli.resolve_world(args, paths)
+    resolved_world, source = cli.resolve_world(args, target)
 
-    assert resolved_world == world_dir.resolve()
+    assert resolved_world == "worlds/WorldA"
     assert source == "--world-path"
 
 
+def test_resolve_world_accepts_absolute_world_path(tmp_path):
+    _paths, target = _run_target(tmp_path)
+    elsewhere = tmp_path / "elsewhere" / "World"
+    elsewhere.mkdir(parents=True)
+
+    resolved_world, _source = cli.resolve_world(parse_args(["--world-path", str(elsewhere)]), target)
+
+    assert target.storage.resolve(resolved_world) == elsewhere
+
+
 def test_resolve_world_falls_back_to_prompt_selection(tmp_path, monkeypatch):
-    paths = cli.build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "WorldA"
-    world_dir.mkdir(parents=True)
-    args = parse_args([])
-    monkeypatch.setattr(cli, "select_world", lambda _worlds_dir: world_dir)
+    _paths, target = _run_target(tmp_path)
+    monkeypatch.setattr(cli, "select_world", lambda _target: "worlds/WorldA")
 
-    resolved_world, source = cli.resolve_world(args, paths)
+    resolved_world, source = cli.resolve_world(parse_args([]), target)
 
-    assert resolved_world == world_dir
+    assert resolved_world == "worlds/WorldA"
     assert source == "prompt"
 
 
@@ -267,7 +415,7 @@ def test_prompt_zip_name_shows_selected_world(monkeypatch, capsys):
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
-    assert cli.prompt_zip_name(Path("/tmp/ExampleWorld")) is None
+    assert cli.prompt_zip_name("worlds/ExampleWorld") is None
     output = capsys.readouterr().out
     assert output == ""
 
@@ -302,7 +450,7 @@ def test_prompt_edit_world_flags_uses_arrows_and_space_to_select(monkeypatch):
 def test_prompt_edit_world_flags_shows_selected_world(monkeypatch, capsys):
     monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
 
-    assert cli.prompt_edit_world_flags(Path("/tmp/ExampleWorld")) == set()
+    assert cli.prompt_edit_world_flags("worlds/ExampleWorld") == set()
     output = capsys.readouterr().out
     assert "Worlds" in output
     assert "Selected:" in output
@@ -320,7 +468,7 @@ def test_prompt_gamemode_uses_arrows_and_enter(monkeypatch):
 def test_prompt_gamemode_shows_selected_world(monkeypatch, capsys):
     monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
 
-    assert cli.prompt_gamemode(Path("/tmp/ExampleWorld")) == "survival"
+    assert cli.prompt_gamemode("worlds/ExampleWorld") == "survival"
     output = capsys.readouterr().out
     assert "Worlds" in output
     assert "Selected:" in output
@@ -337,7 +485,7 @@ def test_prompt_uninstall_mode_returns_remove_by_default(monkeypatch):
 def test_prompt_uninstall_mode_shows_selected_world(monkeypatch, capsys):
     monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
 
-    assert cli.prompt_uninstall_mode(Path("/tmp/ExampleWorld")) == "remove"
+    assert cli.prompt_uninstall_mode("worlds/ExampleWorld") == "remove"
     output = capsys.readouterr().out
     assert "Worlds" in output
     assert "Selected:" in output
@@ -382,7 +530,7 @@ def test_prompt_uninstall_flags_shows_selected_world_in_prompt_mode(monkeypatch,
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "1")
 
-    assert cli.prompt_uninstall_flags(candidates, Path("/tmp/ExampleWorld")) == {"--uninstall-pack=bp:bp-uuid:1.0.0"}
+    assert cli.prompt_uninstall_flags(candidates, "worlds/ExampleWorld") == {"--uninstall-pack=bp:bp-uuid:1.0.0"}
     output = capsys.readouterr().out
     assert "Worlds" in output
     assert "Selected:" in output
@@ -400,6 +548,24 @@ def test_mode_menu_lines_show_primary_choices():
     assert "Audit World" in lines[5]
     assert "Rebuild JSONs (overwrites world pack JSONs)" in lines[6]
     assert "Cleanup Pack Folders (deletes unregistered pack folders)" in lines[7]
+    assert "Connect To Remote Server" in lines[8]
+    assert "Open Web UI" in lines[9]
+
+
+def test_prompt_mode_shows_server_label(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keypress", lambda: "\n")
+
+    cli.prompt_mode("sftp://mc@host:22/")
+
+    assert "Server: sftp://mc@host:22/" in capsys.readouterr().out
+
+
+def test_selected_world_lines_mention_single_world():
+    lines = cli._selected_world_lines("worlds/Only", 1)
+
+    assert any("Only one world available" in line for line in lines)
+    assert any("Only" in line for line in lines)
+    assert cli._selected_world_lines(None) == []
 
 
 def test_edit_world_menu_lines_show_selection_count():
@@ -429,7 +595,7 @@ def test_uninstall_mode_menu_lines_show_choices():
 
     assert lines[0] == ""
     assert "Uninstall Mode" in lines[1]
-    assert "removes now-unused pack folders from disk" in lines[2]
+    assert "removes now-unused pack folders" in lines[2]
     assert "Remove From World And Delete Unused Files" in lines[4]
     assert "Remove From World JSON Only" in lines[5]
 

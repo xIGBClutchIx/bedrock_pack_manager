@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 python -m PyInstaller \
   --onefile \
   --name bedrock-pack-manager \
+  --add-data "bedrock_pack_manager/web/static:bedrock_pack_manager/web/static" \
+  --collect-submodules paramiko \
   bedrock_pack_manager.py
 
 echo

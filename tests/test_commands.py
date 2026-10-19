@@ -1,441 +1,390 @@
-import json
+import io
+import struct
 import sys
-import types
 import zipfile
 
 import bedrock_pack_manager.commands as commands
-from bedrock_pack_manager.commands import collect_uninstall_candidates, do_beta, do_cleanup_pack_folders, do_doctor, do_rebuild, do_set_gamemode, do_uninstall, do_zip
+import nbtlib
+import pytest
+from bedrock_pack_manager.commands import (
+    collect_uninstall_candidates,
+    do_beta,
+    do_cleanup_pack_folders,
+    do_doctor,
+    do_rebuild,
+    do_set_gamemode,
+    do_uninstall,
+    do_zip,
+    world_status,
+)
 from bedrock_pack_manager.console import AppState
-from bedrock_pack_manager.paths import build_paths
-from tests.helpers import PACK_UUID, PACK_VERSION, write_manifest, write_world_json
+from bedrock_pack_manager.nbt import read_level_dat
+from tests.conftest import FIXTURES
+from tests.helpers import PACK_UUID, PACK_VERSION, read_json, run_setup, write_manifest, write_world_json
 
+OTHER_UUID = "33333333-3333-3333-3333-333333333333"
 
-def test_do_zip_creates_archive_with_run_contents(tmp_path):
-    paths = build_paths(tmp_path)
-    paths.worlds_dir.mkdir(parents=True, exist_ok=True)
-    paths.behavior_packs_dir.mkdir(parents=True, exist_ok=True)
-    paths.resource_packs_dir.mkdir(parents=True, exist_ok=True)
 
-    (paths.worlds_dir / "world.txt").write_text("world", encoding="utf-8")
-    (paths.behavior_packs_dir / "bp.txt").write_text("bp", encoding="utf-8")
-    (paths.resource_packs_dir / "rp.txt").write_text("rp", encoding="utf-8")
+def write_level_dat(path, game_type=0, beta=False):
+    root = nbtlib.Compound({"GameType": nbtlib.Int(game_type), "LevelName": nbtlib.String("Test Level")})
+    if beta:
+        root["experiments"] = nbtlib.Compound({"gametest": nbtlib.Byte(1)})
+    buf = io.BytesIO()
+    nbtlib.File(root).write(buf, byteorder="little")
+    body = buf.getvalue()
+    path.write_bytes(struct.pack("<II", 10, len(body)) + body)
 
-    state = AppState()
-    do_zip(paths, state)
 
-    zip_files = list(tmp_path.glob("Bedrock_Packs_*.zip"))
-    assert len(zip_files) == 1
+def register(world_dir, kind, entries):
+    name = "world_behavior_packs.json" if kind == "bp" else "world_resource_packs.json"
+    write_world_json(world_dir / name, entries)
 
-    with zipfile.ZipFile(zip_files[0]) as zf:
-        assert set(zf.namelist()) == {
-            "run/worlds/world.txt",
-            "run/behavior_packs/bp.txt",
-            "run/resource_packs/rp.txt",
-        }
-    assert any(action.kind == "create_zip" for action in state.actions)
 
+# ---- status & audit -------------------------------------------------------------------------------
 
-def test_do_zip_uses_custom_zip_name(tmp_path):
-    paths = build_paths(tmp_path)
-    paths.worlds_dir.mkdir(parents=True, exist_ok=True)
-    (paths.worlds_dir / "world.txt").write_text("world", encoding="utf-8")
 
-    state = AppState()
-    do_zip(paths, state, zip_name="world-backup")
-
-    assert (tmp_path / "world-backup.zip").exists()
-
-
-def test_do_rebuild_rewrites_world_jsons_from_installed_packs(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    write_manifest(paths.behavior_packs_dir / "BP One-BP", uuid="bp-uuid", version=PACK_VERSION, name="BP One")
-    write_manifest(
-        paths.resource_packs_dir / "RP One-RP",
-        uuid="rp-uuid",
-        version=PACK_VERSION,
-        name="RP One",
-        module_type="resources",
-    )
-
-    state = AppState()
-    do_rebuild(world_dir, paths, state)
-
-    assert (world_dir / "world_behavior_packs.json").read_text(encoding="utf-8").count("bp-uuid") == 1
-    assert (world_dir / "world_resource_packs.json").read_text(encoding="utf-8").count("rp-uuid") == 1
-    assert any(action.kind == "rebuild_world_json" for action in state.actions)
-
-
-def test_do_rebuild_warns_for_missing_manifest_and_uuid(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    (paths.behavior_packs_dir / "NoManifest").mkdir(parents=True, exist_ok=True)
-    bad_rp = paths.resource_packs_dir / "NoUuid"
-    write_manifest(bad_rp, uuid="", name="No Uuid", module_type="resources")
-
-    state = AppState()
-    do_rebuild(world_dir, paths, state)
-
-    assert len(state.warnings) == 2
-    assert "has no manifest.json" in state.warnings[0]
-    assert "has no UUID" in state.warnings[1]
-
-
-def test_do_cleanup_pack_folders_deletes_unregistered_pack_versions(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    kept_bp = paths.behavior_packs_dir / "Kept Pack-BP"
-    removed_rp = paths.resource_packs_dir / "Old Pack-RP"
-    write_manifest(kept_bp, uuid="bp-uuid", version=PACK_VERSION, name="Kept Pack")
-    write_manifest(removed_rp, uuid="rp-uuid", version=PACK_VERSION, name="Old Pack", module_type="resources")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    state = AppState()
-    do_cleanup_pack_folders(world_dir, paths, state)
-
-    assert kept_bp.exists()
-    assert not removed_rp.exists()
-    assert any(action.kind == "cleanup_pack_folder" and action.details.get("deleted") is True for action in state.actions)
-    assert any(action.kind == "cleanup_pack_folders_summary" and action.details["deleted_folders"] == 1 for action in state.actions)
-
-
-def test_do_cleanup_pack_folders_keeps_shared_pack_versions(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    other_world_dir = paths.worlds_dir / "OtherWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    other_world_dir.mkdir(parents=True, exist_ok=True)
-    shared_rp = paths.resource_packs_dir / "Shared Pack-RP"
-    write_manifest(shared_rp, uuid="rp-uuid", version=PACK_VERSION, name="Shared Pack", module_type="resources")
-    write_world_json(world_dir / "world_behavior_packs.json", [])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-    write_world_json(other_world_dir / "world_behavior_packs.json", [])
-    write_world_json(other_world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
-
-    state = AppState()
-    do_cleanup_pack_folders(world_dir, paths, state)
-
-    assert shared_rp.exists()
-    assert any(action.kind == "cleanup_pack_folder" and action.details.get("deleted") is False for action in state.actions)
-    assert any(action.kind == "cleanup_pack_folders_summary" and action.details["kept_shared_folders"] == 1 for action in state.actions)
-
-
-def test_do_beta_returns_when_level_dat_missing(tmp_path, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-
-    do_beta(world_dir)
-
-    assert "No level.dat found" in capsys.readouterr().out
-
-
-def test_do_beta_enables_world_when_helper_returns_true(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-
-    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_manager.commands.enable_beta_apis", lambda _path: True)
-
-    state = AppState()
-    do_beta(world_dir, state)
-
-    output = capsys.readouterr().out
-    assert "Backup saved as level.dat.backup" in output
-    assert "Beta APIs enabled" in output
-    assert any(action.kind == "beta_backup" for action in state.actions)
-    assert any(action.kind == "beta_toggle" and action.details["changed"] is True for action in state.actions)
-
-
-def test_do_beta_reports_already_enabled_when_helper_returns_false(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-
-    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_manager.commands.enable_beta_apis", lambda _path: False)
-
-    state = AppState()
-    do_beta(world_dir, state)
-
-    assert "already" in capsys.readouterr().out.lower()
-    assert any(action.kind == "beta_toggle" and action.details["changed"] is False for action in state.actions)
-
-
-def test_do_beta_reports_missing_nbtlib_when_level_dat_exists(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-    monkeypatch.delitem(sys.modules, "nbtlib", raising=False)
-
-    real_import = __import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "nbtlib":
-            raise ImportError("missing")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-
-    do_beta(world_dir)
-
-    assert "nbtlib is required" in capsys.readouterr().out
-
-
-def test_do_set_gamemode_returns_when_level_dat_missing(tmp_path, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-
-    do_set_gamemode(world_dir, "creative")
-
-    assert "No level.dat found" in capsys.readouterr().out
-
-
-def test_do_set_gamemode_updates_world_when_helper_returns_true(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-
-    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_manager.commands.set_world_gamemode", lambda _path, _gamemode: True)
-
-    state = AppState()
-    do_set_gamemode(world_dir, "creative", state)
-
-    output = capsys.readouterr().out
-    assert "Backup saved as level.dat.backup" in output
-    assert "World gamemode set to" in output
-    assert any(action.kind == "gamemode_backup" for action in state.actions)
-    assert any(action.kind == "set_gamemode" and action.details["changed"] is True for action in state.actions)
-
-
-def test_do_set_gamemode_reports_already_set_when_helper_returns_false(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-
-    monkeypatch.setitem(sys.modules, "nbtlib", types.SimpleNamespace())
-    monkeypatch.setattr("bedrock_pack_manager.commands.set_world_gamemode", lambda _path, _gamemode: False)
-
-    state = AppState()
-    do_set_gamemode(world_dir, "survival", state)
-
-    assert "already set" in capsys.readouterr().out.lower()
-    assert any(action.kind == "set_gamemode" and action.details["changed"] is False for action in state.actions)
-
-
-def test_do_set_gamemode_reports_missing_nbtlib_when_level_dat_exists(tmp_path, monkeypatch, capsys):
-    world_dir = tmp_path / "ExampleWorld"
-    world_dir.mkdir()
-    (world_dir / "level.dat").write_bytes(b"dummy")
-    monkeypatch.delitem(sys.modules, "nbtlib", raising=False)
-
-    real_import = __import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "nbtlib":
-            raise ImportError("missing")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-
-    do_set_gamemode(world_dir, "creative")
-
-    assert "nbtlib is required" in capsys.readouterr().out
-
-
-def test_collect_uninstall_candidates_lists_world_registered_packs(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    write_manifest(paths.behavior_packs_dir / "Behavior Pack-BP", uuid="bp-uuid", version=PACK_VERSION, name="Behavior Pack")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    candidates = collect_uninstall_candidates(world_dir, paths)
-
-    assert len(candidates) == 1
-    assert candidates[0]["label"] == "[BP] Behavior Pack (v1.0.0)"
-    assert candidates[0]["details"].endswith("Behavior Pack-BP")
-
-
-def test_do_uninstall_removes_world_registration_and_disk_files(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    installed_path = paths.behavior_packs_dir / "Behavior Pack-BP"
-    write_manifest(installed_path, uuid="bp-uuid", version=PACK_VERSION, name="Behavior Pack")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    state = AppState()
-    do_uninstall(world_dir, paths, {"--uninstall-pack=bp:bp-uuid:1.0.0"}, state)
-
-    assert json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8")) == []
-    assert not installed_path.exists()
-    assert any(action.kind == "uninstall_pack" and action.details["removed_paths"] for action in state.actions)
-
-
-def test_do_uninstall_keeps_shared_pack_files_when_another_world_uses_them(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    other_world_dir = paths.worlds_dir / "OtherWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    other_world_dir.mkdir(parents=True, exist_ok=True)
-    installed_path = paths.resource_packs_dir / "Shared Pack-RP"
-    write_manifest(installed_path, uuid="rp-uuid", version=PACK_VERSION, name="Shared Pack", module_type="resources")
-    write_world_json(world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
-    write_world_json(other_world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_behavior_packs.json", [])
-    write_world_json(other_world_dir / "world_behavior_packs.json", [])
-
-    state = AppState()
-    do_uninstall(world_dir, paths, {"--uninstall-pack=rp:rp-uuid:1.0.0"}, state)
-
-    assert json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8")) == []
-    assert installed_path.exists()
-    assert any(action.kind == "keep_shared_pack_files" for action in state.actions)
-
-
-def test_do_uninstall_keeps_disk_files_when_requested(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    installed_path = paths.behavior_packs_dir / "Behavior Pack-BP"
-    write_manifest(installed_path, uuid="bp-uuid", version=PACK_VERSION, name="Behavior Pack")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    state = AppState()
-    do_uninstall(world_dir, paths, {"--uninstall-pack=bp:bp-uuid:1.0.0"}, state, keep_files=True)
-
-    assert json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8")) == []
-    assert installed_path.exists()
-    assert any(action.kind == "keep_uninstall_pack_files" for action in state.actions)
-    assert any(action.kind == "uninstall_pack" and action.details["keep_files"] is True for action in state.actions)
-
-
-def test_do_uninstall_removes_stale_registration_when_disk_files_are_missing(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    state = AppState()
-    do_uninstall(world_dir, paths, {"--uninstall-pack=bp:bp-uuid:1.0.0"}, state)
-
-    assert json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8")) == []
-    assert any(action.kind == "uninstall_missing_pack_files" for action in state.actions)
-
-
-def test_do_uninstall_uses_uninstall_queue_and_keeps_files(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    installed_path = paths.resource_packs_dir / "Queued Pack-RP"
-    queued_path = paths.uninstall_dir / "Queued Pack-RP"
-    write_manifest(installed_path, uuid="rp-uuid", version=PACK_VERSION, name="Queued Pack", module_type="resources")
-    write_manifest(queued_path, uuid="rp-uuid", version=PACK_VERSION, name="Queued Pack", module_type="resources")
-    write_world_json(world_dir / "world_behavior_packs.json", [])
-    write_world_json(world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
-
-    state = AppState()
-    do_uninstall(world_dir, paths, set(), state, keep_files=True)
-
-    assert json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8")) == []
-    assert installed_path.exists()
-    assert not queued_path.exists()
-    assert (paths.uninstalled_dir / "Queued Pack-RP").exists()
-
-
-def test_do_zip_warns_for_missing_run_folders(tmp_path):
-    paths = build_paths(tmp_path)
-    state = AppState()
-
-    do_zip(paths, state)
-
-    assert len(state.warnings) == 3
-
-
-def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    state = AppState()
-    calls = []
-
-    monkeypatch.setattr(commands, "do_doctor", lambda *_args: calls.append("doctor"))
-    monkeypatch.setattr(commands, "do_uninstall", lambda *_args, **_kwargs: calls.append("uninstall"))
-    monkeypatch.setattr(commands, "do_cleanup_pack_folders", lambda *_args: calls.append("cleanup"))
-    monkeypatch.setattr(commands, "do_rebuild", lambda *_args: calls.append("rebuild"))
-    monkeypatch.setattr(commands, "do_beta", lambda *_args: calls.append("beta"))
-    monkeypatch.setattr(commands, "do_set_gamemode", lambda *_args: calls.append("gamemode"))
-    monkeypatch.setattr(commands, "do_zip", lambda *_args, **_kwargs: calls.append("zip"))
-    monkeypatch.setattr(commands, "do_install", lambda *_args, **_kwargs: calls.append("install"))
-
-    commands.run(set(), world_dir, paths, state, duplicate_mode="keep-both")
-    commands.run(
-        {"--beta", "--zip", "--rebuild", "--cleanup-pack-folders", "--doctor", "--uninstall", "--uninstall-pack=bp:uuid:1.0.0", "--gamemode=creative"},
+def test_world_status_classifies_every_pack(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Ok", name="Ok Pack", dependencies=[{"uuid": "deadbeef-0000-0000-0000-000000000000", "version": [1, 0, 0]}])
+    write_manifest(paths.behavior_packs_dir / "Old", uuid=OTHER_UUID, version=[1, 0, 0], name="Old")
+    write_manifest(paths.resource_packs_dir / "Stray", uuid="44444444-4444-4444-4444-444444444444", module_type="resources", name="Stray")
+    register(
         world_dir,
-        paths,
-        state,
+        "bp",
+        [
+            {"pack_id": PACK_UUID, "version": PACK_VERSION},
+            {"pack_id": OTHER_UUID, "version": [2, 0, 0]},
+            {"pack_id": "55555555-5555-5555-5555-555555555555", "version": [1, 0, 0]},
+            {"version": [1, 0, 0]},
+        ],
     )
+    write_level_dat(world_dir / "level.dat", game_type=1)
 
-    assert calls == ["install", "doctor", "uninstall", "cleanup", "rebuild", "beta", "gamemode", "zip"]
+    status = world_status(target, world)
+
+    by_name = {row["name"]: row for row in status["packs"]}
+    assert by_name["Ok Pack"]["status"] == "ok"
+    assert by_name["Old"]["status"] == "version-mismatch"
+    assert by_name["Old"]["on_server_versions"] == ["1.0.0"]
+    assert by_name["55555555-5555-5555-5555-555555555555"]["status"] == "missing"
+    assert by_name["Stray"]["status"] == "unregistered"
+    assert by_name["Stray"]["flag"] == ""
+    assert any("no pack_id" in problem for problem in status["problems"])
+    assert any("deadbeef" in problem for problem in status["problems"])
+    assert status["level"] == {"exists": True, "beta": False, "gamemode": "creative", "level_name": "Test Level", "error": None}
+    assert status["install_dirs"]["bp"].endswith("behavior_packs")
 
 
-def test_do_doctor_reports_clean_state(tmp_path, capsys):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    write_manifest(paths.behavior_packs_dir / "BP One-BP", uuid="bp-uuid", version=PACK_VERSION, name="BP One")
-    write_manifest(paths.resource_packs_dir / "RP One-RP", uuid="rp-uuid", version=PACK_VERSION, name="RP One", module_type="resources")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "bp-uuid", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [{"pack_id": "rp-uuid", "version": PACK_VERSION}])
+def test_world_status_reports_unreadable_level_dat(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    (world_dir / "level.dat").write_bytes(b"x")
 
+    status = world_status(target, world)
+
+    assert status["level"]["exists"] is True
+    assert status["level"]["error"]
+
+
+def test_doctor_reports_clean_state(tmp_path, capsys):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Ok")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
     state = AppState()
-    do_doctor(world_dir, paths, state)
 
-    output = capsys.readouterr().out
-    assert "[BP]" in output
-    assert "BP One (v1.0.0)" in output
-    assert "[RP]" in output
-    assert "RP One (v1.0.0)" in output
-    assert "Audit clean." in output
-    assert not state.warnings
+    do_doctor(target, world, state)
+
+    assert state.warnings == []
+    assert "Audit clean." in capsys.readouterr().out
     assert any(action.kind == "doctor_summary" for action in state.actions)
 
 
-def test_do_doctor_reports_registration_and_dependency_problems(tmp_path, capsys):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    write_manifest(paths.behavior_packs_dir / "BP One-BP", uuid=PACK_UUID, version=PACK_VERSION, name="BP One")
-    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": "missing-bp", "version": PACK_VERSION}])
-    write_world_json(world_dir / "world_resource_packs.json", [])
+def test_doctor_reports_problems(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Old", uuid=OTHER_UUID)
+    write_manifest(paths.resource_packs_dir / "Stray", uuid="44444444-4444-4444-4444-444444444444", module_type="resources")
+    (paths.resource_packs_dir / "leftover").mkdir()
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}, {"pack_id": OTHER_UUID, "version": [2, 0, 0]}])
+    state = AppState()
 
-    dep_manifest_dir = paths.resource_packs_dir / "RP One-RP"
-    write_manifest(dep_manifest_dir, uuid="rp-uuid", version=PACK_VERSION, name="RP One", module_type="resources")
-    dep_manifest_dir.joinpath("manifest.json").write_text(
-        json.dumps(
-            {
-                "format_version": 2,
-                "header": {"name": "RP One", "uuid": "rp-uuid", "version": [1, 0, 0]},
-                "modules": [{"type": "resources", "uuid": "module-rp", "version": [1, 0, 0]}],
-                "dependencies": [{"uuid": "missing-dep", "version": [1, 0, 0]}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    do_doctor(target, world, state)
+
+    warnings = "\n".join(state.warnings)
+    assert "missing on the server" in warnings
+    assert "that version is not installed (found 1.0.0)" in warnings
+    assert "installed but not registered" in warnings
+    assert "leftover has no manifest.json" in warnings
+
+
+# ---- rebuild & cleanup ----------------------------------------------------------------------------
+
+
+def test_rebuild_registers_newest_version_of_each_pack(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "A v1", version=[1, 0, 0])
+    write_manifest(paths.behavior_packs_dir / "A v2", version=[2, 0, 0])
+    write_manifest(paths.resource_packs_dir / "R", uuid=OTHER_UUID, module_type="resources")
+    write_manifest(paths.behavior_packs_dir / "Wrap" / "Nested", uuid="77777777-7777-7777-7777-777777777777")
+    register(world_dir, "bp", [{"pack_id": "stale", "version": [1, 0, 0]}])
+    state = AppState()
+
+    result = do_rebuild(target, world, state)
+
+    assert result == {"behavior_packs": 1, "resource_packs": 1}
+    assert read_json(world_dir / "world_behavior_packs.json") == [{"pack_id": PACK_UUID, "version": [2, 0, 0]}]
+    assert read_json(world_dir / "world_resource_packs.json") == [{"pack_id": OTHER_UUID, "version": PACK_VERSION}]
+    assert any("several versions installed" in warning for warning in state.warnings)
+    assert any("nested one folder too deep" in warning for warning in state.warnings)
+
+
+def test_cleanup_deletes_only_unused_folders(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Used")
+    write_manifest(paths.behavior_packs_dir / "Unused", uuid=OTHER_UUID)
+    write_manifest(paths.behavior_packs_dir / "Shared", uuid="88888888-8888-8888-8888-888888888888")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    other = paths.worlds_dir / "Other"
+    register(other, "bp", [{"pack_id": "88888888-8888-8888-8888-888888888888", "version": PACK_VERSION}])
+
+    preview = do_cleanup_pack_folders(target, world, AppState(), dry_run=True)
+    assert [path.split("\\")[-1].split("/")[-1] for path in preview["deleted"]] == ["Unused"]
+    assert (paths.behavior_packs_dir / "Unused").exists()
 
     state = AppState()
-    do_doctor(world_dir, paths, state)
+    result = do_cleanup_pack_folders(target, world, state)
 
+    assert sorted(p.name for p in paths.behavior_packs_dir.iterdir()) == ["Shared", "Used"]
+    assert len(result["deleted"]) == 1 and len(result["kept"]) == 1
+    assert any(action.kind == "keep_shared_cleanup_pack" for action in state.actions)
+
+
+def test_cleanup_reports_nothing_to_do(tmp_path, capsys):
+    _paths, target, world, _ = run_setup(tmp_path)
+
+    do_cleanup_pack_folders(target, world, AppState())
+
+    assert "No unregistered pack folders to delete." in capsys.readouterr().out
+
+
+# ---- uninstall ------------------------------------------------------------------------------------
+
+
+def test_collect_uninstall_candidates(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Pack-BP", name="Pack")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}, {"pack_id": OTHER_UUID, "version": [1, 0, 0]}, {"pack_id": "x", "version": "bad"}])
+
+    candidates = collect_uninstall_candidates(target, world)
+
+    assert [candidate["name"] for candidate in candidates] == [OTHER_UUID, "Pack"]
+    assert candidates[0]["details"] == "missing on the server"
+    assert candidates[1]["flag"] == f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"
+
+
+def test_uninstall_removes_registration_and_files(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Pack-BP")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+
+    result = do_uninstall(target, world, paths, {f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"}, AppState())
+
+    assert result["removed"] == 1 and len(result["deleted"]) == 1
+    assert read_json(world_dir / "world_behavior_packs.json") == []
+    assert not (paths.behavior_packs_dir / "Pack-BP").exists()
+
+
+def test_uninstall_keeps_files_used_by_another_world(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Pack-BP")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    register(paths.worlds_dir / "Other", "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    state = AppState()
+
+    do_uninstall(target, world, paths, {f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"}, state)
+
+    assert (paths.behavior_packs_dir / "Pack-BP").exists()
+    assert any(action.kind == "keep_shared_pack_files" for action in state.actions)
+
+
+def test_uninstall_deletes_world_local_copy_even_if_others_use_uuid(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(world_dir / "behavior_packs" / "Local")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    register(paths.worlds_dir / "Other", "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+
+    do_uninstall(target, world, paths, {f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"}, AppState())
+
+    assert not (world_dir / "behavior_packs" / "Local").exists()
+
+
+def test_uninstall_keep_files(tmp_path, capsys):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Pack-BP")
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+
+    do_uninstall(target, world, paths, {f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"}, AppState(), keep_files=True)
+
+    assert (paths.behavior_packs_dir / "Pack-BP").exists()
+    assert read_json(world_dir / "world_behavior_packs.json") == []
+    assert "Kept installed pack folders" in capsys.readouterr().out
+
+
+def test_uninstall_stale_registration(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    register(world_dir, "bp", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    state = AppState()
+
+    do_uninstall(target, world, paths, {f"--uninstall-pack=bp:{PACK_UUID}:1.0.0"}, state)
+
+    assert any(action.message == "Removed stale pack registration" for action in state.actions)
+
+
+def test_uninstall_rejects_unknown_selection(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+
+    with pytest.raises(ValueError, match="Unknown uninstall selection"):
+        do_uninstall(target, world, paths, {"--uninstall-pack=bp:nope:1.0.0"}, AppState())
+
+
+def test_uninstall_from_queue(tmp_path):
+    import shutil
+
+    paths, target, world, world_dir = run_setup(tmp_path)
+    shutil.copy(FIXTURES / "installed" / "addon.mcaddon", paths.uninstall_dir / "addon.mcaddon")
+    write_manifest(paths.behavior_packs_dir / "Addon BP-BP", uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    register(world_dir, "bp", [{"pack_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "version": [1, 0, 0]}])
+    state = AppState()
+
+    assert commands.has_uninstall_queue_entries(paths)
+    do_uninstall(target, world, paths, set(), state)
+
+    assert read_json(world_dir / "world_behavior_packs.json") == []
+    assert (paths.uninstalled_dir / "addon.mcaddon").exists()
+    assert any(action.kind == "skip_uninstall_queue_pack" for action in state.actions)
+
+
+def test_uninstall_with_empty_queue_raises(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+
+    with pytest.raises(ValueError, match="No packs from run/uninstall"):
+        do_uninstall(target, world, paths, set(), AppState())
+
+
+# ---- zip ------------------------------------------------------------------------------------------
+
+
+def test_zip_includes_worlds_and_pack_folders(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    (world_dir / "level.dat").write_bytes(b"L")
+    write_manifest(paths.behavior_packs_dir / "B")
+    state = AppState()
+
+    result = do_zip(target, paths, state, zip_name="backup")
+
+    assert result["zip_name"] == "backup.zip"
+    with zipfile.ZipFile(paths.base_dir / "backup.zip") as zf:
+        assert set(zf.namelist()) == {"worlds/ExampleWorld/level.dat", "behavior_packs/B/manifest.json"}
+    assert any(action.kind == "create_zip" for action in state.actions)
+
+
+def test_zip_single_world_to_output_dir(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    (world_dir / "level.dat").write_bytes(b"L")
+    (paths.worlds_dir / "Other").mkdir()
+    (paths.worlds_dir / "Other" / "level.dat").write_bytes(b"O")
+
+    result = do_zip(target, paths, AppState(), output_dir=paths.backups_dir, world=world)
+
+    with zipfile.ZipFile(result["zip_path"]) as zf:
+        assert zf.namelist() == ["worlds/ExampleWorld/level.dat"]
+    assert result["zip_name"].startswith("Bedrock_Packs_")
+
+
+def test_zip_warns_for_missing_folders(tmp_path):
+    paths, target, _world, _ = run_setup(tmp_path)
+    paths.resource_packs_dir.rmdir()
+    state = AppState()
+
+    do_zip(target, paths, state)
+
+    assert any("does not exist" in warning for warning in state.warnings)
+
+
+# ---- level.dat edits ------------------------------------------------------------------------------
+
+
+def test_beta_and_gamemode_edit_level_dat_with_backup(tmp_path, capsys):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_level_dat(world_dir / "level.dat")
+    state = AppState()
+
+    assert do_beta(target, world, state) == {"changed": True}
+    assert do_beta(target, world, state) == {"changed": False}
+    assert do_set_gamemode(target, world, "adventure", state) == {"changed": True}
+    assert do_set_gamemode(target, world, "adventure", state) == {"changed": False}
+
+    level = read_level_dat(target.storage, f"{world}/level.dat")
+    assert level.beta_enabled and level.gamemode == "adventure"
+    assert (world_dir / "level.dat.backup").exists()
     output = capsys.readouterr().out
-    assert "missing on disk" in output
-    assert "not registered" in output
-    assert "depends on UUID missing-dep" in output
+    assert "already" in output and "Restart the server" in output
+
+
+def test_level_dat_edits_skip_when_missing(tmp_path, capsys):
+    _paths, target, world, _ = run_setup(tmp_path)
+    state = AppState()
+
+    assert do_beta(target, world, state) == {"changed": False}
+    assert do_set_gamemode(target, world, "creative", state) == {"changed": False}
+    assert "No level.dat found" in capsys.readouterr().out
+
+
+def test_level_dat_edits_report_missing_nbtlib(tmp_path, monkeypatch, capsys):
+    _paths, target, world, world_dir = run_setup(tmp_path)
+    (world_dir / "level.dat").write_bytes(b"x")
+    monkeypatch.setitem(sys.modules, "nbtlib", None)
+
+    assert do_beta(target, world, AppState()) == {"changed": False}
+    assert "nbtlib is required" in capsys.readouterr().out
+
+
+# ---- dispatch -------------------------------------------------------------------------------------
+
+
+def test_run_dispatches_requested_commands(tmp_path, monkeypatch):
+    paths, target, world, _ = run_setup(tmp_path)
+    calls = []
+    for name in ["do_doctor", "do_uninstall", "do_cleanup_pack_folders", "do_rebuild", "do_beta", "do_set_gamemode", "do_zip", "do_install"]:
+        monkeypatch.setattr(commands, name, lambda *args, _name=name, **kwargs: calls.append((_name, kwargs)))
+
+    commands.run(
+        {
+            "--doctor",
+            "--uninstall",
+            "--uninstall-pack=bp:x:1",
+            "--uninstall-keep-files",
+            "--cleanup-pack-folders",
+            "--rebuild",
+            "--beta",
+            "--gamemode=creative",
+            "--zip",
+            "--zip-name=a.zip",
+        },
+        target,
+        world,
+        paths,
+        AppState(),
+    )
+    commands.run(set(), target, world, paths, AppState(), duplicate_mode="skip", reupload=True, dry_run=True)
+
+    names = [name for name, _ in calls]
+    assert names == ["do_doctor", "do_uninstall", "do_cleanup_pack_folders", "do_rebuild", "do_beta", "do_set_gamemode", "do_zip", "do_install"]
+    assert calls[1][1] == {"keep_files": True}
+    assert calls[6][1] == {"zip_name": "a.zip"}
+    assert calls[7][1] == {"duplicate_mode": "skip", "reupload": True, "dry_run": True}
+
+
+def test_parse_uninstall_flag():
+    assert commands._parse_uninstall_flag("--uninstall-pack=bp:uuid:1.0.0") == ("bp", "uuid", "1.0.0")
+    assert commands._parse_uninstall_flag("--uninstall-pack=bad") is None
+    assert commands._parse_uninstall_flag("--other") is None
+    assert commands._selected_gamemode({"--gamemode=bogus"}) is None

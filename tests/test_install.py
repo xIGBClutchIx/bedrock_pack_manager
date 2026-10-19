@@ -2,655 +2,407 @@ import json
 import shutil
 import zipfile
 
+import pytest
 from bedrock_pack_manager.console import AppState
 from bedrock_pack_manager.install import (
     UnsafeArchivePathError,
+    _clean_source_name,
+    _effective_pack_name,
     _safe_extract_archive,
     check_dependencies,
     do_install,
     extract_nested_archives,
-    find_packs_on_disk,
-    move_to_installed,
-    pack_exists_on_disk,
-    process_entry,
-    process_pack,
+    find_all_packs,
+    load_world_packs,
+    move_to_processed,
+    pack_folder_name,
+    plan_install,
+    prepare_source,
+    read_incoming_pack,
 )
-from bedrock_pack_manager.paths import build_paths
+from bedrock_pack_manager.layout import connect_target
+from bedrock_pack_manager.pack_index import PackIndex
+from bedrock_pack_manager.paths import build_paths, ensure_runtime_dirs
 from tests.conftest import FIXTURES
-from tests.helpers import (
-    PACK_UUID,
-    PACK_VERSION,
-    make_zip_from_dir,
-    write_manifest,
-    write_world_json,
+from tests.helpers import PACK_UUID, PACK_VERSION, make_zip_from_dir, read_json, run_setup, write_manifest, write_world_json
+
+ADDON = FIXTURES / "installed" / "addon.mcaddon"
+MCPACK = FIXTURES / "installed" / "pack.mcpack"
+ADDON_BP = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+ADDON_RP = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+PACK_RP = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+def queue(paths, *sources):
+    for source in sources:
+        if source.is_dir():
+            shutil.copytree(source, paths.install_dir / source.name)
+        else:
+            shutil.copy(source, paths.install_dir / source.name)
+
+
+def bp_json(world_dir):
+    return read_json(world_dir / "world_behavior_packs.json")
+
+
+def rp_json(world_dir):
+    return read_json(world_dir / "world_resource_packs.json")
+
+
+# ---- full install from the run/install queue ------------------------------------------------------
+
+
+def test_install_addon_and_mcpack_from_queue(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    queue(paths, ADDON, MCPACK)
+    state = AppState()
+
+    result = do_install(target, world, paths, state)
+
+    assert result["stats"] == {"installed": 3, "skipped": 0, "errors": 0}
+    assert result["applied"] is True
+    assert sorted(p.name for p in paths.behavior_packs_dir.iterdir()) == ["Addon BP-BP"]
+    # "Pack" is a generic manifest name, so the archive name is used instead.
+    assert sorted(p.name for p in paths.resource_packs_dir.iterdir()) == ["Addon RP-RP", "pack-RP"]
+    assert (paths.behavior_packs_dir / "Addon BP-BP" / "functions" / ".keep").exists()
+    assert bp_json(world_dir) == [{"pack_id": ADDON_BP, "version": [1, 0, 0]}]
+    assert {entry["pack_id"] for entry in rp_json(world_dir)} == {ADDON_RP, PACK_RP}
+    assert sorted(p.name for p in paths.installed_dir.iterdir()) == ["addon.mcaddon", "pack.mcpack"]
+    assert list(paths.install_dir.iterdir()) == []
+    assert not any(paths.staging_dir.rglob("_extracted_*"))
+    assert any(action.kind == "install_summary" for action in state.actions)
+
+
+def test_install_again_skips_everything(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    queue(paths, ADDON)
+    do_install(target, world, paths, AppState())
+    queue(paths, ADDON)
+
+    result = do_install(target, world, paths, AppState())
+
+    assert result["stats"] == {"installed": 0, "skipped": 2, "errors": 0}
+    assert sorted(p.name for p in paths.installed_dir.iterdir()) == ["addon.mcaddon", "addon_2.mcaddon"]
+
+
+def test_install_with_empty_queue_reports_nothing(tmp_path, capsys):
+    paths, target, world, _ = run_setup(tmp_path)
+
+    result = do_install(target, world, paths, AppState())
+
+    assert result["plan"] == []
+    assert "No files found" in capsys.readouterr().out
+
+
+def test_dry_run_changes_nothing(tmp_path, capsys):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    queue(paths, ADDON)
+
+    result = do_install(target, world, paths, AppState(), dry_run=True)
+
+    assert [item["action"] for item in result["plan"]] == ["upload", "upload"]
+    assert result["applied"] is False
+    assert list(paths.behavior_packs_dir.iterdir()) == []
+    assert not (world_dir / "world_behavior_packs.json").exists()
+    assert (paths.install_dir / "addon.mcaddon").exists()
+    assert "Nothing was changed" in capsys.readouterr().out
+
+
+def test_install_from_explicit_sources_keeps_them_in_place(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    upload = tmp_path / "uploads" / "pack.mcpack"
+    upload.parent.mkdir()
+    shutil.copy(MCPACK, upload)
+
+    do_install(target, world, paths, AppState(), sources=[upload])
+
+    assert upload.exists()
+    assert list(paths.installed_dir.iterdir()) == []
+
+
+def test_install_registers_existing_same_version_without_copy(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Already There")
+    write_manifest(tmp_path / "src" / "pack")
+    state = AppState()
+
+    result = do_install(target, world, paths, state, sources=[tmp_path / "src" / "pack"])
+
+    assert result["plan"][0]["action"] == "register"
+    assert [p.name for p in paths.behavior_packs_dir.iterdir()] == ["Already There"]
+    assert bp_json(world_dir) == [{"pack_id": PACK_UUID, "version": PACK_VERSION}]
+    assert any(action.kind == "reuse_installed_pack" for action in state.actions)
+
+
+def test_reupload_overwrites_same_version(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Test Pack-BP")
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    write_manifest(tmp_path / "src" / "pack")
+    (tmp_path / "src" / "pack" / "new.txt").write_text("fresh")
+
+    result = do_install(target, world, paths, AppState(), sources=[tmp_path / "src" / "pack"], reupload=True)
+
+    assert result["plan"][0]["reason"] == "Re-uploading the same version"
+    assert [p.name for p in paths.behavior_packs_dir.iterdir()] == ["Test Pack-BP"]
+    assert (paths.behavior_packs_dir / "Test Pack-BP" / "new.txt").read_text() == "fresh"
+    assert not any(p.name.endswith(".bpm-upload") for p in paths.behavior_packs_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    "mode, expected_folders, expected_version",
+    [
+        ("replace", ["Test Pack-BP"], [2, 0, 0]),
+        ("skip", ["Test Pack-BP"], [1, 0, 0]),
+        ("keep-both", ["Test Pack-BP", "Test Pack-BP_2"], [2, 0, 0]),
+    ],
 )
+def test_duplicate_modes(tmp_path, mode, expected_folders, expected_version):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Test Pack-BP", version=[1, 0, 0])
+    write_world_json(world_dir / "world_behavior_packs.json", [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
+    write_manifest(tmp_path / "src" / "new", version=[2, 0, 0])
 
-FIXTURE_PACK_ARCHIVE = "pack.mcpack"
-FIXTURE_ADDON_ARCHIVE = "addon.mcaddon"
+    do_install(target, world, paths, AppState(), duplicate_mode=mode, sources=[tmp_path / "src" / "new"])
+
+    assert sorted(p.name for p in paths.behavior_packs_dir.iterdir()) == expected_folders
+    assert bp_json(world_dir) == [{"pack_id": PACK_UUID, "version": expected_version}]
+    if mode == "replace":
+        manifest = read_json(paths.behavior_packs_dir / "Test Pack-BP" / "manifest.json")
+        assert manifest["header"]["version"] == [2, 0, 0]
 
 
-def test_process_pack_restores_files_when_registered_but_missing_on_disk(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
+def test_install_into_world_scope(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path, pack_scope="world")
+    queue(paths, MCPACK)
 
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack)
+    do_install(target, world, paths, AppState())
 
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
+    assert (world_dir / "resource_packs" / "Pack-RP" / "manifest.json").exists()
+    assert list(paths.resource_packs_dir.iterdir()) == []
 
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
+
+def test_install_over_ftp(tmp_path, ftp_server, ftp_storage):
+    server = ftp_server["root"]
+    (server / "worlds" / "W").mkdir(parents=True)
+    (server / "server.properties").write_text("level-name=W\n")
+    paths = build_paths(tmp_path / "app")
+    ensure_runtime_dirs(paths)
+    target = connect_target(ftp_storage)
+    source = tmp_path / "addon.mcaddon"
+    shutil.copy(ADDON, source)
+
+    result = do_install(target, target.default_world(), paths, AppState(), sources=[source])
+
+    assert result["stats"]["installed"] == 2
+    assert (server / "behavior_packs" / "Addon BP-BP" / "notes.txt").exists()
+    assert read_json(server / "worlds" / "W" / "world_behavior_packs.json") == [{"pack_id": ADDON_BP, "version": [1, 0, 0]}]
+
+
+def test_install_reports_bad_sources_as_errors(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    (paths.install_dir / "notes.txt").write_text("hi")
+    (paths.install_dir / "broken.mcpack").write_bytes(b"not a zip")
+    (paths.install_dir / "empty folder").mkdir()
     state = AppState()
 
-    process_pack(source_pack, stats, world_dir, paths, state, source_name="source_pack")
+    result = do_install(target, world, paths, state)
 
-    copied_manifests = list(paths.behavior_packs_dir.glob("*/manifest.json"))
-    assert len(copied_manifests) == 1
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-    assert len(json.loads(world_json.read_text(encoding="utf-8"))) == 1
-    assert any(action.kind == "copy_pack" for action in state.actions)
-    assert any(action.kind == "register_world_pack" for action in state.actions)
+    assert result["stats"]["errors"] == 3
+    warnings = "\n".join(state.warnings)
+    assert "Unknown file type" in warnings
+    assert "not a valid zip archive" in warnings
+    assert "No manifest.json found anywhere inside 'empty folder'" in warnings
+    assert (paths.install_dir / "notes.txt").exists()
 
 
-def test_process_pack_skips_when_registered_and_already_on_disk(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack)
-
-    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
-    write_manifest(existing_pack)
-
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": PACK_VERSION}])
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
+def test_install_warns_about_missing_dependencies(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    write_manifest(tmp_path / "src" / "pack", dependencies=[{"uuid": "99999999-9999-9999-9999-999999999999", "version": [1, 0, 0]}, {"module_name": "@minecraft/server"}])
     state = AppState()
 
-    process_pack(source_pack, stats, world_dir, paths, state, source_name="source_pack")
+    do_install(target, world, paths, state, sources=[tmp_path / "src" / "pack"])
 
-    copied_manifests = list(paths.behavior_packs_dir.glob("*/manifest.json"))
-    assert len(copied_manifests) == 1
-    assert stats == {"installed": 0, "skipped": 1, "errors": 0}
-    assert len(json.loads(world_json.read_text(encoding="utf-8"))) == 1
-    assert any(action.kind == "skip_pack" for action in state.actions)
+    assert any("99999999-9999-9999-9999-999999999999" in warning and "NOT installed" in warning for warning in state.warnings)
 
 
-def test_process_pack_uses_source_name_when_manifest_name_is_generic(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
+# ---- preparing sources ------------------------------------------------------------------------------
 
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack, uuid=PACK_UUID, name="pack.name")
 
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
+def test_prepare_source_handles_nested_archives_and_folders(tmp_path):
+    state = AppState()
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    shutil.copy(ADDON, bundle / "inner.mcaddon")
+    write_manifest(bundle / "loose" / "Loose BP", uuid="77777777-7777-7777-7777-777777777777", name="Loose")
+    (bundle / "__MACOSX").mkdir()
+    write_manifest(bundle / "__MACOSX" / "ghost", uuid="88888888-8888-8888-8888-888888888888")
+    outer = tmp_path / "outer.zip"
+    make_zip_from_dir(bundle, outer)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    source = prepare_source(outer, scratch, state)
+
+    assert sorted(pack.display_name for pack in source.packs) == ["Addon BP", "Addon RP", "Loose"]
+    assert source.extracted is not None
+
+
+def test_prepare_source_accepts_disguised_zip(tmp_path):
+    disguised = tmp_path / "download.mcpack (1)"
+    shutil.copy(MCPACK, disguised)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    source = prepare_source(disguised, scratch, AppState())
+
+    assert [pack.uuid for pack in source.packs] == [PACK_RP]
+
+
+def test_prepare_source_warns_on_single_pack_mcaddon_and_multi_pack_mcpack(tmp_path):
+    state = AppState()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    single = tmp_path / "single.mcaddon"
+    shutil.copy(MCPACK, single)
+    multi = tmp_path / "multi.mcpack"
+    shutil.copy(ADDON, multi)
+
+    prepare_source(single, scratch, state)
+    prepare_source(multi, scratch, state)
+
+    assert any("only contains 1 pack" in warning and "Behavior Pack" in warning for warning in state.warnings)
+    assert any("is a .mcpack but contains 2 packs" in warning for warning in state.warnings)
+
+
+def test_prepare_source_rejects_unsafe_archive(tmp_path):
+    archive = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../escape.txt", "x")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
     state = AppState()
 
-    process_pack(
-        source_pack,
-        stats,
-        world_dir,
-        paths,
-        state,
-        source_name="True Armor and Tools Expansion [BP] v1.4.1.mcpack",
-    )
+    source = prepare_source(archive, scratch, state)
 
-    installed_dirs = [path.name for path in paths.behavior_packs_dir.iterdir() if path.is_dir()]
-    assert installed_dirs == ["True Armor and Tools Expansion-BP"]
-    assert state.installed_packs[0]["name"] == "True Armor and Tools Expansion"
-
-
-def test_process_pack_replaces_existing_uuid_with_new_version_by_default(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-
-    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
-    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
-
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_pack(source_pack, stats, world_dir, paths, state)
-
-    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
-    assert len(installed_packs) == 1
-    assert installed_packs[0]["version"] == [2, 0, 0]
-    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [2, 0, 0]}]
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-
-
-def test_process_pack_skip_mode_keeps_existing_uuid_version(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-
-    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
-    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
-
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_pack(source_pack, stats, world_dir, paths, state, duplicate_mode="skip")
-
-    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
-    assert len(installed_packs) == 1
-    assert installed_packs[0]["version"] == [1, 0, 0]
-    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [1, 0, 0]}]
-    assert stats == {"installed": 0, "skipped": 1, "errors": 0}
-
-
-def test_process_pack_keep_both_mode_preserves_existing_uuid_copy(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-
-    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
-    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack, version=[2, 0, 0], name="Updated Pack")
-
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [{"pack_id": PACK_UUID, "version": [1, 0, 0]}])
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_pack(source_pack, stats, world_dir, paths, state, duplicate_mode="keep-both")
-
-    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
-    assert len(installed_packs) == 2
-    assert sorted(pack["version"] for pack in installed_packs) == [[1, 0, 0], [2, 0, 0]]
-    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [2, 0, 0]}]
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-
-
-def test_process_pack_registers_existing_matching_uuid_without_copying(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-
-    existing_pack = paths.behavior_packs_dir / "Existing Pack-BP"
-    write_manifest(existing_pack, version=[1, 0, 0], name="Existing Pack")
-    source_pack = tmp_path / "source" / "test_pack"
-    write_manifest(source_pack, version=[1, 0, 0], name="Existing Pack")
-
-    world_json = world_dir / "world_behavior_packs.json"
-    write_world_json(world_json, [])
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_pack(source_pack, stats, world_dir, paths, state)
-
-    installed_packs = find_packs_on_disk(paths.behavior_packs_dir, PACK_UUID)
-    assert len(installed_packs) == 1
-    assert json.loads(world_json.read_text(encoding="utf-8")) == [{"pack_id": PACK_UUID, "version": [1, 0, 0]}]
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-
-
-def test_process_entry_warns_for_unknown_file_type(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    unknown_file = paths.install_dir / "notes.txt"
-    paths.install_dir.mkdir(parents=True)
-    unknown_file.write_text("nope", encoding="utf-8")
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(unknown_file, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 0, "skipped": 0, "errors": 1}
-    assert len(state.warnings) == 1
-
-
-def test_process_entry_installs_from_extracted_folder_and_moves_source(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    folder_entry = paths.install_dir / "folder_pack"
-    write_manifest(folder_entry, name="Folder Pack")
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(folder_entry, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-    assert (paths.installed_dir / "folder_pack").exists()
-    assert list(paths.behavior_packs_dir.glob("Folder Pack-BP*/manifest.json"))
-
-
-def test_process_entry_installs_from_zip_archive(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-
-    source_dir = tmp_path / "archive_src"
-    write_manifest(source_dir / "zip_pack", name="Zip Pack")
-    zip_path = paths.install_dir / "pack.zip"
-    make_zip_from_dir(source_dir, zip_path)
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(zip_path, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-    assert (paths.installed_dir / "pack.zip").exists()
-    assert list(paths.behavior_packs_dir.glob("Zip Pack-BP*/manifest.json"))
-
-
-def test_process_entry_extracts_nested_archive_from_mcaddon(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-
-    inner_source = tmp_path / "inner_src"
-    write_manifest(inner_source / "nested_pack", name="Nested Pack")
-    inner_mcpack = tmp_path / "nested.mcpack"
-    make_zip_from_dir(inner_source, inner_mcpack)
-
-    outer_mcaddon = paths.install_dir / "addon.mcaddon"
-    with zipfile.ZipFile(outer_mcaddon, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(inner_mcpack, "nested.mcpack")
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(outer_mcaddon, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-    assert list(paths.behavior_packs_dir.glob("Nested Pack-BP*/manifest.json"))
-
-
-def test_process_entry_reports_invalid_archive(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-
-    bad_zip = paths.install_dir / "bad.zip"
-    bad_zip.write_text("not a zip", encoding="utf-8")
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(bad_zip, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 0, "skipped": 0, "errors": 1}
-    assert len(state.warnings) == 1
-
-
-def test_safe_extract_archive_rejects_path_traversal(tmp_path):
-    zip_path = tmp_path / "bad.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("../escape.txt", "nope")
-
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        try:
-            _safe_extract_archive(zf, tmp_path / "extract")
-            assert False, "expected UnsafeArchivePathError"
-        except UnsafeArchivePathError:
-            pass
-
-
-def test_process_entry_rejects_zip_slip_archive(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-
-    bad_zip = paths.install_dir / "bad.zip"
-    with zipfile.ZipFile(bad_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("../escape.txt", "nope")
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(bad_zip, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 0, "skipped": 0, "errors": 1}
+    assert source.ok is False
     assert any("unsafe archive paths" in warning for warning in state.warnings)
     assert not (tmp_path / "escape.txt").exists()
 
 
-def test_extract_nested_archives_warns_for_invalid_nested_archive(tmp_path):
-    folder = tmp_path / "folder"
+def test_safe_extract_rejects_absolute_paths(tmp_path):
+    archive = tmp_path / "abs.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("/abs.txt", "x")
+
+    with zipfile.ZipFile(archive) as zf, pytest.raises(UnsafeArchivePathError):
+        _safe_extract_archive(zf, tmp_path / "out")
+
+
+def test_extract_nested_archives_warns_on_bad_nested_files(tmp_path):
+    folder = tmp_path / "f"
     folder.mkdir()
-    nested = folder / "bad.mcpack"
-    nested.write_text("bad", encoding="utf-8")
+    (folder / "bad.mcpack").write_bytes(b"nope")
     state = AppState()
 
-    found = extract_nested_archives(folder, state)
+    assert extract_nested_archives(folder, state) is True
+    assert any("not a valid archive" in warning for warning in state.warnings)
+    assert not (folder / "bad.mcpack").exists()
 
-    assert found is True
-    assert len(state.warnings) == 1
 
-
-def test_extract_nested_archives_warns_for_path_traversal(tmp_path):
-    folder = tmp_path / "folder"
-    folder.mkdir()
-    nested = folder / "bad.mcpack"
-    with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("../escape.txt", "nope")
+def test_read_incoming_pack_validation(tmp_path):
     state = AppState()
+    write_manifest(tmp_path / "skin", module_type="skin_pack")
+    write_manifest(tmp_path / "weird", module_type="mystery")
+    write_manifest(tmp_path / "nouuid", uuid="")
+    (tmp_path / "corrupt").mkdir()
+    (tmp_path / "corrupt" / "manifest.json").write_text("{")
+    write_manifest(tmp_path / "beta", dependencies=[{"module_name": "@minecraft/server", "version": "1.9.0-beta"}])
+    old = tmp_path / "old"
+    write_manifest(old)
+    data = read_json(old / "manifest.json")
+    data["format_version"] = 1
+    (old / "manifest.json").write_text(json.dumps(data))
 
-    found = extract_nested_archives(folder, state)
+    assert read_incoming_pack(tmp_path / "skin", "s", state) is None
+    assert read_incoming_pack(tmp_path / "weird", "s", state) is None
+    assert read_incoming_pack(tmp_path / "nouuid", "s", state) is None
+    assert read_incoming_pack(tmp_path / "corrupt", "s", state) is None
+    assert read_incoming_pack(tmp_path / "beta", "s", state, beta_enabled=False).uses_beta is True
+    assert read_incoming_pack(old, "s", state) is not None
 
-    assert found is True
-    assert any("unsafe to extract" in warning for warning in state.warnings)
-    assert not (tmp_path / "escape.txt").exists()
-
-
-def test_move_to_installed_renames_when_target_exists(tmp_path):
-    paths = build_paths(tmp_path)
-    paths.installed_dir.mkdir(parents=True)
-    existing = paths.installed_dir / "pack.zip"
-    existing.write_text("existing", encoding="utf-8")
-    source = tmp_path / "pack.zip"
-    source.write_text("new", encoding="utf-8")
-
-    move_to_installed(source, paths)
-
-    assert (paths.installed_dir / "pack_2.zip").exists()
-
-
-def test_pack_exists_on_disk_handles_missing_manifest_and_invalid_manifest(tmp_path):
-    paths = build_paths(tmp_path)
-    no_manifest = paths.behavior_packs_dir / "NoManifest"
-    no_manifest.mkdir(parents=True)
-    bad_manifest = paths.behavior_packs_dir / "BadManifest"
-    bad_manifest.mkdir(parents=True)
-    (bad_manifest / "manifest.json").write_text("{bad", encoding="utf-8")
-
-    assert pack_exists_on_disk(paths.behavior_packs_dir, "missing-uuid") is False
+    warnings = "\n".join(state.warnings)
+    assert "not a behavior or resource pack" in warnings
+    assert "Cannot determine type" in warnings
+    assert "has no UUID" in warnings
+    assert "Corrupt manifest.json" in warnings
+    assert "beta API versions" in warnings
+    assert "format_version 1" in warnings
 
 
-def test_process_pack_errors_when_manifest_missing(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True)
-    pack_dir = tmp_path / "broken"
-    pack_dir.mkdir()
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
+# ---- planning -------------------------------------------------------------------------------------
+
+
+def test_plan_skips_duplicate_packs_within_one_batch(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    write_manifest(tmp_path / "a" / "pack")
+    write_manifest(tmp_path / "b" / "pack")
     state = AppState()
+    incoming = [read_incoming_pack(tmp_path / "a" / "pack", "a.zip", state), read_incoming_pack(tmp_path / "b" / "pack", "b.zip", state)]
 
-    process_pack(pack_dir, stats, world_dir, paths, state)
+    plans = plan_install(target, world, incoming, PackIndex.build(target, world), load_world_packs(target, world))
 
-    assert stats["errors"] == 1
-
-
-def test_process_pack_errors_for_unknown_type_and_missing_uuid(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True)
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    unknown = tmp_path / "unknown"
-    write_manifest(unknown, uuid=PACK_UUID, name="Unknown", module_type="foo")
-    process_pack(unknown, stats, world_dir, paths, state)
-
-    no_uuid = tmp_path / "no_uuid"
-    write_manifest(no_uuid, uuid="", name="No UUID")
-    process_pack(no_uuid, stats, world_dir, paths, state)
-
-    assert stats["errors"] == 2
+    assert [plan.action for plan in plans] == ["upload", "skip"]
+    assert "a.zip" in plans[1].reason
 
 
-def test_process_pack_collects_format_and_beta_warnings(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True)
-    pack_dir = tmp_path / "warn_pack"
-    pack_dir.mkdir()
-    manifest = {
-        "format_version": 1,
-        "header": {"name": "Warn Pack", "uuid": PACK_UUID, "version": PACK_VERSION},
-        "modules": [{"type": "data", "uuid": "22222222-2222-2222-2222-222222222222", "version": PACK_VERSION}],
-        "dependencies": [{"uuid": "dep", "version": "beta"}],
-    }
-    (pack_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
+def test_plan_avoids_folder_name_clashes(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    (paths.behavior_packs_dir / "Test Pack-BP").mkdir()
+    write_manifest(tmp_path / "src" / "pack")
+    pack = read_incoming_pack(tmp_path / "src" / "pack", "src", AppState())
 
-    process_pack(pack_dir, stats, world_dir, paths, state)
+    plans = plan_install(target, world, [pack], PackIndex.build(target, world), load_world_packs(target, world))
 
-    assert stats["installed"] == 1
-    assert len(state.warnings) == 2
+    assert plans[0].target_folder == "Test Pack-BP_2"
 
 
-def test_process_pack_skips_beta_warning_when_world_is_already_enabled(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True)
-    pack_dir = tmp_path / "warn_pack"
-    pack_dir.mkdir()
-    manifest = {
-        "format_version": 2,
-        "header": {"name": "Warn Pack", "uuid": PACK_UUID, "version": PACK_VERSION},
-        "modules": [{"type": "data", "uuid": "22222222-2222-2222-2222-222222222222", "version": PACK_VERSION}],
-        "dependencies": [{"uuid": "dep", "version": "beta"}],
-    }
-    (pack_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_pack(pack_dir, stats, world_dir, paths, state, beta_enabled=True)
-
-    assert stats["installed"] == 1
-    assert state.warnings == []
+def test_naming_helpers():
+    assert _clean_source_name("Cool Addon [BP] v1.2.3.mcpack") == "Cool Addon"
+    assert _effective_pack_name("pack.name", tmp := __import__("pathlib").Path("folder"), "Nice Thing.mcaddon") == "Nice Thing"
+    assert _effective_pack_name("Real Name", tmp) == "Real Name"
+    assert _effective_pack_name("pack", tmp) == "folder"
+    assert pack_folder_name("Cool: Pack!", tmp, "rp", set()) == "Cool Pack-RP"
+    assert pack_folder_name("Already-BP", tmp, "bp", {"already-bp"}) == "Already-BP_2"
+    assert pack_folder_name("???", tmp, "bp", set()) == "folder-BP"
 
 
-def test_check_dependencies_reports_missing_dependency_only(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    write_world_json(world_dir / "world_behavior_packs.json", [])
-    write_world_json(world_dir / "world_resource_packs.json", [])
+def test_find_all_packs_skips_junk(tmp_path):
+    write_manifest(tmp_path / "a")
+    write_manifest(tmp_path / "__MACOSX" / "a")
 
+    assert find_all_packs(tmp_path) == [tmp_path / "a"]
+
+
+def test_move_to_processed_avoids_overwrite(tmp_path):
+    processed = tmp_path / "processed"
+    for _ in range(2):
+        (tmp_path / "x.mcpack").write_text("x")
+        move_to_processed(tmp_path / "x.mcpack", processed)
+    (tmp_path / "folder").mkdir()
+    move_to_processed(tmp_path / "folder", processed)
+
+    assert sorted(p.name for p in processed.iterdir()) == ["folder", "x.mcpack", "x_2.mcpack"]
+
+
+def test_check_dependencies_ignores_self_and_known(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "Dep", uuid="12121212-1212-1212-1212-121212121212")
     state = AppState()
     state.installed_packs = [
-        {
-            "uuid": PACK_UUID,
-            "name": "Primary Pack",
-            "type": "bp",
-            "version": PACK_VERSION,
-            "dependencies": [
-                {"uuid": "missing-dep", "version": [1, 0, 0]},
-                {"uuid": PACK_UUID, "version": [1, 0, 0]},
-            ],
-            "source": "test",
-        }
+        {"uuid": PACK_UUID, "name": "P", "dependencies": [{"uuid": PACK_UUID}, {"uuid": "12121212-1212-1212-1212-121212121212"}, {"uuid": "dead"}]}
     ]
 
-    warnings = check_dependencies(world_dir, paths, state)
+    warnings = check_dependencies(PackIndex.build(target, world), {"bp": [], "rp": []}, state)
 
-    assert len(warnings) == 1
-    assert "missing-dep" in warnings[0]
-
-
-def test_check_dependencies_accepts_dependency_present_on_disk(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    write_world_json(world_dir / "world_behavior_packs.json", [])
-    write_world_json(world_dir / "world_resource_packs.json", [])
-
-    write_manifest(paths.behavior_packs_dir / "Dependency Pack-BP", uuid="dep-uuid", name="Dependency Pack")
-
-    state = AppState()
-    state.installed_packs = [
-        {
-            "uuid": PACK_UUID,
-            "name": "Primary Pack",
-            "type": "bp",
-            "version": PACK_VERSION,
-            "dependencies": [{"uuid": "dep-uuid", "version": [1, 0, 0]}],
-            "source": "test",
-        }
-    ]
-
-    assert check_dependencies(world_dir, paths, state) == []
-
-
-def test_process_entry_folder_without_manifest_errors(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-    folder = paths.install_dir / "bad_folder"
-    folder.mkdir()
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(folder, stats, world_dir, paths, state)
-
-    assert stats["errors"] == 1
-
-
-def test_process_entry_archive_without_manifest_errors(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-    zip_path = paths.install_dir / "empty.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("readme.txt", "no manifest")
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(zip_path, stats, world_dir, paths, state)
-
-    assert stats["errors"] == 1
-
-
-def test_process_entry_mcpack_warns_when_multiple_packs_found(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True)
-    source_dir = tmp_path / "multi"
-    write_manifest(source_dir / "pack_a", uuid="uuid-a", name="Pack A")
-    write_manifest(source_dir / "pack_b", uuid="uuid-b", name="Pack B")
-    zip_path = paths.install_dir / "multi.mcpack"
-    make_zip_from_dir(source_dir, zip_path)
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(zip_path, stats, world_dir, paths, state)
-
-    assert stats["installed"] == 2
-    assert any(".mcpack but contains 2 packs" in warning for warning in state.warnings)
-
-
-def test_do_install_creates_missing_world_json_and_handles_empty_install(tmp_path, capsys):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True)
-    state = AppState()
-
-    do_install(world_dir, paths, state)
-
-    output = capsys.readouterr().out
-    assert "No files found in the install folder." in output
-    assert (world_dir / "world_behavior_packs.json").exists()
-    assert (world_dir / "world_resource_packs.json").exists()
-
-
-def test_process_entry_installs_real_mcpack_fixture(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True, exist_ok=True)
-
-    archive_name = FIXTURE_PACK_ARCHIVE
-    archive_path = paths.install_dir / archive_name
-    shutil.copy2(FIXTURES / "installed" / archive_name, archive_path)
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(archive_path, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 1, "skipped": 0, "errors": 0}
-    assert (paths.installed_dir / archive_name).exists()
-    assert len(list(paths.resource_packs_dir.glob("*/manifest.json"))) == 1
-    assert len(list(paths.resource_packs_dir.glob("*/pack.txt"))) == 1
-    assert len(json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8"))) == 1
-
-
-def test_process_entry_installs_real_mcaddon_fixture(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "ExampleWorld"
-    world_dir.mkdir(parents=True)
-    paths.install_dir.mkdir(parents=True, exist_ok=True)
-
-    archive_name = FIXTURE_ADDON_ARCHIVE
-    archive_path = paths.install_dir / archive_name
-    shutil.copy2(FIXTURES / "installed" / archive_name, archive_path)
-
-    stats = {"installed": 0, "skipped": 0, "errors": 0}
-    state = AppState()
-
-    process_entry(archive_path, stats, world_dir, paths, state)
-
-    assert stats == {"installed": 2, "skipped": 0, "errors": 0}
-    assert (paths.installed_dir / archive_name).exists()
-    assert len(list(paths.behavior_packs_dir.glob("*/manifest.json"))) == 1
-    assert len(list(paths.resource_packs_dir.glob("*/manifest.json"))) == 1
-    assert len(list(paths.behavior_packs_dir.glob("*/notes.txt"))) == 1
-    assert len(list(paths.resource_packs_dir.glob("*/notes.txt"))) == 1
-    assert len(json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8"))) == 1
-    assert len(json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8"))) == 1
-
-
-def test_do_install_restores_real_fixtures_from_existing_world_json(tmp_path):
-    paths = build_paths(tmp_path)
-    world_dir = paths.worlds_dir / "World"
-    world_dir.mkdir(parents=True, exist_ok=True)
-    paths.install_dir.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy2(FIXTURES / "worlds" / "World" / "world_behavior_packs.json", world_dir / "world_behavior_packs.json")
-    shutil.copy2(FIXTURES / "worlds" / "World" / "world_resource_packs.json", world_dir / "world_resource_packs.json")
-    shutil.copy2(
-        FIXTURES / "installed" / FIXTURE_PACK_ARCHIVE,
-        paths.install_dir / FIXTURE_PACK_ARCHIVE,
-    )
-    shutil.copy2(
-        FIXTURES / "installed" / FIXTURE_ADDON_ARCHIVE,
-        paths.install_dir / FIXTURE_ADDON_ARCHIVE,
-    )
-
-    state = AppState()
-
-    do_install(world_dir, paths, state)
-
-    behavior_entries = json.loads((world_dir / "world_behavior_packs.json").read_text(encoding="utf-8"))
-    resource_entries = json.loads((world_dir / "world_resource_packs.json").read_text(encoding="utf-8"))
-
-    assert len(behavior_entries) == 1
-    assert len(resource_entries) == 2
-    assert len(list(paths.behavior_packs_dir.glob("*/manifest.json"))) == 1
-    assert len(list(paths.resource_packs_dir.glob("*/manifest.json"))) == 2
-    assert (paths.installed_dir / FIXTURE_PACK_ARCHIVE).exists()
-    assert (paths.installed_dir / FIXTURE_ADDON_ARCHIVE).exists()
+    assert len(warnings) == 1 and "dead" in warnings[0]

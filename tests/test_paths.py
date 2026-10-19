@@ -17,6 +17,10 @@ def test_build_paths_uses_run_directory():
     assert paths.behavior_packs_dir == base_dir / "run" / "behavior_packs"
     assert paths.resource_packs_dir == base_dir / "run" / "resource_packs"
     assert paths.worlds_dir == base_dir / "run" / "worlds"
+    assert paths.staging_dir == base_dir / "run" / "staging"
+    assert paths.backups_dir == base_dir / "run" / "backups"
+    assert paths.known_hosts_file == base_dir / "run" / "known_hosts"
+    assert paths.profiles_file == base_dir / "run" / "profiles.json"
 
 
 def test_ensure_runtime_dirs_creates_full_run_tree(tmp_path):

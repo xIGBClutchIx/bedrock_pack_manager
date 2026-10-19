@@ -6,7 +6,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    """Resolved filesystem locations used by the app at runtime."""
+    """Resolved local filesystem locations used by the app at runtime."""
 
     base_dir: Path
     run_dir: Path
@@ -18,6 +18,10 @@ class ProjectPaths:
     worlds_dir: Path
     installed_dir: Path
     uninstalled_dir: Path
+    staging_dir: Path
+    backups_dir: Path
+    known_hosts_file: Path
+    profiles_file: Path
 
 
 def build_paths(base_dir: Path) -> ProjectPaths:
@@ -33,6 +37,10 @@ def build_paths(base_dir: Path) -> ProjectPaths:
         worlds_dir=run_dir / "worlds",
         installed_dir=run_dir / "installed",
         uninstalled_dir=run_dir / "uninstalled",
+        staging_dir=run_dir / "staging",
+        backups_dir=run_dir / "backups",
+        known_hosts_file=run_dir / "known_hosts",
+        profiles_file=run_dir / "profiles.json",
     )
 
 
@@ -49,5 +57,7 @@ def ensure_runtime_dirs(paths: ProjectPaths) -> None:
         paths.worlds_dir,
         paths.installed_dir,
         paths.uninstalled_dir,
+        paths.staging_dir,
+        paths.backups_dir,
     ]:
         directory.mkdir(parents=True, exist_ok=True)

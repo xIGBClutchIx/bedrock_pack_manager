@@ -1,4 +1,6 @@
 nbtlib>=2.0.4
+paramiko>=3.4.0
+pyftpdlib>=1.5.9
 pytest>=8.0.0
 pytest-cov>=5.0.0
 ruff>=0.9.0
