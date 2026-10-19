@@ -2,246 +2,93 @@
 
 ## Project Purpose
 
-This project installs Minecraft Bedrock packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
-It works on a local folder (the classic `run/` layout or any server folder) or on a remote server over FTP, FTPS, or SFTP, from the CLI or a local web UI.
+This project installs and manages Minecraft Bedrock packs (`.mcaddon`, `.mcpack`, `.zip`, or extracted folders) on a server reached through a local folder, SFTP, FTP, or FTPS.
+It is a Node.js + TypeScript app: a Fastify server with a React web UI, shipped as a single executable (Node SEA). There is no CLI beyond the startup options.
 
-The current architecture is a small Python package with a thin top-level script:
+## Structure
 
-- `bedrock_pack_manager.py`: entrypoint
-- `bedrock_pack_manager/cli.py`: CLI parsing, interactive menus, connecting, and startup
-- `bedrock_pack_manager/storage/`: `Storage` API (`base.py`) with `LocalStorage`, `FTPStorage` (stdlib ftplib, FTP + explicit FTPS), `SFTPStorage` (paramiko), and `connect.py` for `ConnectionSettings` / URL parsing
-- `bedrock_pack_manager/layout.py`: lenient server layout detection, `LayoutOverrides`, and `Target` (storage + layout)
-- `bedrock_pack_manager/pack_index.py`: one scan of installed packs per operation, plus problem detection
-- `bedrock_pack_manager/install.py`: unpack locally, plan, then apply an install
-- `bedrock_pack_manager/commands.py`: install, uninstall, rebuild, zip, audit, world status, and world-edit commands
-- `bedrock_pack_manager/web/`: local web UI (`server.py`, `jobs.py`, `static/`)
-- `bedrock_pack_manager/worlds.py`: world JSON helpers and selection
-- `bedrock_pack_manager/manifests.py`: manifest parsing and classification
-- `bedrock_pack_manager/nbt.py`: `level.dat` beta and gamemode helpers
-- `bedrock_pack_manager/logger.py`: run log capture
-- `bedrock_pack_manager/paths.py`: runtime path layout
-- `bedrock_pack_manager/console.py`: console output helpers
-- `bedrock_pack_manager/terminal.py`: terminal capability and keypress helpers
-- `bedrock_pack_manager/constants.py`: shared pack/archive constants
+- `src/shared/`: the contract between server and UI. `model.ts` (packs, worlds, plans, connection settings), `api.ts` (routes, request/response types, token header), `events.ts` (job events)
+- `src/server/main.ts`: startup options (`--port`, `--no-browser`, `--data-dir`, `--dev`), server start, browser launch
+- `src/server/http/`: `app.ts` (routes, uploads, SSE, static files), `session.ts` (connection and target state)
+- `src/server/jobs/runner.ts`: one job at a time, AbortController cancel, event buffer with `since` replay, `JobFailure` codes
+- `src/server/storage/`: `storage.ts` (base class: listing cache, concurrency limit, atomic writes, uploadTree/removeTree/scanTree), `local.ts`, `sftp.ts`, `ftp.ts`, `knownHosts.ts`, `connect.ts`, `path.ts`, `errors.ts`
+- `src/server/core/`: `manifests.ts`, `layout.ts` (layout detection and `Target`), `builtins.ts`, `packIndex.ts`, `worlds.ts`, `nbt.ts`, `log.ts`
+- `src/server/core/install/`: `unpack.ts`, `plan.ts`, `index.ts`
+- `src/server/core/commands/`: `status.ts`, `uninstall.ts`, `maintenance.ts` (audit, rebuild, cleanup, fix nesting), `worldEdit.ts`, `backup.ts`
+- `src/server/app/`: `paths.ts` (run folder), `profiles.ts`, `logs.ts`
+- `src/web/`: React UI. `api/client.ts`, `state/app.tsx`, `components/*.tsx`, `styles/app.css`
+- `scripts/`: `build-server.mjs` (esbuild bundle), `build-sea.mjs`, `bench.ts`, `demo-servers.ts`, git hook installers
+
+Change `src/shared/` first when the API changes, then the server and the UI against it.
 
 ## Runtime Layout
 
-Do not put runtime data in the repo root.
+Do not put runtime data in the repo root. Everything the app writes goes under `run/` (next to the exe when packaged, the current folder otherwise, or `--data-dir`):
 
-All runtime data belongs under `run/`:
+- `run/logs/`: `latest.txt` plus the 5 most recent timestamped logs
+- `run/staging/uploads/` and `run/staging/unpack/`
+- `run/known_hosts`
+- `run/profiles.json`
 
-- `run/install/`
-- `run/installed/`
-- `run/uninstall/`
-- `run/uninstalled/`
-- `run/behavior_packs/`
-- `run/resource_packs/`
-- `run/worlds/`
-- `run/logs/`
-- `run/staging/` (local unpack scratch space and web UI uploads)
-- `run/backups/` (web UI backup zips)
-- `run/known_hosts` (trusted SFTP host keys)
-- `run/profiles.json` (web UI connection profiles, never passwords)
+Add new paths to `src/server/app/paths.ts` and `ensureDirs`.
 
-If you add any new operational output, cache, report, or temp artifact, place it under `run/` unless there is a strong reason not to.
-Startup currently creates the full runtime tree before logging, world selection, install, or uninstall logic runs.
+## Security Rules
 
-## Storage Rules
+- Bind to `127.0.0.1` only. Keep the per-launch token, Host header check, and CSP.
+- Never save or log passwords.
+- Never accept an SFTP host key silently: unknown keys go back to the user as `unknown_host_key`; changed keys are refused.
+- Upload paths go through `safeRelative`; archive extraction must reject zip-slip paths.
+- Never delete built-in packs, dev pack folders, or pack folders another world still uses.
 
-- Commands never touch `pathlib`/`shutil` for server data; they go through `Target.storage` with POSIX-style string paths relative to the connection root.
-- Local-only work (unpacking archives, queues, logs, backups) stays on the local filesystem under `run/`.
-- Build a `PackIndex` once per operation instead of re-reading manifests; remote round trips are slow.
-- Never persist or log passwords. `ConnectionSettings.public_dict()` is the only form that may be saved or returned to the UI.
-- Unknown SFTP host keys must be confirmed by the user (prompt, `--trust-host-key`, or the UI dialog), never auto-accepted.
+## Speed
 
-## CLI Conventions
+Remote servers are latency-bound, so:
 
-Use `argparse` in `bedrock_pack_manager/cli.py`.
+- run bulk work through `Storage.map()` / the storage concurrency limit, not unbounded `Promise.all`
+- reuse the per-job listing cache instead of listing the same folder twice
+- prefer one scan (`PackIndex`) per job and reuse it for status after a change
+- check `npm run bench` when touching storage or install code
 
-Current public commands:
+## UI
 
-- default install: `python bedrock_pack_manager.py`
-- rebuild: `python bedrock_pack_manager.py --rebuild`
-- cleanup pack folders: `python bedrock_pack_manager.py --cleanup-pack-folders`
-- zip: `python bedrock_pack_manager.py --zip`
-- zip with custom name: `python bedrock_pack_manager.py --zip-name world.zip`
-- audit: `python bedrock_pack_manager.py --doctor`
-- uninstall: `python bedrock_pack_manager.py --uninstall`
-- beta toggle: `python bedrock_pack_manager.py --beta`
-- gamemode set: `python bedrock_pack_manager.py --gamemode creative`
-- combined world edit: `python bedrock_pack_manager.py --beta --gamemode creative`
-- web UI: `python bedrock_pack_manager.py --serve`
-
-Current public selection and install modifiers:
-
-- duplicate handling: `--duplicate-mode skip|replace|keep-both`
-- re-upload same version: `--reupload`
-- preview only: `--dry-run` (install and cleanup)
-- world selection: `--world-name <name>` or `--world-path <path>`
-- uninstall keep files: `--uninstall-keep-files`
-- zip name: `--zip-name world.zip`
-- server: `--remote <url-or-folder>`, `--password-env VAR`, `--key-file PATH`, `--trust-host-key FP`, `--allow-self-signed`, `--active-mode`
-- layout: `--server-root`, `--worlds-dir`, `--bp-dir`, `--rp-dir`, `--pack-scope shared|world`
-- web UI: `--port`, `--no-browser`
-
-Current interactive menu actions:
-
-- install packs
-- edit world
-- uninstall packs
-- audit world
-- rebuild JSONs
-- cleanup pack folders
-- connect to remote server
-- open web UI
-
-Web UI actions mirror the CLI: connect, world status, install (preview + apply), uninstall, audit, rebuild, cleanup (preview + apply), world edits, backup. Keep new CLI actions and web UI actions in sync too.
-
-When adding CLI options:
-
-- keep `python bedrock_pack_manager.py --help` accurate
-- prefer explicit flags over implicit behavior
-- preserve existing workflows unless the user asked for a breaking change
-- keep CLI flags and the interactive prompt/menu in sync
-- if you add a CLI action or option, add the corresponding interactive prompt path when it makes sense for interactive use
-- if you add or change an interactive action or option, add or update the corresponding CLI flag or argument unless the user explicitly wants it to stay interactive-only
-- keep the README command examples and menu descriptions in sync with the code
-
-## Logging
-
-Run logs are captured automatically through `bedrock_pack_manager/logger.py`.
-
-Rules:
-
-- keep logs in `run/logs/`
-- keep `latest.txt`
-- keep the 5 most recent timestamped logs
-- prefer plain-text logs
-- do not add a second unrelated logging mechanism unless necessary
+- Keep the dashboard layout from the approved mockup: sidebar (worlds, layout, hidden packs), tabs, filter chips, plan panel, docked console.
+- Follow the `react-hooks` lint rules: derive state or remount with a `key` instead of setting state synchronously in effects.
+- Keep terminal-style colours in the console; job logs are structured events, not ANSI.
 
 ## Testing
 
-Primary command:
-
 ```bash
-pytest
+npm test
+npm run test:e2e
 ```
 
-Coverage is enabled by default from `pyproject.toml`.
-
-Expected outputs:
-
-- terminal test results
-- terminal coverage report
-- `coverage.xml`
-
-If stdout capture behaves oddly in the current environment, `pytest -s` is acceptable for diagnosis, but normal work should keep `pytest` green.
-
-CI currently runs in GitHub Actions with `.github/workflows/quality-checks.yml` for Ruff and pytest, plus `.github/workflows/build-artifacts.yml` for Linux and Windows one-file builds.
-Local Git hooks can be installed with `make install-hooks` on POSIX or `scripts/install_git_hooks.ps1` on Windows; they run Ruff on `pre-commit` and pytest on `pre-push` using the local `.venv`.
+- Vitest covers storage contract tests against local, in-process SFTP (`tests/servers/sftpServer.ts`) and FTP (`tests/servers/ftpServer.ts`), core and install tests, API tests via Fastify `inject`, and component tests.
+- Use fixtures under `tests/fixtures/` and helpers in `tests/helpers.ts`. If fixture contents change, update `tests/fixtures.test.ts`.
+- Prefer real behaviour against small fixtures and the in-process servers over mocking.
+- Run `npx playwright install chromium` once before the Playwright tests.
 
 ## Linting
 
-Primary command:
-
 ```bash
-make lint
+npm run lint
+npm run typecheck
+npm run format
 ```
 
-Auto-fix command:
-
-```bash
-make lint-fix
-```
-
-Rules:
-
-- use Ruff as the project linter
-- keep lint configuration in `pyproject.toml`
-- keep the current Ruff line length at `180` unless there is a project-level reason to change it
-- if lint dependencies change, keep `requirements.txt` in sync
-- if `make lint` or `make lint-fix` depends on tooling, keep the local `.venv` workflow accurate in docs
-
-## Test Data
-
-Use fixtures.
-
-Project test data lives under `tests/fixtures/`:
-
-- `tests/fixtures/installed/`
-- `tests/fixtures/worlds/World/`
-
-Rules for fixture use:
-
-- prefer fixture-driven tests for archive/install/world flows
-- keep fixtures minimal, stable, and easy to understand
-- fixtures should still be structurally realistic
-- if fixture contents change, update fixture validation tests too
-
-Fixture support files:
-
-- `tests/test_fixtures.py`: validates fixture contents
-- `tests/fixtures/build_fixtures.py`: regenerates synthetic fixture assets when needed
-- `tests/conftest.py`: `ftp_server` / `ftp_storage` (a real in-process pyftpdlib server), `sftp_storage`, and `any_storage` (runs one test against local, FTP, and SFTP)
-- `tests/fake_sftp.py`: a paramiko `SSHClient`/SFTP stand-in backed by a local folder, so `SFTPStorage` runs its real code
-- `tests/helpers.py`: `run_setup()` builds the classic `run/` layout and returns `(paths, target, world, world_dir)`
-
-When possible, use real project behavior with small fixtures instead of excessive mocking.
-
-## Test Strategy
-
-Prefer a mix of:
-
-- unit tests for helper modules
-- branch-focused tests for install/rebuild/zip/beta flows
-- fixture-based integration tests for archive and world registration behavior
-
-Good targets for future tests:
-
-- install edge cases in `bedrock_pack_manager/install.py`
-- dispatch and error paths in `bedrock_pack_manager/commands.py`
-- world selection and world JSON handling in `bedrock_pack_manager/worlds.py`
-- logger and CLI integration
-
-Avoid brittle tests that only assert colored terminal formatting unless the formatting itself is the feature under test.
+ESLint (typescript-eslint, react-hooks) and Prettier (print width 140) configs live in the repo root.
 
 ## Dependencies
 
-Project config lives in `pyproject.toml`.
-
-Keep:
-
-- runtime dependencies in `[project.dependencies]`
-- lint dependencies in `[project.optional-dependencies].lint`
-- test dependencies in `[project.optional-dependencies].test`
-
-`requirements.txt` still exists for convenience, so if dependencies change, keep it in sync with the current practical workflow.
-The current convenience file includes runtime, test, and lint tooling.
-
-Development workflow should assume a local `.venv` when documenting setup, testing, linting, or build steps.
-Before running project Python tools directly in the shell, activate the local virtual environment with:
-
-```bash
-. .venv/bin/activate
-```
-
-Prefer commands run from the activated `.venv` over the system Python environment.
+- runtime dependencies in `dependencies`; everything bundled for the UI or used for build and tests in `devDependencies`
+- use `npm ci` in CI and keep `package-lock.json` committed
+- the server bundle is CommonJS (`dist/server.cjs`) for SEA; keep esbuild `mainFields: ["module", "main"]`
 
 ## Code Style
 
-General expectations:
-
-- keep modules small and focused
-- prefer straightforward file/path operations over clever abstractions
-- preserve the current package structure unless there is a clear benefit to changing it
-- keep terminal output concise and readable
-- avoid reintroducing large ASCII divider formatting
-
-When adding functionality:
-
-- prefer extending existing modules over adding one-file abstractions with no clear ownership
-- add tests alongside behavior changes
-- update `README.md` if user-facing behavior changes
+- TypeScript strict, ESM, small focused modules
+- prefer straightforward storage/path operations over clever abstractions
+- add tests alongside behaviour changes
+- update `README.md` if user-facing behaviour changes
 
 ## Git And Commits
 
@@ -267,16 +114,14 @@ Rules:
 
 - subject line should be short and imperative
 - body should be a flat bullet list
-- do not write a paragraph body when a bullet list is requested
 - keep commits scoped to one logical change when possible
 
 ## Before Finishing Work
 
-For normal code changes:
+1. `npm run lint`
+2. `npm run typecheck`
+3. `npm test`
+4. `npm run test:e2e` if the UI or HTTP API changed
+5. Update tests and docs if behaviour changed
 
-1. Run `pytest`
-2. Run `make lint`
-3. Check coverage if the change affects untested branches
-4. Update fixtures/tests/docs if behavior changed
-
-If you cannot run tests, state that explicitly and explain why.
+If you cannot run something, say so and explain why.
