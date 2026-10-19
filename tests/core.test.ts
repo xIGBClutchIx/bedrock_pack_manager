@@ -1,7 +1,5 @@
 import { join as joinLocal } from "node:path";
 
-import nbt from "prismarine-nbt";
-
 import { Target, detectLayout, parseServerProperties } from "../src/server/core/layout";
 import {
   ManifestError,
@@ -26,7 +24,7 @@ import {
 import { PackIndex } from "../src/server/core/packIndex";
 import { WorldJsonError, loadWorldJson, registeredKeys, removeEntry, saveWorldJson, upsertEntry } from "../src/server/core/worlds";
 import { LocalStorage } from "../src/server/storage/local";
-import { PACK_UUID, makeStorage, tempDir, writeFile, writeManifest, writeWorldJson } from "./helpers";
+import { PACK_UUID, levelDatBytes, makeStorage, tempDir, writeFile, writeManifest, writeWorldJson } from "./helpers";
 
 let dir: ReturnType<typeof tempDir>;
 beforeEach(() => {
@@ -35,14 +33,6 @@ beforeEach(() => {
 afterEach(() => dir.cleanup());
 
 const local = (...parts: string[]) => joinLocal(dir.path, ...parts);
-
-export function levelDatBytes(values: Record<string, { type: string; value: unknown }>): Buffer {
-  const body = nbt.writeUncompressed({ type: "compound", name: "", value: values } as never, "little");
-  const header = Buffer.alloc(8);
-  header.writeUInt32LE(10, 0);
-  header.writeUInt32LE(body.length, 4);
-  return Buffer.concat([header, body]);
-}
 
 describe("manifests", () => {
   it("parses comments, trailing commas and BOMs", () => {

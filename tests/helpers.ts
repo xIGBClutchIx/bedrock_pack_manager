@@ -2,6 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import nbt from "prismarine-nbt";
+
 import { FtpStorage } from "../src/server/storage/ftp";
 import { LocalStorage } from "../src/server/storage/local";
 import { SftpStorage } from "../src/server/storage/sftp";
@@ -43,8 +45,48 @@ export function writeManifest(folder: string, options: ManifestOptions = {}): vo
   writeFile(join(folder, options.filename ?? "manifest.json"), JSON.stringify(manifest));
 }
 
+/** A minimal Bedrock level.dat: 8-byte header plus little-endian NBT. */
+export function levelDatBytes(values: Record<string, { type: string; value: unknown }>): Buffer {
+  const body = nbt.writeUncompressed({ type: "compound", name: "", value: values } as never, "little");
+  const header = Buffer.alloc(8);
+  header.writeUInt32LE(10, 0);
+  header.writeUInt32LE(body.length, 4);
+  return Buffer.concat([header, body]);
+}
+
 export function writeWorldJson(path: string, entries: unknown[]): void {
   writeFile(path, `${JSON.stringify(entries, null, 2)}\n`);
+}
+
+/** A Bedrock-server-shaped tree on a storage, plus a command context. */
+export async function serverSetup(backend: Backend = "local", world = "W") {
+  const harness = await makeStorage(backend);
+  mkdirSync(join(harness.root, "worlds", world), { recursive: true });
+  mkdirSync(join(harness.root, "behavior_packs"), { recursive: true });
+  mkdirSync(join(harness.root, "resource_packs"), { recursive: true });
+  const { Target } = await import("../src/server/core/layout");
+  const { MemoryLog } = await import("../src/server/core/log");
+  const target = await Target.open(harness.storage);
+  const scratch = tempDir("bpm-scratch-");
+  const log = new MemoryLog();
+  return {
+    ...harness,
+    target,
+    world: `worlds/${world}`,
+    worldDir: join(harness.root, "worlds", world),
+    log,
+    ctx: { target, log, scratchDir: scratch.path },
+    /** Fresh log and cleared caches, as a new job would get. */
+    newJob() {
+      harness.storage.clearCache();
+      const fresh = new MemoryLog();
+      return { target, log: fresh, scratchDir: scratch.path };
+    },
+    close: async () => {
+      await harness.close();
+      scratch.cleanup();
+    },
+  };
 }
 
 export type Backend = "local" | "sftp" | "ftp";
