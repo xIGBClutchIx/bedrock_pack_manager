@@ -84,7 +84,13 @@ export async function makeStorage(backend: Backend, options: { latencyMs?: numbe
     };
   }
   const server = await startFtpServer(dir.path);
-  const storage = await FtpStorage.connect({ host: server.host, port: server.port, username: server.username, password: server.password, root: "/" });
+  const storage = await FtpStorage.connect({
+    host: server.host,
+    port: server.port,
+    username: server.username,
+    password: server.password,
+    root: "/",
+  });
   return {
     storage,
     root: dir.path,

@@ -29,7 +29,9 @@ export class UnknownHostKeyError extends StorageError {
 
 export class HostKeyMismatchError extends StorageError {
   constructor(host: string, fingerprint: string) {
-    super(`The SSH host key for ${host} changed (now ${fingerprint}). The server may have been reinstalled, or someone may be intercepting the connection.`);
+    super(
+      `The SSH host key for ${host} changed (now ${fingerprint}). The server may have been reinstalled, or someone may be intercepting the connection.`,
+    );
     this.name = "HostKeyMismatchError";
   }
 }

@@ -42,8 +42,16 @@ export class LocalStorage extends Storage {
         children.map(async (child) => {
           let isDir = child.isDirectory();
           let size: number | null = null;
-          if (child.isSymbolicLink()) isDir = await stat(`${full}/${child.name}`).then((info) => info.isDirectory(), () => false);
-          if (!isDir) size = await stat(`${full}/${child.name}`).then((info) => info.size, () => null);
+          if (child.isSymbolicLink())
+            isDir = await stat(`${full}/${child.name}`).then(
+              (info) => info.isDirectory(),
+              () => false,
+            );
+          if (!isDir)
+            size = await stat(`${full}/${child.name}`).then(
+              (info) => info.size,
+              () => null,
+            );
           return { name: child.name, isDir, size };
         }),
       );

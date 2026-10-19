@@ -135,7 +135,9 @@ describe.each(BACKENDS)("%s storage", (backend) => {
     for (let index = 0; index < 20; index++) writeFile(joinLocal(h.root, `f${index}.txt`), String(index));
     const paths = [...Array.from({ length: 20 }, (_v, index) => `f${index}.txt`), "missing.txt"];
     const results = await h.storage.readMany(paths);
-    expect(paths.slice(0, 20).map((path) => (results.get(path) as Buffer).toString())).toEqual(Array.from({ length: 20 }, (_v, index) => String(index)));
+    expect(paths.slice(0, 20).map((path) => (results.get(path) as Buffer).toString())).toEqual(
+      Array.from({ length: 20 }, (_v, index) => String(index)),
+    );
     expect(results.get("missing.txt")).toBeInstanceOf(NotFoundError);
   });
 

@@ -88,10 +88,13 @@ export class FtpStorage extends Storage {
       await client.send("TYPE I").catch(() => undefined);
     } catch (error) {
       client.close();
-      if (error instanceof FTPError && error.code === 530) throw new StorageError(`FTP login failed for ${username}@${host}: ${error.message}`);
+      if (error instanceof FTPError && error.code === 530)
+        throw new StorageError(`FTP login failed for ${username}@${host}: ${error.message}`);
       const message = (error as Error).message ?? String(error);
       if (/certificate|self.signed|unable to verify/i.test(message)) {
-        throw new StorageError(`FTPS certificate check failed for ${host}: ${message}. Allow self-signed certificates if you trust this server.`);
+        throw new StorageError(
+          `FTPS certificate check failed for ${host}: ${message}. Allow self-signed certificates if you trust this server.`,
+        );
       }
       throw new StorageError(`Could not connect to ${host}:${port} over FTP: ${message}`, { cause: error });
     }

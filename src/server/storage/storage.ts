@@ -153,7 +153,10 @@ export abstract class Storage {
       throw error;
     }
     const lower = name.toLowerCase();
-    const candidates = [...entries.filter((entry) => entry.name === name), ...entries.filter((entry) => entry.name.toLowerCase() === lower)];
+    const candidates = [
+      ...entries.filter((entry) => entry.name === name),
+      ...entries.filter((entry) => entry.name.toLowerCase() === lower),
+    ];
     const match = candidates.find((entry) => !want || entry.isDir === (want === "dir"));
     return match ? join(path, match.name) : null;
   }

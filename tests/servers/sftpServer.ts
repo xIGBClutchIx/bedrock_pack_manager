@@ -2,7 +2,20 @@
  * A real SFTP server for tests and benchmarks: ssh2's Server speaking SFTP v3 over a local folder.
  * `latencyMs` delays every response, to make round-trip costs visible.
  */
-import { closeSync, fstatSync, mkdirSync, openSync, readSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+  type Stats,
+} from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 
@@ -81,7 +94,11 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
     };
     const fail = (reqid: number, error: unknown) => {
       const code = (error as NodeJS.ErrnoException)?.code;
-      sftp.status(reqid, code === "ENOENT" || code === "ENOTDIR" ? STATUS_CODE.NO_SUCH_FILE : STATUS_CODE.FAILURE, String((error as Error)?.message ?? error));
+      sftp.status(
+        reqid,
+        code === "ENOENT" || code === "ENOTDIR" ? STATUS_CODE.NO_SUCH_FILE : STATUS_CODE.FAILURE,
+        String((error as Error)?.message ?? error),
+      );
     };
     const guarded = (reqid: number, fn: () => void) => {
       try {
@@ -92,7 +109,9 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
     };
 
     sftp
-      .on("REALPATH", (reqid, path) => later("REALPATH", () => sftp.name(reqid, [{ filename: path === "." ? "/" : path, longname: "", attrs: {} as Attributes }])))
+      .on("REALPATH", (reqid, path) =>
+        later("REALPATH", () => sftp.name(reqid, [{ filename: path === "." ? "/" : path, longname: "", attrs: {} as Attributes }])),
+      )
       .on("OPENDIR", (reqid, path) =>
         later("OPENDIR", () =>
           guarded(reqid, () => {
@@ -108,7 +127,11 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
             if (!entry || entry.type !== "dir") return sftp.status(reqid, STATUS_CODE.FAILURE);
             if (entry.done) return sftp.status(reqid, STATUS_CODE.EOF);
             entry.done = true;
-            const names = readdirSync(local(entry.path)).map((name) => ({ filename: name, longname: name, attrs: toAttrs(statSync(join(local(entry.path), name))) }));
+            const names = readdirSync(local(entry.path)).map((name) => ({
+              filename: name,
+              longname: name,
+              attrs: toAttrs(statSync(join(local(entry.path), name))),
+            }));
             if (!names.length) return sftp.status(reqid, STATUS_CODE.EOF);
             sftp.name(reqid, names);
           }),
@@ -117,7 +140,11 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
       .on("STAT", (reqid, path) => later("STAT", () => guarded(reqid, () => sftp.attrs(reqid, toAttrs(statSync(local(path)))))))
       .on("LSTAT", (reqid, path) => later("LSTAT", () => guarded(reqid, () => sftp.attrs(reqid, toAttrs(statSync(local(path)))))))
       .on("OPEN", (reqid, filename, flags) =>
-        later("OPEN", () => guarded(reqid, () => sftp.handle(reqid, makeHandle({ type: "file", fd: openSync(local(filename), flagsToString(flags) ?? "r") })))),
+        later("OPEN", () =>
+          guarded(reqid, () =>
+            sftp.handle(reqid, makeHandle({ type: "file", fd: openSync(local(filename), flagsToString(flags) ?? "r") })),
+          ),
+        ),
       )
       .on("FSTAT", (reqid, handle) =>
         later("FSTAT", () =>
@@ -160,9 +187,15 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
           }),
         ),
       )
-      .on("MKDIR", (reqid, path) => later("MKDIR", () => guarded(reqid, () => (mkdirSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))))
-      .on("RMDIR", (reqid, path) => later("RMDIR", () => guarded(reqid, () => (rmdirSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))))
-      .on("REMOVE", (reqid, path) => later("REMOVE", () => guarded(reqid, () => (unlinkSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))))
+      .on("MKDIR", (reqid, path) =>
+        later("MKDIR", () => guarded(reqid, () => (mkdirSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))),
+      )
+      .on("RMDIR", (reqid, path) =>
+        later("RMDIR", () => guarded(reqid, () => (rmdirSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))),
+      )
+      .on("REMOVE", (reqid, path) =>
+        later("REMOVE", () => guarded(reqid, () => (unlinkSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))),
+      )
       .on("RENAME", (reqid, from, to) =>
         later("RENAME", () =>
           guarded(reqid, () => {

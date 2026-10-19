@@ -121,7 +121,8 @@ export class SftpStorage extends Storage {
         .once("ready", () => resolve())
         .once("error", (error: Error & { level?: string }) => {
           if (hostKeyProblem) return reject(hostKeyProblem);
-          if (error.level === "client-authentication") return reject(new StorageError(`SFTP login failed for ${username}@${host}: ${error.message}`));
+          if (error.level === "client-authentication")
+            return reject(new StorageError(`SFTP login failed for ${username}@${host}: ${error.message}`));
           reject(new StorageError(`Could not connect to ${host}:${port} over SFTP: ${error.message}`, { cause: error }));
         })
         .connect(config);
@@ -138,7 +139,9 @@ export class SftpStorage extends Storage {
     const wanted = Math.max(1, this.options.channels ?? 3);
     for (let index = 0; index < wanted; index++) {
       try {
-        this.channels.push(await new Promise<SFTPWrapper>((resolve, reject) => client.sftp((error, sftp) => (error ? reject(error) : resolve(sftp)))));
+        this.channels.push(
+          await new Promise<SFTPWrapper>((resolve, reject) => client.sftp((error, sftp) => (error ? reject(error) : resolve(sftp)))),
+        );
       } catch (error) {
         if (!this.channels.length) {
           client.end();

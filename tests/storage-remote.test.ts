@@ -47,7 +47,9 @@ describe("sftp connection", () => {
   });
 
   it("reports a bad password as a login failure", async () => {
-    const error = await SftpStorage.connect({ ...base(), password: "wrong", trustedFingerprint: fingerprintOf(server.hostKey) }).catch((e) => e);
+    const error = await SftpStorage.connect({ ...base(), password: "wrong", trustedFingerprint: fingerprintOf(server.hostKey) }).catch(
+      (e) => e,
+    );
     expect(error).toBeInstanceOf(StorageError);
     expect(error.message).toMatch(/login failed/);
   });
@@ -80,19 +82,30 @@ describe("ftp connection", () => {
     const dir = tempDir();
     const server = await startFtpServer(dir.path);
     try {
-      await expect(FtpStorage.connect({ host: server.host, port: server.port, username: "mc", password: "wrong" })).rejects.toThrow(/login failed|Could not connect/);
+      await expect(FtpStorage.connect({ host: server.host, port: server.port, username: "mc", password: "wrong" })).rejects.toThrow(
+        /login failed|Could not connect/,
+      );
     } finally {
       await server.close();
       dir.cleanup();
     }
-    await expect(FtpStorage.connect({ host: "127.0.0.1", port: 1, username: "mc", password: "pw", timeoutMs: 2000 })).rejects.toThrow(/Could not connect/);
+    await expect(FtpStorage.connect({ host: "127.0.0.1", port: 1, username: "mc", password: "pw", timeoutMs: 2000 })).rejects.toThrow(
+      /Could not connect/,
+    );
   });
 
   it("joins a relative root to the login folder and keeps working with a small pool", async () => {
     const dir = tempDir();
     for (const name of ["a", "b", "c"]) writeFile(joinLocal(dir.path, "bedrock", `${name}.txt`), name);
     const server = await startFtpServer(dir.path);
-    const storage = await FtpStorage.connect({ host: server.host, port: server.port, username: "mc", password: "pw", root: "bedrock", poolSize: 1 });
+    const storage = await FtpStorage.connect({
+      host: server.host,
+      port: server.port,
+      username: "mc",
+      password: "pw",
+      root: "bedrock",
+      poolSize: 1,
+    });
     try {
       expect(storage.root).toBe("/bedrock");
       expect(storage.describe("x")).toBe("/bedrock/x");
@@ -111,10 +124,23 @@ describe("openStorage", () => {
     const dir = tempDir();
     try {
       writeFile(joinLocal(dir.path, "srv", "x"), "");
-      const storage = await openStorage({ protocol: "local", host: "", port: null, username: "", root: "srv", tlsVerify: true, passive: true }, { baseDir: dir.path, knownHostsFile: null });
+      const storage = await openStorage(
+        { protocol: "local", host: "", port: null, username: "", root: "srv", tlsVerify: true, passive: true },
+        { baseDir: dir.path, knownHostsFile: null },
+      );
       expect(storage).toBeInstanceOf(LocalStorage);
-      await expect(openStorage({ protocol: "local", host: "", port: null, username: "", root: "missing", tlsVerify: true, passive: true }, { baseDir: dir.path, knownHostsFile: null })).rejects.toThrow(/does not exist/);
-      await expect(openStorage({ protocol: "sftp", host: " ", port: null, username: "", root: "", tlsVerify: true, passive: true }, { baseDir: dir.path, knownHostsFile: null })).rejects.toThrow(/host is required/);
+      await expect(
+        openStorage(
+          { protocol: "local", host: "", port: null, username: "", root: "missing", tlsVerify: true, passive: true },
+          { baseDir: dir.path, knownHostsFile: null },
+        ),
+      ).rejects.toThrow(/does not exist/);
+      await expect(
+        openStorage(
+          { protocol: "sftp", host: " ", port: null, username: "", root: "", tlsVerify: true, passive: true },
+          { baseDir: dir.path, knownHostsFile: null },
+        ),
+      ).rejects.toThrow(/host is required/);
     } finally {
       dir.cleanup();
     }
