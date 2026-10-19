@@ -42,6 +42,44 @@ def test_index_reports_broken_and_odd_folders(tmp_path):
     assert index.find("66666666-6666-6666-6666-666666666666")[0].name == "Cased"
 
 
+def test_index_marks_builtin_server_packs(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    bp = paths.behavior_packs_dir
+    vanilla_uuid = "fe9f8597-5454-481a-8730-8d070a8e2e58"
+    for folder in ("vanilla", "vanilla_1.14", "vanilla_1.15"):
+        write_manifest(bp / folder, uuid=vanilla_uuid, name="resourcePack.vanilla_server.name")
+    for folder in ("chemistry", "chemistry_1.21.30", "editor", "experimental_creator_cameras", "server_library", "server_ui_library"):
+        write_manifest(bp / folder, uuid=f"{abs(hash(folder)) % 10**8:08d}-0000-0000-0000-000000000000", name="pack.name", module_type="resources")
+    write_manifest(bp / "My Addon", name="pack.name")
+
+    index = PackIndex.build(target, world)
+
+    builtin = {pack.folder for pack in index.packs if pack.builtin}
+    assert builtin == {"vanilla", "vanilla_1.14", "vanilla_1.15", "chemistry", "chemistry_1.21.30", "editor", "experimental_creator_cameras", "server_library", "server_ui_library"}
+    assert index.problems == []  # no duplicate or misplaced warnings for game packs
+    addon = index.find(PACK_UUID)[0]
+    assert addon.builtin is False
+    assert addon.name == "My Addon"  # "pack.name" is a translation key, so the folder name is shown
+
+
+def test_index_treats_multi_pack_subfolders_as_storage(tmp_path):
+    paths, target, world, _ = run_setup(tmp_path)
+    rp = paths.resource_packs_dir
+    for index_number in range(3):
+        write_manifest(rp / "old" / f"Origin{index_number}", uuid=f"9999999{index_number}-0000-0000-0000-000000000000", module_type="resources")
+    (rp / "old" / "broken").mkdir()
+    (rp / "old" / "broken" / "manifest.json").write_text("{")
+    (rp / "half-upload" / "textures").mkdir(parents=True)
+    (rp / "misc" / "docs").mkdir(parents=True)
+
+    index = PackIndex.build(target, world)
+
+    assert index.packs == []
+    assert any("old holds 3 packs" in note for note in index.notes)
+    assert any("misc is not a pack" in note for note in index.notes)
+    assert len(index.problems) == 1 and "half-upload has no manifest.json" in index.problems[0]
+
+
 def test_index_flags_duplicate_copies(tmp_path):
     paths, target, world, _ = run_setup(tmp_path)
     write_manifest(paths.behavior_packs_dir / "Copy One", name="Dup")

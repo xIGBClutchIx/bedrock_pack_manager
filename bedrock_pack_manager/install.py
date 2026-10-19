@@ -395,8 +395,8 @@ def plan_install(
         target_dir = target.install_dir(world, pack.kind)
         plan = PlannedPack(pack, "upload", "", target_dir=target_dir)
         if existing and duplicate_mode == "replace":
-            plan.replace = [copy for copy in existing if copy.scope != "dev"]
-            plan.keep = [copy for copy in existing if copy.scope == "dev"]
+            plan.replace = [copy for copy in existing if copy.scope != "dev" and not copy.builtin]
+            plan.keep = [copy for copy in existing if copy.scope == "dev" or copy.builtin]
             versions = ", ".join(copy.version_label for copy in plan.replace)
             plan.reason = f"Replacing v{versions}" if plan.replace else "Upload (development copy left alone)"
         elif existing:

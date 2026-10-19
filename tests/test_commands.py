@@ -157,6 +157,24 @@ def test_cleanup_deletes_only_unused_folders(tmp_path):
     assert any(action.kind == "keep_shared_cleanup_pack" for action in state.actions)
 
 
+def test_builtin_packs_are_hidden_and_never_touched(tmp_path):
+    paths, target, world, world_dir = run_setup(tmp_path)
+    write_manifest(paths.behavior_packs_dir / "vanilla_1.21", uuid=OTHER_UUID, name="resourcePack.vanilla_server.name")
+    write_manifest(paths.behavior_packs_dir / "Mine")
+
+    status = world_status(target, world)
+    assert [row["uuid"] for row in status["packs"]] == [PACK_UUID]
+    assert status["hidden_builtin"] == 1
+
+    do_cleanup_pack_folders(target, world, AppState())
+    assert (paths.behavior_packs_dir / "vanilla_1.21").exists()
+    assert not (paths.behavior_packs_dir / "Mine").exists()
+
+    write_manifest(paths.behavior_packs_dir / "Mine")
+    do_rebuild(target, world, AppState())
+    assert read_json(world_dir / "world_behavior_packs.json") == [{"pack_id": PACK_UUID, "version": PACK_VERSION}]
+
+
 def test_cleanup_reports_nothing_to_do(tmp_path, capsys):
     _paths, target, world, _ = run_setup(tmp_path)
 

@@ -160,8 +160,12 @@ def world_status(target: Target, world: str, index: PackIndex | None = None) -> 
                 }
             )
 
+    hidden_builtin = 0
     for pack in index.packs:
         if (pack.dir_kind, uuid_key(pack.uuid)) in registered_seen:
+            continue
+        if pack.builtin:
+            hidden_builtin += 1
             continue
         rows.append(
             {
@@ -209,6 +213,8 @@ def world_status(target: Target, world: str, index: PackIndex | None = None) -> 
         "world_name": basename(world),
         "packs": rows,
         "problems": problems,
+        "notes": list(index.notes),
+        "hidden_builtin": hidden_builtin,
         "level": level,
         "pack_dirs": [{"path": target.describe(pack_dir.path), "kind": pack_dir.kind, "scope": pack_dir.scope} for pack_dir in index.scanned_dirs],
         "install_dirs": {kind: target.describe(target.install_dir(world, kind)) for kind in ("bp", "rp")},
@@ -305,6 +311,10 @@ def do_doctor(target: Target, world: str, state: AppState) -> dict:
             warn(state, f"{label} '{row['name']}' is installed but not registered in {json_name}")
     for problem in status["problems"]:
         warn(state, problem)
+    for note in status["notes"]:
+        info(note)
+    if status["hidden_builtin"]:
+        info(f"Ignored {status['hidden_builtin']} built-in game pack(s) that ship with the server")
 
     bp_installed = sum(1 for row in on_server if row["kind"] == "bp")
     rp_installed = sum(1 for row in on_server if row["kind"] == "rp")
@@ -340,7 +350,7 @@ def do_rebuild(target: Target, world: str, state: AppState) -> dict:
     for kind in ("bp", "rp"):
         newest: dict[str, InstalledPack] = {}
         for pack in sorted(index.of_kind(kind), key=lambda item: item.folder.lower()):
-            if pack.nested:
+            if pack.nested or pack.builtin:
                 continue
             current = newest.get(uuid_key(pack.uuid))
             if current is not None:
@@ -385,7 +395,7 @@ def do_cleanup_pack_folders(target: Target, world: str, state: AppState, *, dry_
     deleted, kept = [], []
 
     for pack in list(index.packs):
-        if pack.scope == "dev" or pack.nested:
+        if pack.scope == "dev" or pack.nested or pack.builtin:
             continue
         if pack.key in registered[pack.dir_kind]:
             continue
@@ -558,6 +568,9 @@ def do_uninstall(target: Target, world: str, paths: ProjectPaths, selected_flags
         other_worlds = _other_worlds_using(target, world, kind, candidate["uuid"], candidate["version"], cache)
         removed_paths = []
         for pack in installed:
+            if pack.builtin:
+                info(f"Kept built-in game pack {target.describe(pack.path)}", state=state, action="keep_builtin_pack_files", path=pack.path)
+                continue
             if pack.scope == "shared" and other_worlds:
                 message = f"Kept {target.describe(pack.path)} because still used by: {', '.join(other_worlds)}"
                 info(message, state=state, action="keep_shared_pack_files", world_dir=world, referenced_by=other_worlds, **ids)
