@@ -67,6 +67,30 @@ describe("sftp connection", () => {
     }
   });
 
+  it("does not wait on a server that serves one SFTP session at a time", async () => {
+    await server.close();
+    server = await startSftpServer(dir.path, { oneSessionAtATime: true });
+    writeFile(joinLocal(dir.path, "f.txt"), "ok");
+    const started = Date.now();
+    const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey), channels: 4 });
+    try {
+      expect(await storage.readText("f.txt")).toBe("ok");
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      await storage.close();
+    }
+  });
+
+  it("gives up when the server never opens an SFTP session", async () => {
+    await server.close();
+    server = await startSftpServer(dir.path, { ignoreSessions: true });
+    const error = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey), timeoutMs: 300 }).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(StorageError);
+    expect(error.message).toMatch(/did not open an SFTP session/);
+  });
+
   it("reconnects after the connection drops", async () => {
     writeFile(joinLocal(dir.path, "f.txt"), "ok");
     const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey) });

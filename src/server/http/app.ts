@@ -181,9 +181,15 @@ export function createApp(options: AppOptions): App {
       trustedFingerprint: str(settings.trustedFingerprint).trim() || undefined,
     };
     const where = clean.protocol === "local" ? clean.root || "run/" : clean.host;
+    // A new connect replaces one that is still trying, so a stuck server never locks the app.
+    const stuck = runner.busy && runner.active!.kind === "connect" ? runner.active! : null;
+    if (stuck) {
+      runner.cancel(stuck.id);
+      await stuck.promise;
+    }
     return startJob(reply, "connect", `Connecting to ${where}`, async (job): Promise<ConnectResult> => {
       job.log("plain", `Connecting to ${where} over ${clean.protocol.toUpperCase()} ...`);
-      const target = await session.connect(clean, cleanOverrides(layout));
+      const target = await session.connect(clean, cleanOverrides(layout), job.signal);
       job.log("ok", `Connected: ${target.label}`);
       job.log("plain", `Server folder: ${target.describe(target.layout.serverRoot)}`);
       for (const note of target.layout.notes) job.log("info", note);

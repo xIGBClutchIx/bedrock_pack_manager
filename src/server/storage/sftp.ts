@@ -33,9 +33,30 @@ export interface SftpOptions {
   concurrency?: number;
 }
 
+/** How long to wait for an extra SFTP channel before using fewer. */
+const EXTRA_CHANNEL_TIMEOUT_MS = 10_000;
+
 function isMissing(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
   return code === NO_SUCH_FILE || code === "ENOENT";
+}
+
+/** Open an SFTP channel, giving up after `timeoutMs`; a channel that opens later is closed again. */
+function openChannel(client: ssh2.Client, timeoutMs: number): Promise<SFTPWrapper> {
+  return new Promise<SFTPWrapper>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new Error(`no answer after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs).unref();
+    client.sftp((error, sftp) => {
+      if (settled) return void (error ? undefined : sftp.end());
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(sftp);
+    });
+  });
 }
 
 export class SftpStorage extends Storage {
@@ -141,19 +162,29 @@ export class SftpStorage extends Storage {
     client.on("error", () => undefined);
     this.client = client;
 
-    const wanted = Math.max(1, this.options.channels ?? 4);
-    for (let index = 0; index < wanted; index++) {
+    try {
+      this.channels.push(await openChannel(client, this.options.timeoutMs ?? 20_000));
+    } catch (error) {
+      client.end();
+      this.client = null;
+      throw new StorageError(`Server ${host} did not open an SFTP session: ${(error as Error).message}`);
+    }
+    // Extra channels spread the load, but some servers (Pterodactyl Wings) serve one SFTP session per
+    // connection and leave the next one waiting forever. So never wait on them: each joins if and
+    // when the server opens it.
+    void this.addChannels(client, Math.max(1, this.options.channels ?? 4) - 1);
+  }
+
+  private async addChannels(client: ssh2.Client, count: number): Promise<void> {
+    for (let index = 0; index < count; index++) {
+      let sftp: SFTPWrapper;
       try {
-        this.channels.push(
-          await new Promise<SFTPWrapper>((resolve, reject) => client.sftp((error, sftp) => (error ? reject(error) : resolve(sftp)))),
-        );
-      } catch (error) {
-        if (!this.channels.length) {
-          client.end();
-          throw new StorageError(`Server ${host} does not allow SFTP: ${(error as Error).message}`);
-        }
-        break; // the server caps sessions; use what we have
+        sftp = await openChannel(client, EXTRA_CHANNEL_TIMEOUT_MS);
+      } catch {
+        return; // the server caps sessions; use what we have
       }
+      if (this.client !== client) return void sftp.end();
+      this.channels.push(sftp);
     }
   }
 

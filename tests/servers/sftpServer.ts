@@ -49,7 +49,17 @@ function toAttrs(stats: Stats): Attributes {
   };
 }
 
-export async function startSftpServer(root: string, options: { latencyMs?: number; maxSessions?: number } = {}): Promise<SftpTestServer> {
+export interface SftpServerOptions {
+  latencyMs?: number;
+  /** Refuse SFTP sessions beyond this many per connection. */
+  maxSessions?: number;
+  /** Like Pterodactyl Wings: leave a new session channel unanswered while another is open. */
+  oneSessionAtATime?: boolean;
+  /** Never answer session channels at all. */
+  ignoreSessions?: boolean;
+}
+
+export async function startSftpServer(root: string, options: SftpServerOptions = {}): Promise<SftpTestServer> {
   const username = "mc";
   const password = "pw";
   const latency = options.latencyMs ?? 0;
@@ -61,18 +71,30 @@ export async function startSftpServer(root: string, options: { latencyMs?: numbe
     clients.add(client);
     client.on("close", () => clients.delete(client));
     let sessions = 0;
+    let open = 0;
+    const waiting: (() => void)[] = [];
     client.on("authentication", (ctx) => {
       if (ctx.method === "password" && ctx.username === username && ctx.password === password) ctx.accept();
       else ctx.reject(["password"]);
     });
     client.on("ready", () => {
       client.on("session", (acceptSession) => {
-        const session = acceptSession();
-        session.on("sftp", (acceptSftp, rejectSftp) => {
-          if (options.maxSessions && sessions >= options.maxSessions) return rejectSftp();
-          sessions++;
-          serveSftp(acceptSftp());
-        });
+        if (options.ignoreSessions) return;
+        const start = () => {
+          open++;
+          const session = acceptSession();
+          session.on("close", () => {
+            open--;
+            waiting.shift()?.();
+          });
+          session.on("sftp", (acceptSftp, rejectSftp) => {
+            if (options.maxSessions && sessions >= options.maxSessions) return rejectSftp();
+            sessions++;
+            serveSftp(acceptSftp());
+          });
+        };
+        if (options.oneSessionAtATime && open > 0) waiting.push(start);
+        else start();
       });
     });
     client.on("error", () => undefined);

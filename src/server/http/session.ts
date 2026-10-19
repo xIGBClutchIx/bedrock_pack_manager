@@ -8,7 +8,7 @@ import { Target } from "../core/layout";
 import { WorldJsonError } from "../core/worlds";
 import { JobFailure } from "../jobs/runner";
 import { openStorage } from "../storage/connect";
-import { HostKeyMismatchError, StorageError, UnknownHostKeyError } from "../storage/errors";
+import { HostKeyMismatchError, StorageError, UnknownHostKeyError, abortable } from "../storage/errors";
 import type { AppPaths } from "../app/paths";
 
 export const DEFAULT_OVERRIDES: LayoutOverrides = { packScope: "shared" };
@@ -36,24 +36,32 @@ export class Session {
     return path;
   }
 
-  async connect(settings: ConnectionSettings, overrides: LayoutOverrides): Promise<Target> {
+  /** Connect and scan the worlds. Aborting `signal` gives up at once and closes whatever opened. */
+  async connect(settings: ConnectionSettings, overrides: LayoutOverrides, signal?: AbortSignal): Promise<Target> {
     await this.disconnect();
     // The bundled run/ folder is the default local server, as in the original tool.
     const local = settings.protocol === "local" && !settings.root;
-    const storage = await openStorage(local ? { ...settings, root: this.paths.runDir } : settings, {
+    const opening = openStorage(local ? { ...settings, root: this.paths.runDir } : settings, {
       baseDir: process.cwd(),
       knownHostsFile: this.paths.knownHostsFile,
     });
+    const storage = await abortable(opening, signal, (late) => late.close());
     try {
-      this.target = await Target.open(storage, overrides);
+      const target = await abortable(Target.open(storage, overrides), signal);
+      const worlds = await abortable(worldSummaries(target), signal);
+      this.target = target;
+      this.settings = settings;
+      this.overrides = { ...overrides };
+      await abortable(this.refreshWorlds(worlds), signal);
+      return target;
     } catch (error) {
+      this.target = null;
+      this.settings = null;
+      this.worlds = [];
+      this.defaultWorld = null;
       await storage.close();
       throw error;
     }
-    this.settings = settings;
-    this.overrides = { ...overrides };
-    await this.refreshWorlds();
-    return this.target;
   }
 
   async relayout(overrides: LayoutOverrides): Promise<Target> {

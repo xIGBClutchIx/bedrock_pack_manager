@@ -246,6 +246,35 @@ describe("sftp through the API", () => {
       await sftp.close();
     }
   });
+
+  it("lets a new connect replace one stuck on an unresponsive server", async () => {
+    const sftp = await startSftpServer(server, { ignoreSessions: true });
+    try {
+      const settings = {
+        protocol: "sftp",
+        host: sftp.host,
+        port: sftp.port,
+        username: sftp.username,
+        password: sftp.password,
+        trustedFingerprint: fingerprintOf(sftp.hostKey),
+        root: "/",
+        tlsVerify: true,
+        passive: true,
+      };
+      const response = await call("POST", ROUTES.connect, { settings, layout: {} });
+      const stuck = app.runner.get(response.json().job as string)!;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(stuck.status).toBe("running");
+
+      const replaced = await connectLocal();
+      expect(replaced.status).toBe("done");
+      expect(stuck.status).toBe("cancelled");
+      expect((await call("GET", ROUTES.state)).json().connected).toBe(true);
+    } finally {
+      await app.session.disconnect();
+      await sftp.close();
+    }
+  });
 });
 
 describe("profiles", () => {

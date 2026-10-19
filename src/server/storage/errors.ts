@@ -48,3 +48,28 @@ export const isNotFound = (error: unknown): error is NotFoundError => error inst
 export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new CancelledError();
 }
+
+/**
+ * Settle with `promise`, or reject with CancelledError as soon as `signal` aborts, for work that
+ * cannot be interrupted itself (like opening a connection). A result that arrives after the abort
+ * goes to `discard`.
+ */
+export function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined, discard?: (late: T) => unknown): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new CancelledError());
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) void discard?.(value);
+        else resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
