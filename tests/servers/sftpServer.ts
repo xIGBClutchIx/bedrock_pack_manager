@@ -19,8 +19,10 @@ import {
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 
-import { Server, utils, type Attributes, type Connection, type SFTPWrapper } from "ssh2";
+import ssh2, { type Attributes, type Connection, type SFTPWrapper } from "ssh2";
 
+// ssh2 is CommonJS without detectable named exports, so Node's ESM loader needs the default import.
+const { Server, utils } = ssh2;
 const { STATUS_CODE, flagsToString } = utils.sftp;
 
 export interface SftpTestServer {

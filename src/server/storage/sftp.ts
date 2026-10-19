@@ -4,7 +4,8 @@
  */
 import { readFileSync } from "node:fs";
 
-import { Client, type ConnectConfig, type FileEntryWithStats, type SFTPWrapper } from "ssh2";
+// ssh2 is CommonJS without detectable named exports, so Node's ESM loader needs the default import.
+import ssh2, { type ConnectConfig, type FileEntryWithStats, type SFTPWrapper } from "ssh2";
 
 import { HostKeyMismatchError, NotFoundError, StorageError, UnknownHostKeyError } from "./errors";
 import { KnownHosts, fingerprintOf, keyTypeOf } from "./knownHosts";
@@ -38,7 +39,7 @@ function isMissing(error: unknown): boolean {
 export class SftpStorage extends Storage {
   label = "";
   root = "/";
-  private client: Client | null = null;
+  private client: ssh2.Client | null = null;
   private channels: SFTPWrapper[] = [];
   private next = 0;
   private connecting: Promise<void> | null = null;
@@ -114,7 +115,7 @@ export class SftpStorage extends Storage {
     }
     if (!password && !keyFile) config.agent = process.platform === "win32" ? "pageant" : process.env.SSH_AUTH_SOCK;
 
-    const client = new Client();
+    const client = new ssh2.Client();
     await new Promise<void>((resolve, reject) => {
       client
         .on("keyboard-interactive", (_name, _instructions, _lang, prompts, finish) => finish(prompts.map(() => password ?? "")))
