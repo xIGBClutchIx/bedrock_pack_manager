@@ -6,5 +6,5 @@ Set-Location $RootDir
 git config core.hooksPath .githooks
 
 Write-Host "Installed repository Git hooks:"
-Write-Host "  pre-commit -> python -m ruff check . (from .venv)"
-Write-Host "  pre-push   -> python -m pytest (from .venv)"
+Write-Host "  pre-commit -> npm run lint && npm run typecheck"
+Write-Host "  pre-push   -> npm test"

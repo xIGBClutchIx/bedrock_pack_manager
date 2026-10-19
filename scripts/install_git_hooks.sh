@@ -8,5 +8,5 @@ git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit .githooks/pre-push
 
 echo "Installed repository Git hooks:"
-echo "  pre-commit -> python -m ruff check . (from .venv)"
-echo "  pre-push   -> python -m pytest (from .venv)"
+echo "  pre-commit -> npm run lint && npm run typecheck"
+echo "  pre-push   -> npm test"

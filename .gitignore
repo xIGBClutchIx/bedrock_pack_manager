@@ -1,22 +1,15 @@
 run/
-
-__pycache__/
-*.py[cod]
-*$py.class
-
-.pytest_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
-
-.venv/
-venv/
-env/
-
-build/
+node_modules/
 dist/
-*.egg-info/
+coverage/
+playwright-report/
+test-results/
+*.blob
+sea-config.json
+.tmp/
+
+# leftovers from the Python version
+.venv/
+__pycache__/
 
 .DS_Store

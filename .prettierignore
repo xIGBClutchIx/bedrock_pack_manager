@@ -1,0 +1,7 @@
+dist
+run
+coverage
+node_modules
+.venv
+package-lock.json
+tests/fixtures
