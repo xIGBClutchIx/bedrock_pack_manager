@@ -75,3 +75,25 @@ test("connect over SFTP, install an addon, uninstall a pack", async ({ page }) =
   await expect(page.getByRole("row", { name: /Addon BP/ })).toHaveCount(0);
   await expect(page.locator(".console")).toContainText("Uninstalling — done");
 });
+
+test("cancel a connect to a server that never answers", async ({ page }) => {
+  await app.session.disconnect();
+  const stalled = await startSftpServer(join(dir.path, "srv"), { ignoreSessions: true });
+  try {
+    await page.goto(url);
+    await page.getByLabel("Host", { exact: true }).fill(stalled.host);
+    await page.getByLabel("Port", { exact: true }).fill(String(stalled.port));
+    await page.getByLabel("Username", { exact: true }).fill(stalled.username);
+    await page.getByLabel("Password", { exact: true }).fill(stalled.password);
+    await page.getByRole("button", { name: "Connect" }).click();
+    await page.getByRole("button", { name: "Trust and connect" }).click();
+
+    await expect(page.getByRole("button", { name: "Connecting…" })).toBeDisabled();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+    await expect(page.locator(".banner.danger")).toHaveCount(0);
+  } finally {
+    await app.session.disconnect();
+    await stalled.close();
+  }
+});

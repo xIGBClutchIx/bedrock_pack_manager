@@ -66,7 +66,7 @@ function fromProfile(profile: Profile): FormState {
 }
 
 export function ConnectScreen() {
-  const { state, setState, refresh, run, busy, mark } = useApp();
+  const { state, setState, refresh, run, busy, mark, cancel } = useApp();
   const profiles = state?.profiles ?? [];
   const [form, setForm] = useState<FormState>(EMPTY);
   const [active, setActive] = useState<string | null>(null);
@@ -128,6 +128,7 @@ export function ConnectScreen() {
         setHostKey(caught.job.errorData as unknown as UnknownHostKeyData);
         return;
       }
+      if (caught instanceof JobError && caught.job.status === "cancelled") return;
       setError((caught as Error).message);
     }
   }
@@ -321,6 +322,11 @@ export function ConnectScreen() {
               aria-label="Server name"
             />
             <span className="grow" />
+            {busy && (
+              <button type="button" className="btn ghost lg" onClick={cancel}>
+                Cancel
+              </button>
+            )}
             <button type="submit" className="btn primary lg" disabled={busy}>
               {busy ? "Connecting…" : "Connect"}
             </button>
