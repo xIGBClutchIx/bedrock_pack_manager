@@ -1,0 +1,279 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f2;
+  --card: #ffffff;
+  --text: #1d2321;
+  --muted: #5d6763;
+  --border: #d9ddd8;
+  --accent: #3a7d44;
+  --accent-text: #ffffff;
+  --warn: #9a5b00;
+  --log-bg: #15191a;
+  --log-text: #dfe5e2;
+  --red: #ff7b72;
+  --yellow: #e3b341;
+  --green: #7ee787;
+  --cyan: #79c0ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111414;
+    --card: #1a1f1f;
+    --text: #e6ebe8;
+    --muted: #9aa5a0;
+    --border: #2d3534;
+    --accent: #5aa565;
+    --accent-text: #0d1110;
+    --warn: #e3b341;
+    --log-bg: #0b0d0d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 16px 48px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 1.9rem;
+}
+
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  font-size: 1.2rem;
+}
+
+code {
+  font-size: 0.9em;
+}
+
+.lede {
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.notice {
+  margin: 0 0 24px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.card {
+  margin-bottom: 16px;
+  padding: 20px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.card.highlight {
+  border-color: var(--accent);
+  border-width: 2px;
+}
+
+.step {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.95rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.row.spread {
+  justify-content: space-between;
+}
+
+.row.spread h2 {
+  margin: 0;
+}
+
+.stack {
+  display: grid;
+  gap: 12px;
+}
+
+button,
+.button,
+select,
+input[type="text"] {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  padding: 8px 14px;
+}
+
+button,
+.button {
+  cursor: pointer;
+}
+
+button:hover,
+.button:hover {
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+select,
+input[type="text"] {
+  width: 100%;
+  max-width: 100%;
+}
+
+details {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+
+details:last-of-type {
+  padding-bottom: 0;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details > *:not(summary) {
+  margin-top: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.check-list {
+  display: grid;
+  gap: 6px;
+}
+
+.check-list small {
+  display: block;
+  color: var(--muted);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.hint.warn {
+  color: var(--warn);
+}
+
+.status {
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--red);
+}
+
+.drop-zone {
+  display: grid;
+  gap: 4px;
+  place-items: center;
+  padding: 24px 12px;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.drop-zone span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.drop-zone.dragging {
+  border-color: var(--accent);
+}
+
+.file-list {
+  margin: 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+pre#output {
+  margin: 12px 0 0;
+  padding: 14px;
+  max-height: 420px;
+  overflow: auto;
+  background: var(--log-bg);
+  color: var(--log-text);
+  border-radius: 8px;
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ansi-91 { color: var(--red); }
+.ansi-92 { color: var(--green); }
+.ansi-93 { color: var(--yellow); }
+.ansi-96 { color: var(--cyan); }
+.ansi-1 { font-weight: 700; }
+.ansi-2 { opacity: 0.7; }
+
+footer {
+  margin-top: 24px;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+footer a {
+  color: var(--muted);
+}

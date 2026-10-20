@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bedrock Pack Manager</title>
+    <meta name="description" content="Install Minecraft Bedrock add-ons into a world or server folder, right in your browser." />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Bedrock Pack Manager</h1>
+        <p class="lede">Install Minecraft Bedrock add-ons into your world or server folder. Everything runs in your browser and nothing is uploaded anywhere.</p>
+        <p class="notice">Make a backup of your world before making changes.</p>
+      </header>
+
+      <p id="loading" class="status">Loading the pack manager, this takes a few seconds the first time…</p>
+
+      <section id="step-source" class="card" hidden>
+        <h2><span class="step">1</span> Open your server folder</h2>
+        <p>Pick the folder that holds <code>worlds</code>, <code>behavior_packs</code>, and <code>resource_packs</code>.</p>
+        <div class="row">
+          <button id="open-folder" type="button" class="primary">Choose folder</button>
+          <label class="button" for="upload-zip">Upload a .zip of it instead</label>
+          <input id="upload-zip" type="file" accept=".zip" hidden />
+        </div>
+        <p id="folder-hint" class="hint"></p>
+        <p id="source-status" class="status"></p>
+      </section>
+
+      <section id="step-world" class="card" hidden>
+        <h2><span class="step">2</span> Pick a world</h2>
+        <select id="world-select" aria-label="World"></select>
+      </section>
+
+      <section id="step-actions" class="card" hidden>
+        <h2><span class="step">3</span> Choose what to do</h2>
+
+        <details open>
+          <summary>Install packs</summary>
+          <label id="drop-zone" class="drop-zone" for="pack-files">
+            <strong>Drop .mcaddon, .mcpack, or .zip files here</strong>
+            <span>or click to choose files</span>
+          </label>
+          <input id="pack-files" type="file" accept=".mcaddon,.mcpack,.zip" multiple hidden />
+          <ul id="pack-list" class="file-list"></ul>
+          <label class="field">
+            If a pack is already installed
+            <select id="duplicate-mode">
+              <option value="replace">Replace it with the new one</option>
+              <option value="skip">Keep the old one and skip</option>
+              <option value="keep-both">Keep both copies, use the new one</option>
+            </select>
+          </label>
+          <button id="run-install" type="button" class="primary">Install packs</button>
+        </details>
+
+        <details>
+          <summary>Edit world</summary>
+          <p class="hint">These changes are written straight to the world's <code>level.dat</code>.</p>
+          <label class="check"><input id="edit-beta" type="checkbox" /> Enable Beta APIs</label>
+          <label class="field">
+            Default gamemode
+            <select id="edit-gamemode">
+              <option value="">Leave as is</option>
+              <option value="survival">Survival</option>
+              <option value="creative">Creative</option>
+              <option value="adventure">Adventure</option>
+            </select>
+          </label>
+          <button id="run-edit" type="button">Apply world edits</button>
+        </details>
+
+        <details id="uninstall-panel">
+          <summary>Uninstall packs</summary>
+          <div id="uninstall-list" class="check-list"></div>
+          <label class="check"><input id="uninstall-keep-files" type="checkbox" /> Only remove from the world, keep the pack files</label>
+          <button id="run-uninstall" type="button">Uninstall selected</button>
+        </details>
+
+        <details>
+          <summary>Check and repair</summary>
+          <div class="stack">
+            <div>
+              <button id="run-doctor" type="button">Audit world</button>
+              <span class="hint">Lists packs and problems without changing anything.</span>
+            </div>
+            <div>
+              <button id="run-rebuild" type="button">Rebuild world pack lists</button>
+              <span class="hint warn">Overwrites the world's pack JSON files.</span>
+            </div>
+            <div>
+              <button id="run-cleanup" type="button">Clean up pack folders</button>
+              <span class="hint warn">Deletes pack folders this world doesn't use.</span>
+            </div>
+          </div>
+        </details>
+
+        <details>
+          <summary>Download for your server host</summary>
+          <p class="hint">Zips <code>worlds</code>, <code>behavior_packs</code>, and <code>resource_packs</code> so you can upload them.</p>
+          <label class="field">
+            File name
+            <input id="zip-name" type="text" placeholder="Bedrock_Packs.zip" />
+          </label>
+          <button id="run-zip" type="button">Download zip</button>
+        </details>
+      </section>
+
+      <section id="step-save" class="card highlight" hidden>
+        <h2>Save your changes</h2>
+        <p>You uploaded a zip, so your changes only live in this tab. Download the updated folder before you close it.</p>
+        <button id="download-folder" type="button" class="primary">Download updated folder</button>
+      </section>
+
+      <section id="output-card" class="card" hidden>
+        <div class="row spread">
+          <h2>Output</h2>
+          <button id="clear-output" type="button" class="small">Clear</button>
+        </div>
+        <pre id="output" aria-live="polite"></pre>
+      </section>
+
+      <footer>
+        <a href="https://github.com/xIGBClutchIx/bedrock_pack_manager">Source on GitHub</a>
+      </footer>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pyodide.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

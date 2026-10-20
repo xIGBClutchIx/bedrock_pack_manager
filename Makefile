@@ -1,4 +1,4 @@
-.PHONY: run test test-verbose lint lint-fix build-linux build-windows install-hooks clean
+.PHONY: run test test-verbose lint lint-fix site serve-site install-hooks clean
 
 run:
 	python bedrock_pack_manager.py
@@ -15,11 +15,11 @@ lint:
 lint-fix:
 	ruff check . --fix
 
-build-linux:
-	bash scripts/build_linux.sh
+site:
+	python scripts/build_site.py
 
-build-windows:
-	pwsh -File scripts/build_windows.ps1
+serve-site: site
+	python -m http.server 8000 --directory dist/site
 
 install-hooks:
 	bash scripts/install_git_hooks.sh

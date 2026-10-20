@@ -18,6 +18,9 @@ The current architecture is a small Python package with a thin top-level script:
 - `bedrock_pack_manager/console.py`: console output helpers
 - `bedrock_pack_manager/terminal.py`: terminal capability and keypress helpers
 - `bedrock_pack_manager/constants.py`: shared pack/archive constants
+- `bedrock_pack_manager/web.py`: JSON bridge called by the browser app under Pyodide
+- `web/`: static browser app (the main way non-technical users run the tool)
+- `scripts/build_site.py`: builds `web/` plus the package zip into `dist/site/`
 
 ## Runtime Layout
 
@@ -80,6 +83,12 @@ When adding CLI options:
 - if you add or change an interactive action or option, add or update the corresponding CLI flag or argument unless the user explicitly wants it to stay interactive-only
 - keep the README command examples and menu descriptions in sync with the code
 
+## Web App
+
+- the hosted site in `web/` runs this same package in the browser through Pyodide; do not fork logic into JavaScript
+- new user-facing actions should get a matching control in `web/index.html` and `web/app.js` alongside the CLI flag and interactive menu entry
+- keep `bedrock_pack_manager/web.py` free of terminal-only imports so it loads under Pyodide
+
 ## Logging
 
 Run logs are captured automatically through `bedrock_pack_manager/logger.py`.
@@ -110,7 +119,7 @@ Expected outputs:
 
 If stdout capture behaves oddly in the current environment, `pytest -s` is acceptable for diagnosis, but normal work should keep `pytest` green.
 
-CI currently runs in GitHub Actions with `.github/workflows/quality-checks.yml` for Ruff and pytest, plus `.github/workflows/build-artifacts.yml` for Linux and Windows one-file builds.
+CI currently runs in GitHub Actions with `.github/workflows/quality-checks.yml` for Ruff and pytest, plus `.github/workflows/deploy-site.yml`, which builds the browser app with `scripts/build_site.py` and deploys it to GitHub Pages.
 Local Git hooks can be installed with `make install-hooks` on POSIX or `scripts/install_git_hooks.ps1` on Windows; they run Ruff on `pre-commit` and pytest on `pre-push` using the local `.venv`.
 
 ## Linting

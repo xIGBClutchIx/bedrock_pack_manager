@@ -5,6 +5,21 @@
 Install Minecraft Bedrock behavior packs and resource packs into a world from `.mcaddon`, `.mcpack`, `.zip`, or already-extracted folders.
 All runtime data lives under `run/` so the project root stays clean.
 
+## Use It In Your Browser
+
+The easiest way to use Bedrock Pack Manager is the hosted web app, with nothing to download or install:
+
+**https://xigbclutchix.github.io/bedrock_pack_manager/**
+
+1. Open the page in Chrome or Edge and click **Choose folder**, then pick your server folder (the one with `worlds`, `behavior_packs`, and `resource_packs`).
+2. Pick a world.
+3. Drop in `.mcaddon` or `.mcpack` files and click **Install packs**. Changes are saved straight into the folder.
+
+In other browsers (Firefox, Safari, phones), zip the folder, click **Upload a .zip of it instead**, and use **Download updated folder** when you're done.
+
+The page also covers world edits (Beta APIs, gamemode), uninstall, audit, rebuild, cleanup, and downloading a zip for your server host.
+It runs the same Python code as the CLI inside the browser using [Pyodide](https://pyodide.org), so your files never leave your computer.
+
 ## Interactive Menu
 
 The default interactive mode opens a keyboard-driven menu for install, uninstall, rebuild, audit, cleanup, and world-edit flows.
@@ -36,8 +51,8 @@ make test
 make test-verbose
 make lint
 make lint-fix
-make build-linux
-make build-windows
+make site
+make serve-site
 make install-hooks
 make clean
 ```
@@ -71,10 +86,10 @@ This repo includes two GitHub Actions workflows:
   - installs dependencies from `requirements.txt`
   - runs `ruff check .`
   - runs `pytest`
-- `.github/workflows/build-artifacts.yml`
-  - builds the Linux one-file executable on `ubuntu-latest`
-  - builds the Windows one-file executable on `windows-latest`
-  - uploads both executables from `dist/` as workflow artifacts
+- `.github/workflows/deploy-site.yml`
+  - builds the browser app with `scripts/build_site.py`
+  - deploys `dist/site/` to GitHub Pages on every push to `main`
+  - requires **Settings → Pages → Source: GitHub Actions** to be enabled once
 
 ## Testing
 
@@ -95,40 +110,20 @@ make lint-fix
 `make lint-fix` applies Ruff's automatic fixes where possible.
 The current Ruff line length is `180`.
 
-## Build Linux Executable
+## Web App
 
-Activate the virtual environment, install the build dependency if needed, and run:
+The browser app lives in `web/` (`index.html`, `app.js`, `style.css`).
+`bedrock_pack_manager/web.py` is the small bridge the page calls; everything else is the same package the CLI uses.
+
+Build and preview it locally:
 
 ```bash
 . .venv/bin/activate
-python -m pip install pyinstaller
-bash scripts/build_linux.sh
+make serve-site
 ```
 
-This produces a single-file Linux executable at `dist/bedrock-pack-manager`.
-
-When running the packaged binary, runtime data is still created under a `run/` folder beside the executable.
-
-## Build Windows Executable
-
-Build the Windows executable on Windows:
-
-```powershell
-.venv\Scripts\Activate.ps1
-python -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
-```
-
-Or from `cmd.exe`:
-
-```bat
-call .venv\Scripts\activate.bat
-scripts\build_windows.bat
-```
-
-This produces `dist\bedrock-pack-manager.exe`.
-
-PyInstaller does not reliably cross-build Windows executables from Linux, so use the Windows script on a Windows machine.
+Then open `http://localhost:8000`. `make site` only builds `dist/site/` without serving it.
+The page loads Pyodide from jsDelivr and `nbtlib` from PyPI, so it needs an internet connection the first time.
 
 ## Usage
 
@@ -256,6 +251,9 @@ World selection can also be driven directly from the CLI:
 - `bedrock_pack_manager/console.py`: console output and shared app state
 - `bedrock_pack_manager/terminal.py`: terminal capability and keypress helpers
 - `bedrock_pack_manager/constants.py`: shared pack/archive constants
+- `bedrock_pack_manager/web.py`: bridge used by the browser app
+- `web/`: static browser app published to GitHub Pages
+- `scripts/build_site.py`: builds the browser app into `dist/site/`
 
 ## Requirements
 
@@ -263,11 +261,9 @@ World selection can also be driven directly from the CLI:
 - `nbtlib>=2.0.4`
 - `pytest>=8.0.0` and `pytest-cov>=5.0.0` for testing
 - `ruff>=0.9.0` for linting
-- `pyinstaller>=6.0.0` for standalone builds
 
 Project dependency layout in `pyproject.toml`:
 
 - runtime dependency: `nbtlib`
 - optional `test` extras: `pytest`, `pytest-cov`, `ruff`
 - optional `lint` extras: `ruff`
-- optional `build` extras: `pyinstaller`
