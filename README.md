@@ -124,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_git_hooks.ps1
 
 ### GitHub Actions
 
-- `.github/workflows/quality-checks.yml`: lint, typecheck, and tests on Node 24
+- `.github/workflows/quality-checks.yml`: lint, typecheck, and tests on Node 24, plus the Playwright smoke test in Chromium (traces uploaded on failure)
 - `.github/workflows/build-artifacts.yml`: builds the Windows and Linux executables, runs `--help` on each, and uploads them as artifacts
 
 ## Project Layout

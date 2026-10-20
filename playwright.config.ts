@@ -5,6 +5,7 @@ export default defineConfig({
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,
+  retries: process.env.CI ? 1 : 0,
   reporter: [["list"]],
-  use: { headless: true, viewport: { width: 1440, height: 1000 } },
+  use: { headless: true, viewport: { width: 1440, height: 1000 }, trace: "retain-on-failure" },
 });
