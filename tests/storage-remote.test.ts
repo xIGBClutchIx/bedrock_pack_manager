@@ -91,6 +91,31 @@ describe("sftp connection", () => {
     expect(error.message).toMatch(/did not open an SFTP session/);
   });
 
+  it("drops a stalled connection and retries on a fresh one", async () => {
+    writeFile(joinLocal(dir.path, "f.txt"), "ok");
+    const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey), stallTimeoutMs: 300 });
+    try {
+      server.setStalled(true);
+      const reading = storage.readText("f.txt");
+      setTimeout(() => server.setStalled(false), 100);
+      expect(await reading).toBe("ok");
+    } finally {
+      await storage.close();
+    }
+  });
+
+  it("fails a request when the server stays silent", async () => {
+    writeFile(joinLocal(dir.path, "f.txt"), "ok");
+    const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey), stallTimeoutMs: 300 });
+    try {
+      server.setStalled(true);
+      await expect(storage.readText("f.txt")).rejects.toThrow(/stopped answering/);
+    } finally {
+      server.setStalled(false);
+      await storage.close();
+    }
+  });
+
   it("reconnects after the connection drops", async () => {
     writeFile(joinLocal(dir.path, "f.txt"), "ok");
     const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey) });

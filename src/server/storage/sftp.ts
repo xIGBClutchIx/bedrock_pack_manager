@@ -31,6 +31,8 @@ export interface SftpOptions {
   channels?: number;
   /** Operations in flight across all channels. */
   concurrency?: number;
+  /** Drop the connection when requests are waiting and nothing has arrived for this long. */
+  stallTimeoutMs?: number;
 }
 
 /** How long to wait for an extra SFTP channel before using fewer. */
@@ -68,6 +70,10 @@ export class SftpStorage extends Storage {
   private connecting: Promise<void> | null = null;
   private readonly knownHosts: KnownHosts;
   private readonly port: number;
+  /** Stall detection: requests waiting, and when the server last sent anything. */
+  private inFlight = 0;
+  private lastHeard = Date.now();
+  private stalled = false;
 
   private constructor(private readonly options: SftpOptions) {
     // Requests are pipelined, so many can be in flight cheaply; spread over a few channels so one
@@ -152,7 +158,13 @@ export class SftpStorage extends Storage {
           reject(new StorageError(`Could not connect to ${host}:${port} over SFTP: ${error.message}`, { cause: error }));
         })
         .connect(config);
+      // Any bytes from the server count as progress, so a big upload or download is never mistaken
+      // for a stall. ssh2 keeps its socket in `_sock`.
+      (client as unknown as { _sock?: NodeJS.EventEmitter })._sock?.on("data", () => {
+        this.lastHeard = Date.now();
+      });
     });
+    this.watchStalls(client);
     client.on("close", () => {
       if (this.client === client) {
         this.client = null;
@@ -175,6 +187,25 @@ export class SftpStorage extends Storage {
     void this.addChannels(client, Math.max(1, this.options.channels ?? 4) - 1);
   }
 
+  /**
+   * A server that stops answering (but keeps the TCP connection open) would leave requests
+   * waiting forever. Destroying the connection fails them, and `call` retries once on a new one.
+   */
+  private watchStalls(client: ssh2.Client): void {
+    const limit = this.options.stallTimeoutMs ?? 60_000;
+    const timer = setInterval(
+      () => {
+        if (this.client !== client) return clearInterval(timer);
+        if (this.inFlight > 0 && Date.now() - this.lastHeard > limit) {
+          this.stalled = true;
+          client.destroy();
+        }
+      },
+      Math.min(5_000, Math.max(50, limit / 4)),
+    ).unref();
+    client.once("close", () => clearInterval(timer));
+  }
+
   private async addChannels(client: ssh2.Client, count: number): Promise<void> {
     for (let index = 0; index < count; index++) {
       let sftp: SFTPWrapper;
@@ -193,8 +224,14 @@ export class SftpStorage extends Storage {
     for (let attempt = 0; ; attempt++) {
       await this.ensureConnected();
       const sftp = this.channels[this.next++ % this.channels.length]!;
+      // Time spent idle before this request is not a stall.
+      if (this.inFlight++ === 0) this.lastHeard = Date.now();
       try {
-        return await new Promise<T>((resolve, reject) => request(sftp, (error, value) => (error ? reject(error) : resolve(value as T))));
+        const value = await new Promise<T>((resolve, reject) =>
+          request(sftp, (error, result) => (error ? reject(error) : resolve(result as T))),
+        );
+        this.stalled = false;
+        return value;
       } catch (error) {
         const dropped = !this.client || /No response from server|Not connected|ECONNRESET|channel/i.test((error as Error).message ?? "");
         if (attempt === 0 && dropped && !isMissing(error)) {
@@ -203,7 +240,13 @@ export class SftpStorage extends Storage {
           this.channels = [];
           continue;
         }
+        if (dropped && this.stalled) {
+          const seconds = Math.round((this.options.stallTimeoutMs ?? 60_000) / 1000);
+          throw new StorageError(`the server stopped answering (nothing received for ${seconds}s)`);
+        }
         throw error;
+      } finally {
+        this.inFlight--;
       }
     }
   }

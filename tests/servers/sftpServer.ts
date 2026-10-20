@@ -33,6 +33,8 @@ export interface SftpTestServer {
   hostKey: Buffer;
   /** Count of SFTP requests served, by type. */
   requests: Map<string, number>;
+  /** While true, SFTP requests are received but never answered. */
+  setStalled(stalled: boolean): void;
   close(): Promise<void>;
 }
 
@@ -64,6 +66,7 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
   const password = "pw";
   const latency = options.latencyMs ?? 0;
   const requests = new Map<string, number>();
+  let stalled = false;
   const local = (path: string) => join(root, path.replace(/^\/+/, ""));
 
   const clients = new Set<Connection>();
@@ -113,6 +116,7 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
     const lookup = (handle: Buffer) => handles.get(handle.readUInt32BE(0));
     const later = (name: string, fn: () => void) => {
       requests.set(name, (requests.get(name) ?? 0) + 1);
+      if (stalled) return;
       if (latency) setTimeout(fn, latency);
       else fn();
     };
@@ -245,6 +249,9 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
     password,
     hostKey,
     requests,
+    setStalled: (value) => {
+      stalled = value;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const client of clients) client.end();
