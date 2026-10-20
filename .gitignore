@@ -7,9 +7,4 @@ test-results/
 *.blob
 sea-config.json
 .tmp/
-
-# leftovers from the Python version
-.venv/
-__pycache__/
-
 .DS_Store

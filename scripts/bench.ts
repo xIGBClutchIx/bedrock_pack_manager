@@ -1,6 +1,6 @@
 /**
  * Speed check over SFTP with artificial latency on every request (open, read, close... each pays it).
- * Usage: `npm run bench [-- <latencyMs>]` (default 40 ms, matching the Python benchmark).
+ * Usage: `npm run bench [-- <latencyMs>]` (default 40 ms).
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
