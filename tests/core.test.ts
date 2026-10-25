@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join as joinLocal } from "node:path";
 
 import { Target, detectLayout, parseServerProperties } from "../src/server/core/layout";
@@ -260,7 +261,9 @@ describe("pack index", () => {
 
     const index = await PackIndex.build(await runTarget(), "worlds/W");
     const kinds = index.problems.map((p) => p.kind).sort();
-    expect(kinds).toEqual(["broken", "broken", "misplaced", "nested", "partial", "partial"]);
+    // A case-sensitive file system (Linux, as on most servers) also sees the "Manifest.json" casing problem.
+    const caseSensitive = !existsSync(joinLocal(bp, "Cased", "manifest.json"));
+    expect(kinds).toEqual(["broken", "broken", ...(caseSensitive ? ["casing"] : []), "misplaced", "nested", "partial", "partial"]);
     expect(index.problems.find((p) => p.kind === "nested")?.fixable).toBe(true);
     expect(index.find("44444444-4444-4444-4444-444444444444")[0]?.nested).toBe(true);
     expect(index.find("66666666-6666-6666-6666-666666666666")[0]?.name).toBe("Cased");
