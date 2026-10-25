@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
 import { join as joinLocal } from "node:path";
 
 import { NotFoundError, StorageError } from "../src/server/storage/errors";
@@ -158,5 +158,56 @@ describe.each(BACKENDS)("%s storage", (backend) => {
   it("describes paths as full server paths", () => {
     expect(h.storage.describe("worlds")).toContain("worlds");
     expect(basename(h.storage.describe("worlds"))).toBe("worlds");
+  });
+
+  it("names uploaded manifests manifest.json, whatever their case", async () => {
+    const source = tempDir();
+    try {
+      writeFile(joinLocal(source.path, "Manifest.JSON"), "{}");
+      await h.storage.uploadTree(source.path, "packs/P");
+      expect(readdirSync(joinLocal(h.root, "packs", "P"))).toEqual(["manifest.json"]);
+    } finally {
+      source.cleanup();
+    }
+  });
+});
+
+// The FTP test server cannot report links, so this runs where links are visible.
+describe.each(["local", "sftp"] as const)("%s storage and symlinks", (backend) => {
+  let h: StorageHarness;
+  beforeEach(async () => {
+    h = await makeStorage(backend);
+  });
+  afterEach(async () => {
+    await h.close();
+  });
+
+  const link = (target: string, path: string) => symlinkSync(target, path, process.platform === "win32" ? "junction" : "dir");
+
+  it("deletes a link to a folder without touching the folder it points at", async () => {
+    writeFile(joinLocal(h.root, "dev", "Real", "manifest.json"), "{}");
+    mkdirSync(joinLocal(h.root, "packs"));
+    link(joinLocal(h.root, "dev", "Real"), joinLocal(h.root, "packs", "Linked"));
+    writeFile(joinLocal(h.root, "packs", "Holder", "keep.txt"), "x");
+    link(joinLocal(h.root, "dev", "Real"), joinLocal(h.root, "packs", "Holder", "inner"));
+
+    await h.storage.removeTree("packs/Linked");
+    await h.storage.removeTree("packs/Holder");
+    expect(existsSync(joinLocal(h.root, "packs", "Linked"))).toBe(false);
+    expect(existsSync(joinLocal(h.root, "packs", "Holder"))).toBe(false);
+    expect(readFileSync(joinLocal(h.root, "dev", "Real", "manifest.json"), "utf8")).toBe("{}");
+  });
+
+  it("does not follow links while scanning or downloading, so a loop ends", async () => {
+    writeFile(joinLocal(h.root, "w", "level.dat"), "L");
+    link(joinLocal(h.root, "w"), joinLocal(h.root, "w", "loop"));
+    const tree = await h.storage.scanTree("w");
+    expect(tree.dirs).toEqual(["w"]);
+    expect(tree.links).toEqual(["w/loop"]);
+    const skipped: string[] = [];
+    const files: string[] = [];
+    for await (const [path] of h.storage.downloadFiles("w", { onSkip: (path) => skipped.push(path) })) files.push(path);
+    expect(files).toEqual(["level.dat"]);
+    expect(skipped).toEqual(["loop"]);
   });
 });

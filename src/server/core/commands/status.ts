@@ -1,13 +1,13 @@
 /** World status: registered packs, stray folders, problems and level.dat, plus world summaries. */
-import type { LevelInfo, PackKind, PackRow, Problem, WorldStatus, WorldSummary } from "../../../shared/model";
+import type { DependencyInfo, LevelInfo, PackKind, PackRow, Problem, Version, WorldStatus, WorldSummary } from "../../../shared/model";
 import { formatVersion, packKey } from "../../../shared/model";
 import { isNotFound } from "../../storage/errors";
 import { basename } from "../../storage/path";
 import type { Target } from "../layout";
-import { uuidKey } from "../manifests";
-import { betaEnabled, gamemodeOf, levelNameOf, readLevelDat } from "../nbt";
-import { PackIndex, versionLabel } from "../packIndex";
-import { WorldJsonError, loadWorldJson, packVersionKey, registeredKeys, type WorldEntry } from "../worlds";
+import { compareVersions, normalizeVersion, uuidKey } from "../manifests";
+import { betaEnabled, experimentsOf, gamemodeOf, levelNameOf, readLevelDat } from "../nbt";
+import { NO_DETAILS, PackIndex, versionLabel, type InstalledPack } from "../packIndex";
+import { WorldJsonError, entryVersion, loadWorldJson, packVersionKey, registeredKeys, type WorldEntry } from "../worlds";
 
 export type WorldPacks = Record<PackKind, WorldEntry[]>;
 
@@ -19,79 +19,202 @@ export async function loadWorldPacks(target: Target, world: string): Promise<Wor
   return { bp, rp };
 }
 
-/** Names of other worlds that register the same pack version (cached across calls). */
+/** Other worlds' pack lists, read once per job: entries, or the error that stopped the read. */
+export type WorldJsonCache = Map<string, WorldEntry[] | Error>;
+
+async function cachedWorldJson(target: Target, world: string, kind: PackKind, cache: WorldJsonCache): Promise<WorldEntry[] | Error> {
+  const cacheKey = `${world}|${kind}`;
+  if (!cache.has(cacheKey)) {
+    const entries = await loadWorldJson(target.storage, target.worldJson(world, kind)).catch((error: unknown) =>
+      error instanceof Error ? error : new Error(String(error)),
+    );
+    cache.set(cacheKey, entries);
+  }
+  return cache.get(cacheKey)!;
+}
+
+/**
+ * Names of other worlds that still need a pack folder (cached across calls). A world needs it when it
+ * registers that exact version, or registers the UUID at a version the server has no copy of (this
+ * copy is then the closest it has). A world whose pack list cannot be read counts as needing it:
+ * deleting must fail safe.
+ */
 export async function otherWorldsUsing(
   target: Target,
   world: string,
   kind: PackKind,
-  uuid: string,
-  version: unknown,
-  cache: Map<string, Set<string>>,
+  pack: { uuid: string; version: Version },
+  cache: WorldJsonCache,
+  index?: PackIndex,
 ): Promise<string[]> {
   const others = (await target.listWorlds()).filter((other) => other !== world);
-  const key = packVersionKey(uuid, version as never);
   const users: string[] = [];
   await Promise.all(
     others.map(async (other) => {
-      const cacheKey = `${other}|${kind}`;
-      if (!cache.has(cacheKey)) {
-        const entries = await loadWorldJson(target.storage, target.worldJson(other, kind)).catch(() => []);
-        cache.set(cacheKey, registeredKeys(entries));
-      }
-      if (cache.get(cacheKey)!.has(key)) users.push(basename(other));
+      const entries = await cachedWorldJson(target, other, kind, cache);
+      if (entries instanceof Error) users.push(`${basename(other)} (its pack list could not be read: ${entries.message})`);
+      else if (registrationNeeds(entries, kind, pack, index)) users.push(basename(other));
     }),
   );
   return users.sort();
 }
 
+/** Whether a world's entries need this pack copy (see otherWorldsUsing). */
+export function registrationNeeds(
+  entries: WorldEntry[],
+  kind: PackKind,
+  pack: { uuid: string; version: Version },
+  index?: PackIndex,
+): boolean {
+  if (registeredKeys(entries).has(packVersionKey(pack.uuid, pack.version))) return true;
+  if (!index) return false;
+  const versions = entries
+    .filter((entry) => uuidKey(entry.pack_id) === uuidKey(pack.uuid))
+    .map(entryVersion)
+    .filter((version): version is Version => version !== null);
+  return versions.length > 0 && versions.every((version) => index.findVersion(pack.uuid, version, kind).length === 0);
+}
+
 export async function readLevelInfo(target: Target, world: string): Promise<LevelInfo> {
-  const level: LevelInfo = { exists: false, beta: null, gamemode: null, levelName: null, error: null };
+  const level: LevelInfo = { exists: false, beta: null, gamemode: null, levelName: null, error: null, experiments: [] };
   try {
     const dat = await readLevelDat(target.storage, target.levelDat(world));
-    return { exists: true, beta: betaEnabled(dat), gamemode: gamemodeOf(dat), levelName: levelNameOf(dat), error: null };
+    return {
+      exists: true,
+      beta: betaEnabled(dat),
+      gamemode: gamemodeOf(dat),
+      levelName: levelNameOf(dat),
+      error: null,
+      experiments: experimentsOf(dat),
+    };
   } catch (error) {
     if (isNotFound(error)) return level;
     return { ...level, exists: true, error: (error as Error).message };
   }
 }
 
+const newest = (packs: InstalledPack[]): InstalledPack | undefined => [...packs].sort((a, b) => compareVersions(b.version, a.version))[0];
+
+/** Manifest dependency versions are lists or strings; null when there is nothing to compare. */
+const requiredVersion = (version: unknown): Version | null =>
+  Array.isArray(version) || typeof version === "string" ? normalizeVersion(version) : null;
+
+function dependencyInfo(pack: InstalledPack | undefined, index: PackIndex, worldPacks: WorldPacks): DependencyInfo[] {
+  if (!pack) return [];
+  const registered = (uuid: string) => {
+    for (const kind of ["bp", "rp"] as const) {
+      const entry = worldPacks[kind].find((candidate) => uuidKey(candidate.pack_id) === uuidKey(uuid));
+      if (entry) return { kind, version: entryVersion(entry) };
+    }
+    return null;
+  };
+  const infos: DependencyInfo[] = pack.moduleDependencies.map((dep) => ({
+    uuid: null,
+    moduleName: dep.moduleName,
+    versionLabel: dep.version,
+    name: dep.moduleName,
+    state: "module",
+    kind: null,
+    serverVersion: null,
+    tooOld: false,
+  }));
+  for (const dep of pack.dependencies) {
+    const uuid = String(dep.uuid ?? "");
+    if (!uuid || uuidKey(uuid) === uuidKey(pack.uuid)) continue;
+    const required = requiredVersion(dep.version);
+    const copies = index.find(uuid);
+    const best = newest(copies);
+    const active = registered(uuid);
+    const older = (version: Version | null | undefined) => !!required && !!version && compareVersions(version, required) < 0;
+    infos.push({
+      uuid,
+      moduleName: null,
+      versionLabel: formatVersion(dep.version as never),
+      name: best?.name ?? uuid,
+      state: active ? "active" : best ? "inactive" : "missing",
+      kind: active?.kind ?? best?.dirKind ?? null,
+      serverVersion: !active && best ? best.version : null,
+      tooOld: active ? older(active.version) : older(best?.version),
+    });
+  }
+  return infos;
+}
+
+/** For each pack (`kind|uuid`), the other worlds that register it and at which version. */
+async function usageByOtherWorlds(target: Target, world: string): Promise<Map<string, { world: string; versionLabel: string }[]>> {
+  const others = (await target.listWorlds()).filter((other) => other !== world);
+  const usage = new Map<string, { world: string; versionLabel: string }[]>();
+  const lists = await Promise.all(
+    others.flatMap((other) =>
+      (["bp", "rp"] as const).map(async (kind) => ({
+        other,
+        kind,
+        entries: await loadWorldJson(target.storage, target.worldJson(other, kind)).catch(() => [] as WorldEntry[]),
+      })),
+    ),
+  );
+  for (const { other, kind, entries } of lists) {
+    for (const entry of entries) {
+      if (!entry.pack_id) continue;
+      const key = `${kind}|${uuidKey(entry.pack_id)}`;
+      const version = entryVersion(entry);
+      usage.set(key, [...(usage.get(key) ?? []), { world: basename(other), versionLabel: version ? formatVersion(version) : "?" }]);
+    }
+  }
+  for (const list of usage.values()) list.sort((a, b) => a.world.localeCompare(b.world));
+  return usage;
+}
+
 export async function worldStatus(target: Target, world: string, index?: PackIndex): Promise<WorldStatus> {
-  const [packIndex, worldPacks, level] = await Promise.all([
+  const [packIndex, worldPacks, level, usage] = await Promise.all([
     index ?? PackIndex.build(target, world),
     loadWorldPacks(target, world),
     readLevelInfo(target, world),
+    usageByOtherWorlds(target, world),
   ]);
   const rows: PackRow[] = [];
   const problems: Problem[] = [...packIndex.problems];
   const seen = new Set<string>();
 
+  const details = (pack: InstalledPack | undefined) => {
+    const { description, authors, minEngineVersion, subpacks } = pack?.details ?? NO_DETAILS;
+    return { description, authors, minEngineVersion, subpacks };
+  };
+
   for (const kind of ["bp", "rp"] as const) {
-    for (const entry of worldPacks[kind]) {
+    worldPacks[kind].forEach((entry, order) => {
       const uuid = String(entry.pack_id ?? "");
       if (!uuid) {
         problems.push({ kind: "registration", message: `${basename(target.worldJson(world, kind))} contains an entry with no pack_id` });
-        continue;
+        return;
       }
       seen.add(`${kind}|${uuidKey(uuid)}`);
-      const version = Array.isArray(entry.version) ? entry.version : [];
+      const version = entryVersion(entry);
       const installed = packIndex.find(uuid, kind);
-      const exact = installed.filter((pack) => JSON.stringify(pack.version) === JSON.stringify(version));
+      const exact = version ? installed.filter((pack) => packVersionKey(pack.uuid, pack.version) === packVersionKey(uuid, version)) : [];
       const source = exact[0] ?? installed[0];
+      const top = newest(installed);
       rows.push({
-        key: Array.isArray(entry.version) ? packKey(kind, uuid, version) : "",
+        key: version ? packKey(kind, uuid, version) : "",
         kind,
         uuid,
-        version,
-        versionLabel: formatVersion(version),
+        version: version ?? [],
+        versionLabel: formatVersion(version ?? []),
         name: source?.name ?? uuid,
         status: exact.length ? "ok" : installed.length ? "version-mismatch" : "missing",
         registered: true,
         paths: (exact.length ? exact : installed).map((pack) => target.describe(pack.path)),
+        path: source?.path ?? null,
         onServerVersions: [...new Set(installed.map(versionLabel))].sort(),
         scope: source?.scope ?? null,
-        dependencies: source?.dependencies ?? [],
+        dependencies: dependencyInfo(source, packIndex, worldPacks),
+        order,
+        newerOnServer: top && version && compareVersions(top.version, version) > 0 ? top.version : null,
+        usedBy: usage.get(`${kind}|${uuidKey(uuid)}`) ?? [],
+        ...details(source),
+        subpack: kind === "rp" && typeof entry.subpack === "string" ? entry.subpack : null,
       });
-    }
+    });
   }
 
   let hiddenBuiltin = 0;
@@ -111,22 +234,30 @@ export async function worldStatus(target: Target, world: string, index?: PackInd
       status: "unregistered",
       registered: false,
       paths: [target.describe(pack.path)],
+      path: pack.path,
       onServerVersions: [versionLabel(pack)],
       scope: pack.scope,
-      dependencies: pack.dependencies,
+      dependencies: dependencyInfo(pack, packIndex, worldPacks),
+      order: null,
+      newerOnServer: null,
+      usedBy: usage.get(`${pack.dirKind}|${uuidKey(pack.uuid)}`) ?? [],
+      ...details(pack),
+      subpack: null,
     });
   }
 
-  const known = new Set([...packIndex.uuids(), ...[...worldPacks.bp, ...worldPacks.rp].map((entry) => uuidKey(entry.pack_id))]);
   const dependencyProblems = new Set<string>();
   for (const row of rows) {
     if (!row.registered) continue;
     for (const dep of row.dependencies) {
-      const depUuid = uuidKey(dep.uuid);
-      if (depUuid && depUuid !== uuidKey(row.uuid) && !known.has(depUuid)) {
+      if (dep.state === "missing") {
         dependencyProblems.add(
-          `'${row.name}' depends on UUID ${dep.uuid} (v${formatVersion(dep.version as never)}) which is not installed - it may not work. Install the matching pack too.`,
+          `'${row.name}' depends on UUID ${dep.uuid} (v${dep.versionLabel}) which is not installed - it may not work. Install the matching pack too.`,
         );
+      } else if (dep.state === "inactive") {
+        dependencyProblems.add(`'${row.name}' needs '${dep.name}', which is on the server but not active in this world`);
+      } else if (dep.tooOld) {
+        dependencyProblems.add(`'${row.name}' needs '${dep.name}' v${dep.versionLabel} or newer`);
       }
     }
   }
@@ -136,12 +267,14 @@ export async function worldStatus(target: Target, world: string, index?: PackInd
     (a, b) =>
       a.kind.localeCompare(b.kind) ||
       Number(!a.registered) - Number(!b.registered) ||
+      (a.order ?? 0) - (b.order ?? 0) ||
       a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
   );
   const [bpDir, rpDir] = await Promise.all([target.installDir(world, "bp"), target.installDir(world, "rp")]);
   return {
     world,
     worldName: basename(world) || target.label,
+    isLevelName: !!target.layout.levelName && basename(world) === target.layout.levelName,
     packs: rows,
     problems,
     notes: [...packIndex.notes],

@@ -16,8 +16,11 @@ export const stripBom = (text: string): string => (text.charCodeAt(0) === 0xfeff
 
 export interface Entry {
   name: string;
+  /** For a symlink: whether it points at a folder. */
   isDir: boolean;
   size: number | null;
+  /** A symbolic link. Tree operations never follow these: deleting one removes the link, not its target. */
+  link?: boolean;
 }
 
 export interface BulkOptions {
@@ -264,10 +267,14 @@ export abstract class Storage {
 
   // ---- trees ------------------------------------------------------------------------------------
 
-  /** Every folder (top-down, grouped by depth in `levels`) and file under `path`, listing a whole level at a time. */
-  async scanTree(path: string, signal?: AbortSignal): Promise<{ dirs: string[]; files: string[]; levels: string[][] }> {
+  /**
+   * Every folder (top-down, grouped by depth in `levels`) and file under `path`, listing a whole level at a time.
+   * Symlinks are reported in `links` and never followed, so a link cannot pull another folder (or a loop) into the tree.
+   */
+  async scanTree(path: string, signal?: AbortSignal): Promise<{ dirs: string[]; files: string[]; links: string[]; levels: string[][] }> {
     const dirs: string[] = [];
     const files: string[] = [];
+    const links: string[] = [];
     const levels: string[][] = [];
     let frontier = [join(path)];
     while (frontier.length) {
@@ -284,12 +291,12 @@ export abstract class Storage {
         }
         for (const entry of listing) {
           if (entry.name === "." || entry.name === "..") continue;
-          (entry.isDir ? next : files).push(join(folder, entry.name));
+          (entry.link ? links : entry.isDir ? next : files).push(join(folder, entry.name));
         }
       });
       frontier = next;
     }
-    return { dirs, files, levels };
+    return { dirs, files, links, levels };
   }
 
   async removeTree(path: string, options: BulkOptions = {}): Promise<void> {
@@ -297,9 +304,12 @@ export abstract class Storage {
     if (key === "" || key === "/" || key === ".") throw new StorageError("Refusing to delete the storage root");
     const entry = await this.stat(key);
     if (!entry) return;
-    if (!entry.isDir) return this.removeFile(key);
+    // A link (even to a folder) is removed as a link; its target is left alone.
+    if (!entry.isDir || entry.link) return this.removeFile(key);
     try {
-      const { files, levels } = await this.scanTree(key, options.signal);
+      const scan = await this.scanTree(key, options.signal);
+      const { levels } = scan;
+      const files = [...scan.files, ...scan.links];
       let done = 0;
       const results = await this.map(
         files,
@@ -343,7 +353,8 @@ export abstract class Storage {
           folders.push(remotePath);
           await collect(localPath, remotePath);
         } else if (child.name.toLowerCase() === "manifest.json") {
-          manifests.push([localPath, remotePath]);
+          // Linux servers are case-sensitive and only load "manifest.json".
+          manifests.push([localPath, join(remote, "manifest.json")]);
         } else {
           uploads.push([localPath, remotePath]);
         }
@@ -388,19 +399,33 @@ export abstract class Storage {
     return total;
   }
 
-  /** Yield `[relativePath, data]` for every file under `path`, fetched in parallel batches. */
-  async *downloadFiles(path: string, signal?: AbortSignal): AsyncGenerator<[string, Buffer]> {
+  /**
+   * Yield `[relativePath, data]` for every file under `path`, fetched in parallel batches. Symlinks are
+   * not followed. A file that disappears after the scan (a running server rewrites its database) is
+   * reported to `onSkip` and left out instead of ending the download.
+   */
+  async *downloadFiles(
+    path: string,
+    options: { signal?: AbortSignal; onSkip?: (path: string, reason: string) => void } = {},
+  ): AsyncGenerator<[string, Buffer]> {
+    const { signal, onSkip } = options;
     const root = join(path);
-    const { files } = await this.scanTree(root, signal);
+    const { files, links } = await this.scanTree(root, signal);
+    const relativeTo = (file: string) => (root ? file.slice(root.length + 1) : file);
+    for (const link of links) onSkip?.(relativeTo(link), "symbolic link, not followed");
     const batchSize = 32;
     for (let start = 0; start < files.length; start += batchSize) {
       const chunk = files.slice(start, start + batchSize);
       const results = await this.map(chunk, (file) => this.rawRead(file), signal);
       for (let index = 0; index < chunk.length; index++) {
         const data = results[index]!;
-        if (data instanceof Error) throw data;
         const file = chunk[index]!;
-        yield [root ? file.slice(root.length + 1) : file, data];
+        if (isNotFound(data)) {
+          onSkip?.(relativeTo(file), "disappeared while backing up");
+          continue;
+        }
+        if (data instanceof Error) throw data;
+        yield [relativeTo(file), data];
       }
     }
   }

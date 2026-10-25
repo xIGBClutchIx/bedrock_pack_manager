@@ -10,6 +10,7 @@ import type {
   Profile,
   PublicConnectionSettings,
   UploadEntry,
+  WorldPackChange,
   WorldSummary,
 } from "./model";
 
@@ -26,6 +27,8 @@ export interface AppStateResponse {
   activeJob: JobInfo | null;
   uploads: UploadEntry[];
   profiles: Profile[];
+  /** Started with --test-server: offer one-click connects to the local demo server (TEST_SERVER). */
+  testServer: boolean;
 }
 
 /** Every mutating or slow route answers with the job it started; follow it at /api/jobs/:id/events. */
@@ -68,6 +71,16 @@ export interface UninstallRequest extends WorldRequest {
 
 export interface CleanupRequest extends WorldRequest {
   dryRun: boolean;
+  /** Only these pack folders (storage paths); all unused ones when omitted. */
+  paths?: string[];
+}
+
+export interface WorldPacksRequest extends WorldRequest {
+  changes: WorldPackChange[];
+}
+
+export interface ServerPropertiesRequest {
+  texturepackRequired: boolean;
 }
 
 export interface FixNestingRequest extends WorldRequest {
@@ -76,7 +89,8 @@ export interface FixNestingRequest extends WorldRequest {
 }
 
 export interface WorldEditRequest extends WorldRequest {
-  beta?: boolean;
+  /** Experiments to switch on or off, by level.dat key ("gametest" is Beta APIs). */
+  experiments?: Record<string, boolean>;
   gamemode?: Gamemode | null;
 }
 
@@ -102,7 +116,15 @@ export const ROUTES = {
   backup: "/api/backup",
   uploads: "/api/uploads",
   profiles: "/api/profiles",
+  worldPacks: "/api/world-packs",
+  serverProperties: "/api/server-properties",
+  knownHosts: "/api/known-hosts",
+  browse: "/api/browse",
+  packIcon: "/api/pack-icon",
+  appLog: "/api/logs/latest",
+  jobs: "/api/jobs",
   job: (id: string) => `/api/jobs/${encodeURIComponent(id)}`,
   jobEvents: (id: string) => `/api/jobs/${encodeURIComponent(id)}/events`,
   jobCancel: (id: string) => `/api/jobs/${encodeURIComponent(id)}/cancel`,
+  jobLog: (id: string) => `/api/jobs/${encodeURIComponent(id)}/log`,
 } as const;

@@ -10,7 +10,7 @@
  */
 import type { InstallScope, LayoutInfo, LayoutOverrides, PackKind, PackScope } from "../../shared/model";
 import { isNotFound } from "../storage/errors";
-import { JUNK_NAMES, basename, join } from "../storage/path";
+import { JUNK_NAMES, basename, isAbsolute, join, relative } from "../storage/path";
 import type { Entry, Storage } from "../storage/storage";
 
 export const WORLD_JSON_NAMES: Record<PackKind, string> = { bp: "world_behavior_packs.json", rp: "world_resource_packs.json" };
@@ -44,6 +44,8 @@ export interface ServerLayout {
   devRpDir: string | null;
   levelName: string | null;
   notes: string[];
+  serverProperties: string | null;
+  texturepackRequired: boolean | null;
 }
 
 type Names = Map<string, Entry>;
@@ -80,6 +82,22 @@ export function parseServerProperties(text: string): Record<string, string> {
   return values;
 }
 
+/** Set one key in server.properties text, keeping every other line (and comments) as it was. */
+export function setServerProperty(text: string, key: string, value: string): string {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((line) => {
+    const trimmed = line.trim();
+    return !trimmed.startsWith("#") && trimmed.includes("=") && trimmed.slice(0, trimmed.indexOf("=")).trim() === key;
+  });
+  if (at >= 0) lines[at] = `${key}=${value}`;
+  else {
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    lines.push(`${key}=${value}`, "");
+  }
+  return lines.join(newline);
+}
+
 /** Breadth-first search a couple of levels down for something that looks like a server. */
 async function findServerRoot(storage: Storage, start: string, notes: string[], depth = 2): Promise<[string, Names]> {
   const found = await names(storage, start);
@@ -113,12 +131,18 @@ export async function detectLayout(storage: Storage, overrides: Partial<LayoutOv
     devRpDir: null,
     levelName: null,
     notes,
+    serverProperties: null,
+    texturepackRequired: null,
   };
 
   const properties = found.get("server.properties");
   if (properties && !properties.isDir) {
+    layout.serverProperties = join(root, properties.name);
     try {
-      layout.levelName = parseServerProperties(await storage.readText(join(root, properties.name)))["level-name"] || null;
+      const values = parseServerProperties(await storage.readText(layout.serverProperties));
+      layout.levelName = values["level-name"] || null;
+      const required = values["texturepack-required"];
+      layout.texturepackRequired = required === undefined ? null : required.toLowerCase() === "true";
     } catch {
       // unreadable server.properties: no default world, nothing else depends on it
     }
@@ -270,6 +294,25 @@ export class Target {
       levelName: this.layout.levelName,
       packScope: this.packScope,
       notes: [...this.layout.notes],
+      serverProperties: show(this.layout.serverProperties),
+      texturepackRequired: this.layout.texturepackRequired,
     };
+  }
+
+  /** Whether `path` sits inside a folder that holds packs (shared, development, or a world's own). */
+  isInPackFolder(path: string): boolean {
+    const roots = [
+      this.layout.bpDir,
+      this.layout.rpDir,
+      this.layout.devBpDir,
+      this.layout.devRpDir,
+      this.layout.worldsDir,
+      this.layout.singleWorld,
+    ];
+    return roots.some((root) => {
+      if (root === null) return false;
+      const inside = relative(root, path);
+      return !!inside && !isAbsolute(inside) && !inside.split("/").includes("..");
+    });
   }
 }

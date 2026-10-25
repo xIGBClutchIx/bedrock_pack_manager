@@ -109,6 +109,72 @@ describe("install behaviour", () => {
     expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [...version] }]);
   });
 
+  it("replace keeps a shared copy another world still uses", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Test Pack-BP"), { version: [1, 0, 0] });
+    writeWorldJson(join(s.worldDir, "world_behavior_packs.json"), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeWorldJson(join(s.root, "worlds", "Other", "world_behavior_packs.json"), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeManifest(join(src.path, "new"), { version: [2, 0, 0] });
+    const result = await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "new")] });
+    expect(result.plan[0]).toMatchObject({ action: "upload", replaces: [] });
+    expect(result.plan[0]?.warnings.join()).toContain("still used by Other");
+    expect(readdirSync(join(s.root, "behavior_packs")).sort()).toEqual(["Test Pack-BP", "Test Pack-BP_2"]);
+    expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [2, 0, 0] }]);
+  });
+
+  it("replace keeps the copy when another world's pack list cannot be read", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Test Pack-BP"), { version: [1, 0, 0] });
+    writeFile(join(s.root, "worlds", "Other", "world_behavior_packs.json"), "{ broken");
+    writeManifest(join(src.path, "new"), { version: [2, 0, 0] });
+    const result = await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "new")] });
+    expect(result.plan[0]?.replaces).toEqual([]);
+    expect(existsSync(join(s.root, "behavior_packs", "Test Pack-BP"))).toBe(true);
+  });
+
+  it("installs only the newest of two versions in one batch, and warns about downgrades and reused UUIDs", async () => {
+    writeManifest(join(src.path, "v1"), { version: [1, 0, 0] });
+    writeManifest(join(src.path, "v2"), { version: [2, 0, 0] });
+    const batch = await runInstall(s.ctx, {
+      ...options,
+      dryRun: true,
+      world: s.world,
+      sources: [join(src.path, "v1"), join(src.path, "v2")],
+    });
+    expect(batch.plan.map((item) => [item.versionLabel, item.action])).toEqual([
+      ["1.0.0", "skip"],
+      ["2.0.0", "upload"],
+    ]);
+    expect(batch.plan[0]?.reason).toContain("newer version (v2.0.0)");
+
+    writeManifest(join(s.root, "behavior_packs", "Totally Different"), { version: [3, 0, 0], name: "Totally Different" });
+    const older = await runInstall(s.newJob(), { ...options, dryRun: true, world: s.world, sources: [join(src.path, "v1")] });
+    const warnings = older.plan[0]?.warnings.join("\n") ?? "";
+    expect(warnings).toContain("newer version (v3.0.0)");
+    expect(warnings).toContain("same UUID ('Totally Different')");
+  });
+
+  it("still registers a pack when an old copy cannot be removed", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Old"), { version: [1, 0, 0] });
+    writeManifest(join(src.path, "new"), { version: [2, 0, 0] });
+    const storage = s.target.storage;
+    const original = storage.removeTree.bind(storage);
+    storage.removeTree = async (path, opts) => {
+      if (path.endsWith("/Old")) throw new Error("permission denied");
+      return original(path, opts);
+    };
+    const result = await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "new")] });
+    expect(result.stats).toMatchObject({ installed: 1, errors: 0 });
+    expect(s.log.warnings.join()).toContain("Could not remove the old copy");
+    expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [2, 0, 0] }]);
+  });
+
+  it("does not report old script-module UUIDs as missing packs", async () => {
+    writeManifest(join(src.path, "scripted"), {
+      dependencies: [{ uuid: "b26a4d4c-afdf-4690-88f8-931846312678", version: [0, 1, 0] }],
+    });
+    await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "scripted")] });
+    expect(s.log.warnings.join()).not.toContain("b26a4d4c");
+  });
+
   it("never replaces built-in game packs", async () => {
     writeManifest(join(s.root, "behavior_packs", "vanilla_1.21"), { version: [1, 0, 0] });
     writeManifest(join(src.path, "new"), { version: [2, 0, 0] });
@@ -192,6 +258,26 @@ describe("unpacking", () => {
     await prepareSource(join(dir.path, "multi.mcpack"), join(dir.path, "scratch"), log);
     expect(log.warnings.join("\n")).toMatch(/only contains 1 pack.*Behavior Pack/);
     expect(log.warnings.join("\n")).toContain("is a .mcpack but contains 2 packs");
+  });
+
+  it("refuses archives that unpack to too much", async () => {
+    const dir = tempDir();
+    try {
+      const archive = join(dir.path, "bomb.zip");
+      await yazl.zipEntries(archive, [
+        ["big.bin", Buffer.alloc(5000)],
+        ["a.txt", "x"],
+      ]);
+      await expect(extractZip(archive, join(dir.path, "out"), { maxBytes: 1000, maxEntries: 10 })).rejects.toBeInstanceOf(
+        UnsafeArchiveError,
+      );
+      await expect(extractZip(archive, join(dir.path, "out2"), { maxBytes: 10_000, maxEntries: 1 })).rejects.toBeInstanceOf(
+        UnsafeArchiveError,
+      );
+      await extractZip(archive, join(dir.path, "out3"), { maxBytes: 10_000, maxEntries: 10 });
+    } finally {
+      dir.cleanup();
+    }
   });
 
   it("refuses archives that escape the target folder", async () => {

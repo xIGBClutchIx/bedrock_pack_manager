@@ -1,13 +1,13 @@
 /** Audit, rebuild, cleanup and fix-nesting. */
 import type { CleanupResult, FixNestingResult, RebuildResult, WorldStatus } from "../../../shared/model";
 import { CancelledError, throwIfAborted } from "../../storage/errors";
-import { basename, join } from "../../storage/path";
+import { JUNK_NAMES, basename, join } from "../../storage/path";
 import type { CommandContext } from "../install";
 import { info, ok, plain, section, warn } from "../log";
 import { compareVersions, uuidKey } from "../manifests";
 import { PackIndex, versionLabel, type InstalledPack } from "../packIndex";
-import { packVersionKey, registeredKeys, saveWorldJson, type WorldEntry } from "../worlds";
-import { loadWorldPacks, otherWorldsUsing, worldStatus, worldSummaries } from "./status";
+import { WorldJsonError, loadWorldJson, saveWorldJson, type WorldEntry } from "../worlds";
+import { loadWorldPacks, otherWorldsUsing, registrationNeeds, worldStatus, worldSummaries, type WorldJsonCache } from "./status";
 
 export { worldSummaries };
 
@@ -38,7 +38,11 @@ export async function runAudit(ctx: CommandContext, world: string): Promise<Worl
   return status;
 }
 
-/** Overwrite the world JSONs with every pack on the server (newest version of each). */
+/**
+ * Register every pack on the server in the world JSONs (newest version of each). Entries that are
+ * already there keep their place in the list (resource pack priority) and extra fields such as
+ * `subpack`; packs that are no longer on the server are dropped; new ones go after them.
+ */
 export async function runRebuild(ctx: CommandContext, world: string): Promise<RebuildResult> {
   const { target, log } = ctx;
   section(log, "Rebuild world JSONs");
@@ -49,6 +53,14 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
     const newest = new Map<string, InstalledPack>();
     for (const pack of index.ofKind(kind)) {
       if (pack.nested || pack.builtin) continue;
+      if (pack.kind !== kind) {
+        // Skin packs, world templates and packs in the wrong folder would only confuse the game.
+        warn(
+          log,
+          `Left out ${target.describe(pack.path)}: ${pack.kind ? `a ${pack.kind === "bp" ? "behavior" : "resource"} pack in the wrong folder` : "not a behavior or resource pack"}`,
+        );
+        continue;
+      }
       const current = newest.get(uuidKey(pack.uuid));
       if (current) {
         if (versionLabel(current) !== versionLabel(pack))
@@ -60,13 +72,35 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
       }
       newest.set(uuidKey(pack.uuid), pack);
     }
-    const entries: WorldEntry[] = [...newest.values()]
-      .sort((a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase()))
-      .map((pack) => {
-        ok(log, `[${kind.toUpperCase()}] ${pack.name} v${versionLabel(pack)}`);
-        return { pack_id: pack.uuid, version: pack.version };
-      });
-    await saveWorldJson(target.storage, target.worldJson(world, kind), entries);
+
+    const jsonPath = target.worldJson(world, kind);
+    let existing: WorldEntry[] = [];
+    try {
+      existing = await loadWorldJson(target.storage, jsonPath);
+    } catch (error) {
+      if (!(error instanceof WorldJsonError)) throw error;
+      warn(log, `${error.message} - starting it again from the packs on the server`);
+    }
+    const entries: WorldEntry[] = [];
+    const placed = new Set<string>();
+    for (const entry of existing) {
+      const pack = newest.get(uuidKey(entry.pack_id));
+      if (!pack || placed.has(uuidKey(pack.uuid))) {
+        if (!pack && entry.pack_id) info(log, `Dropped ${entry.pack_id}: not on the server`);
+        continue;
+      }
+      placed.add(uuidKey(pack.uuid));
+      entries.push({ ...entry, pack_id: pack.uuid, version: pack.version });
+      ok(log, `[${kind.toUpperCase()}] ${pack.name} v${versionLabel(pack)}`);
+    }
+    const added = [...newest.values()]
+      .filter((pack) => !placed.has(uuidKey(pack.uuid)))
+      .sort((a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase()));
+    for (const pack of added) {
+      entries.push({ pack_id: pack.uuid, version: pack.version });
+      ok(log, `[${kind.toUpperCase()}] ${pack.name} v${versionLabel(pack)} (added)`);
+    }
+    await saveWorldJson(target.storage, jsonPath, entries);
     counts[kind] = entries.length;
   }
   ok(log, `Done. Registered ${counts.bp} behavior pack(s) and ${counts.rp} resource pack(s).`);
@@ -74,25 +108,46 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
   return { behaviorPacks: counts.bp, resourcePacks: counts.rp, status, worlds };
 }
 
-/** Delete pack folders this world does not register and no other world uses. */
-export async function runCleanup(ctx: CommandContext, world: string, dryRun: boolean): Promise<CleanupResult> {
+/**
+ * Delete pack folders that neither this world nor any other needs (see otherWorldsUsing). With `only`,
+ * just those folders (storage paths) are considered.
+ */
+export async function runCleanup(ctx: CommandContext, world: string, dryRun: boolean, only?: string[]): Promise<CleanupResult> {
   const { target, log } = ctx;
   section(log, dryRun ? "Clean up pack folders (preview)" : "Clean up pack folders");
   const [index, worldPacks] = await Promise.all([PackIndex.build(target, world), loadWorldPacks(target, world)]);
-  const registered = { bp: registeredKeys(worldPacks.bp), rp: registeredKeys(worldPacks.rp) };
-  const cache = new Map<string, Set<string>>();
+  const cache: WorldJsonCache = new Map();
+  const wanted = only?.length ? new Set(only) : null;
   const deleted: string[] = [];
   const kept: string[] = [];
+  const keep = (pack: InstalledPack, reason: string) => {
+    kept.push(target.describe(pack.path));
+    info(log, `Kept ${target.describe(pack.path)}: ${reason}`);
+  };
 
   for (const pack of [...index.packs]) {
     throwIfAborted(ctx.signal);
+    if (wanted && !wanted.has(pack.path)) continue;
     // Never touch development copies, the game's own packs, or packs in folders the server ignores.
-    if (pack.scope === "dev" || pack.nested || pack.builtin) continue;
-    if (registered[pack.dirKind].has(packVersionKey(pack.uuid, pack.version))) continue;
-    const others = pack.scope === "shared" ? await otherWorldsUsing(target, world, pack.dirKind, pack.uuid, pack.version, cache) : [];
+    if (pack.builtin) {
+      if (wanted) keep(pack, "a built-in game pack");
+      continue;
+    }
+    if (pack.scope === "dev") {
+      if (wanted) keep(pack, "a development pack");
+      continue;
+    }
+    if (pack.nested) {
+      if (wanted) keep(pack, "nested inside another folder - fix the nesting first");
+      continue;
+    }
+    if (registrationNeeds(worldPacks[pack.dirKind], pack.dirKind, pack, index)) {
+      if (wanted) keep(pack, "this world uses it");
+      continue;
+    }
+    const others = pack.scope === "shared" ? await otherWorldsUsing(target, world, pack.dirKind, pack, cache, index) : [];
     if (others.length) {
-      kept.push(target.describe(pack.path));
-      info(log, `Kept ${target.describe(pack.path)} because it is still used by: ${others.join(", ")}`);
+      keep(pack, `still used by ${others.join(", ")}`);
       continue;
     }
     if (dryRun) {
@@ -110,8 +165,8 @@ export async function runCleanup(ctx: CommandContext, world: string, dryRun: boo
       warn(log, `Could not delete ${target.describe(pack.path)}: ${(error as Error).message}`);
     }
   }
-  if (!deleted.length) ok(log, "No unregistered pack folders to delete.");
-  else ok(log, `${dryRun ? "Would delete" : "Deleted"} ${deleted.length} unregistered pack folder(s).`);
+  if (!deleted.length) ok(log, "No unused pack folders to delete.");
+  else ok(log, `${dryRun ? "Would delete" : "Deleted"} ${deleted.length} unused pack folder(s).`);
   return { deleted, kept, dryRun, status: dryRun ? undefined : await worldStatus(target, world, index) };
 }
 
@@ -128,9 +183,12 @@ export async function runFixNesting(ctx: CommandContext, world: string, paths: s
     throwIfAborted(ctx.signal);
     const wrapper = pack.path.slice(0, pack.path.lastIndexOf("/"));
     const names = new Set((await target.storage.listDir(pack.packDir)).map((entry) => entry.name.toLowerCase()));
+    // The wrapper goes away only when the pack is all it holds; only then is its name free.
+    const others = (await target.storage.listDir(wrapper)).filter(
+      (entry) => entry.name !== basename(pack.path) && !JUNK_NAMES.has(entry.name),
+    );
+    if (!others.length) names.delete(basename(wrapper).toLowerCase());
     let name = basename(pack.path);
-    // The wrapper itself goes away, so its name is free unless the pack keeps it.
-    names.delete(basename(wrapper).toLowerCase());
     for (let counter = 2; names.has(name.toLowerCase()); counter++) name = `${basename(pack.path)}_${counter}`;
     const destination = join(pack.packDir, name);
     moves.push({ from: target.describe(pack.path), to: target.describe(destination) });
@@ -141,9 +199,8 @@ export async function runFixNesting(ctx: CommandContext, world: string, paths: s
     // Move out to a temporary name first: the destination may be the wrapper's own name.
     const temp = join(pack.packDir, `${name}.bpm-move`);
     await target.storage.rename(pack.path, temp);
-    const leftovers = await target.storage.listDir(wrapper).catch(() => []);
-    if (!leftovers.length) await target.storage.removeTree(wrapper);
-    else info(log, `Left ${target.describe(wrapper)} in place: it still holds ${leftovers.length} other item(s)`);
+    if (!others.length) await target.storage.removeTree(wrapper);
+    else info(log, `Left ${target.describe(wrapper)} in place: it still holds ${others.length} other item(s)`);
     await target.storage.rename(temp, destination);
     ok(log, `Moved ${basename(pack.path)} up to ${target.describe(destination)}`);
   }

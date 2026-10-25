@@ -27,12 +27,14 @@ export class Session {
     return this.target;
   }
 
+  /** A world the layout knows about. Anything else (a typo, "", "/", "../..") is refused, never written to. */
   async requireWorld(world: unknown): Promise<string> {
-    const target = this.requireTarget();
+    this.requireTarget();
     const path = typeof world === "string" ? world : "";
-    if (!this.worlds.some((summary) => summary.path === path) && !(await target.storage.isDir(path))) {
-      throw new JobFailure(`World '${path}' was not found`, ERROR_CODES.worldMissing);
-    }
+    const known = () => !!path && this.worlds.some((summary) => summary.path === path);
+    // The world may have been created since the last scan.
+    if (path && !known()) await this.refreshWorlds();
+    if (!known()) throw new JobFailure(`World '${path}' was not found`, ERROR_CODES.worldMissing);
     return path;
   }
 
@@ -75,8 +77,12 @@ export class Session {
 
   async refreshWorlds(worlds?: WorldSummary[]): Promise<void> {
     const target = this.requireTarget();
-    this.worlds = worlds ?? (await worldSummaries(target));
-    this.defaultWorld = await target.defaultWorld(this.worlds.map((world) => world.path));
+    const next = worlds ?? (await worldSummaries(target));
+    const defaultWorld = await target.defaultWorld(next.map((world) => world.path));
+    // A scan that outlived its connection (cancelled, or replaced by a new one) must not overwrite the new state.
+    if (this.target !== target) return;
+    this.worlds = next;
+    this.defaultWorld = defaultWorld;
   }
 
   async disconnect(): Promise<void> {

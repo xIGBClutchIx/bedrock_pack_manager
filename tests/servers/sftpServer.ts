@@ -5,6 +5,7 @@
 import {
   closeSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
@@ -38,7 +39,14 @@ export interface SftpTestServer {
   close(): Promise<void>;
 }
 
-const HOST_KEY = utils.generateKeyPairSync("ed25519");
+/** ssh2 now and then generates an ed25519 key it cannot parse back; keep the first one it can. */
+function makeHostKey(): ReturnType<typeof utils.generateKeyPairSync> {
+  for (;;) {
+    const key = utils.generateKeyPairSync("ed25519");
+    if (!(utils.parseKey(key.private) instanceof Error)) return key;
+  }
+}
+const HOST_KEY = makeHostKey();
 
 function toAttrs(stats: Stats): Attributes {
   return {
@@ -59,6 +67,12 @@ export interface SftpServerOptions {
   oneSessionAtATime?: boolean;
   /** Never answer session channels at all. */
   ignoreSessions?: boolean;
+  /** Answer reads with at most this many bytes, as some servers do. */
+  maxReadBytes?: number;
+  /** Listen here instead of on a free port. */
+  port?: number;
+  /** A fixed private host key (OpenSSH format) instead of the per-run one, so clients can keep trusting it. */
+  hostKey?: string | Buffer;
 }
 
 export async function startSftpServer(root: string, options: SftpServerOptions = {}): Promise<SftpTestServer> {
@@ -70,7 +84,8 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
   const local = (path: string) => join(root, path.replace(/^\/+/, ""));
 
   const clients = new Set<Connection>();
-  const server = new Server({ hostKeys: [HOST_KEY.private] }, (client) => {
+  const privateKey = options.hostKey ?? HOST_KEY.private;
+  const server = new Server({ hostKeys: [privateKey] }, (client) => {
     clients.add(client);
     client.on("close", () => clients.delete(client));
     let sessions = 0;
@@ -158,7 +173,8 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
             const names = readdirSync(local(entry.path)).map((name) => ({
               filename: name,
               longname: name,
-              attrs: toAttrs(statSync(join(local(entry.path), name))),
+              // Like OpenSSH, listings describe a symlink itself, not what it points at.
+              attrs: toAttrs(lstatSync(join(local(entry.path), name))),
             }));
             if (!names.length) return sftp.status(reqid, STATUS_CODE.EOF);
             sftp.name(reqid, names);
@@ -166,7 +182,7 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
         ),
       )
       .on("STAT", (reqid, path) => later("STAT", () => guarded(reqid, () => sftp.attrs(reqid, toAttrs(statSync(local(path)))))))
-      .on("LSTAT", (reqid, path) => later("LSTAT", () => guarded(reqid, () => sftp.attrs(reqid, toAttrs(statSync(local(path)))))))
+      .on("LSTAT", (reqid, path) => later("LSTAT", () => guarded(reqid, () => sftp.attrs(reqid, toAttrs(lstatSync(local(path)))))))
       .on("OPEN", (reqid, filename, flags) =>
         later("OPEN", () =>
           guarded(reqid, () =>
@@ -188,8 +204,9 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
           guarded(reqid, () => {
             const entry = lookup(handle);
             if (!entry || entry.type !== "file") return sftp.status(reqid, STATUS_CODE.FAILURE);
-            const buffer = Buffer.alloc(length);
-            const read = readSync(entry.fd, buffer, 0, length, offset);
+            const wanted = Math.min(length, options.maxReadBytes ?? length);
+            const buffer = Buffer.alloc(wanted);
+            const read = readSync(entry.fd, buffer, 0, wanted, offset);
             if (!read) return sftp.status(reqid, STATUS_CODE.EOF);
             sftp.data(reqid, buffer.subarray(0, read));
           }),
@@ -222,7 +239,16 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
         later("RMDIR", () => guarded(reqid, () => (rmdirSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))),
       )
       .on("REMOVE", (reqid, path) =>
-        later("REMOVE", () => guarded(reqid, () => (unlinkSync(local(path)), sftp.status(reqid, STATUS_CODE.OK)))),
+        later("REMOVE", () =>
+          guarded(reqid, () => {
+            // Removing a link removes the link. (Windows keeps folder links as junctions, which need rmdir.)
+            const stats = lstatSync(local(path));
+            if (stats.isSymbolicLink() && process.platform === "win32" && statSync(local(path), { throwIfNoEntry: false })?.isDirectory())
+              rmdirSync(local(path));
+            else unlinkSync(local(path));
+            sftp.status(reqid, STATUS_CODE.OK);
+          }),
+        ),
       )
       .on("RENAME", (reqid, from, to) =>
         later("RENAME", () =>
@@ -238,9 +264,9 @@ export async function startSftpServer(root: string, options: SftpServerOptions =
       .on("FSETSTAT", (reqid) => later("FSETSTAT", () => sftp.status(reqid, STATUS_CODE.OK)));
   }
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  const publicKey = utils.parseKey(HOST_KEY.public);
+  const publicKey = utils.parseKey(privateKey);
   const hostKey = Array.isArray(publicKey) ? publicKey[0]!.getPublicSSH() : (publicKey as { getPublicSSH(): Buffer }).getPublicSSH();
   return {
     host: "127.0.0.1",

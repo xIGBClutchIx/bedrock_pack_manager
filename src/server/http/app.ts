@@ -3,8 +3,8 @@
  * a loopback Host header, so other websites open in the browser cannot drive it.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createWriteStream, existsSync, readFileSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { createWriteStream, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -18,24 +18,41 @@ import type {
   InstallRequest,
   LayoutRequest,
   SaveProfileRequest,
+  ServerPropertiesRequest,
   StatusRequest,
   UninstallRequest,
   WorldEditRequest,
+  WorldPacksRequest,
 } from "../../shared/api";
 import { ROUTES, TOKEN_HEADER } from "../../shared/api";
 import { ERROR_CODES, type LogLevel } from "../../shared/events";
-import type { ConnectResult, DuplicateMode, Gamemode, LayoutOverrides, UploadEntry } from "../../shared/model";
+import type {
+  BrowseResult,
+  ConnectResult,
+  DuplicateMode,
+  Gamemode,
+  LayoutOverrides,
+  PackKind,
+  UploadEntry,
+  Version,
+  WorldPackChange,
+} from "../../shared/model";
 import { GAMEMODES, PROTOCOLS, publicSettings } from "../../shared/model";
 import type { AppPaths } from "../app/paths";
-import { ProfileStore } from "../app/profiles";
+import { ProfileStore, cleanProfileSettings } from "../app/profiles";
 import { backupFileName, runBackup } from "../core/commands/backup";
 import { runAudit, runCleanup, runFixNesting, runRebuild } from "../core/commands/maintenance";
 import { worldStatus } from "../core/commands/status";
 import { runUninstall } from "../core/commands/uninstall";
 import { runWorldEdit } from "../core/commands/worldEdit";
+import { runWorldPacks } from "../core/commands/worldPacks";
 import { runInstall, type CommandContext } from "../core/install";
+import { setServerProperty } from "../core/layout";
+import { warn } from "../core/log";
 import { BusyError, JobFailure, JobRunner, type Job } from "../jobs/runner";
-import { JUNK_NAMES } from "../storage/path";
+import { isNotFound } from "../storage/errors";
+import { KnownHosts } from "../storage/knownHosts";
+import { JUNK_NAMES, join as joinStorage, parent as parentStorage } from "../storage/path";
 import { Session, mapJobError } from "./session";
 
 export interface AppOptions {
@@ -49,6 +66,8 @@ export interface AppOptions {
   extraHosts?: string[];
   /** Mirror of every job log line, for run/logs. */
   onLog?: (level: LogLevel, text: string) => void;
+  /** Offer the local demo server (`npm run demo`) on the connect page. */
+  testServer?: boolean;
 }
 
 export interface App {
@@ -78,11 +97,35 @@ export function safeRelative(path: string): string | null {
     .replaceAll("\\", "/")
     .split("/")
     .filter((part) => part && part !== ".");
-  if (!parts.length || parts.some((part) => part === ".." || part.includes(":") || part.includes("\0"))) return null;
+  if (!parts.length || parts.some((part) => part === ".." || part.includes(":") || part.includes("\0") || !windowsSafe(part))) return null;
   return parts.join("/");
 }
 
+/** Windows treats device names (CON, NUL.txt, COM1...) specially and silently drops trailing dots and spaces. */
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\..*)?$/i;
+export const windowsSafe = (part: string, platform: string = process.platform) =>
+  platform !== "win32" || (!WINDOWS_DEVICE.test(part) && !/[. ]$/.test(part));
+
 const str = (value: unknown) => (typeof value === "string" ? value : "");
+
+/** decodeURIComponent that answers null instead of throwing on a bad `%`. */
+export function safeDecode(text: string): string | null {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a request reaches the API, however its path is spelled. */
+function isApiRequest(request: FastifyRequest): boolean {
+  const route = request.routeOptions.url ?? "";
+  if (route.startsWith("/api/")) return true;
+  const path = request.url.split("?")[0]!;
+  // An undecodable path never reaches a route; treat it as API so it needs the token too.
+  const decoded = safeDecode(path);
+  return decoded === null || decoded.toLowerCase().startsWith("/api/") || path.toLowerCase().startsWith("/api/");
+}
 
 function cleanOverrides(raw: unknown): LayoutOverrides {
   const data = (raw ?? {}) as Record<string, unknown>;
@@ -96,6 +139,27 @@ function cleanOverrides(raw: unknown): LayoutOverrides {
   };
 }
 
+const isVersion = (value: unknown): value is Version =>
+  Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "number" || typeof part === "string");
+const isKind = (value: unknown): value is PackKind => value === "bp" || value === "rp";
+
+/** Keep only well-formed world pack changes. */
+export function cleanWorldPackChanges(raw: unknown): WorldPackChange[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item: Record<string, unknown>): WorldPackChange[] => {
+    const uuid = str(item?.uuid).trim();
+    if (item?.type === "register" && isKind(item.kind) && uuid && isVersion(item.version)) {
+      const worlds = Array.isArray(item.worlds) ? item.worlds.filter((world): world is string => typeof world === "string") : undefined;
+      return [{ type: "register", kind: item.kind, uuid, version: item.version, ...(worlds?.length ? { worlds } : {}) }];
+    }
+    if (item?.type === "order" && isKind(item.kind) && Array.isArray(item.uuids))
+      return [{ type: "order", kind: item.kind, uuids: item.uuids.filter((id): id is string => typeof id === "string") }];
+    if (item?.type === "subpack" && uuid && (item.subpack === null || typeof item.subpack === "string"))
+      return [{ type: "subpack", uuid, subpack: item.subpack ? String(item.subpack) : null }];
+    return [];
+  });
+}
+
 export function createApp(options: AppOptions): App {
   const { paths } = options;
   const token = options.token ?? randomBytes(24).toString("base64url");
@@ -103,6 +167,7 @@ export function createApp(options: AppOptions): App {
   const session = new Session(paths);
   const runner = new JobRunner(options.onLog);
   const profiles = new ProfileStore(paths.profilesFile);
+  const knownHosts = new KnownHosts(paths.knownHostsFile);
   const allowedHosts = new Set<string>(options.extraHosts ?? []);
   const fastify = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
@@ -123,7 +188,13 @@ export function createApp(options: AppOptions): App {
   fastify.addHook("onRequest", async (request, reply) => {
     const host = str(request.headers.host).toLowerCase();
     if (!allowedHosts.has(host)) return reply.code(403).send({ error: "Bad Host header", code: "bad_host" });
-    if (request.url.startsWith("/api/") && !tokenOk(request)) {
+    // Browsers send Origin on cross-site requests; only our own pages may call in.
+    const origin = str(request.headers.origin).toLowerCase();
+    if (origin && !allowedHosts.has(origin.replace(/^https?:\/\//, ""))) {
+      return reply.code(403).send({ error: "Cross-site request refused", code: "bad_origin" });
+    }
+    // Check the matched route as well as the decoded path: Fastify decodes "/%61pi/..." before routing.
+    if (isApiRequest(request) && !tokenOk(request)) {
       return reply.code(403).send({ error: "Missing or wrong token. Open the link printed when the app started.", code: "bad_token" });
     }
     reply.header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").header("Referrer-Policy", "no-referrer");
@@ -161,6 +232,7 @@ export function createApp(options: AppOptions): App {
       activeJob: runner.busy ? runner.active!.info() : null,
       uploads: await listUploads(),
       profiles: profiles.list(),
+      testServer: !!options.testServer,
     };
   });
 
@@ -177,7 +249,6 @@ export function createApp(options: AppOptions): App {
       keyFile: str(settings.keyFile).trim() || undefined,
       keyPassphrase: str(settings.keyPassphrase) || undefined,
       tlsVerify: settings.tlsVerify !== false,
-      passive: settings.passive !== false,
       trustedFingerprint: str(settings.trustedFingerprint).trim() || undefined,
     };
     const where = clean.protocol === "local" ? clean.root || "run/" : clean.host;
@@ -234,6 +305,7 @@ export function createApp(options: AppOptions): App {
     const input = body<InstallRequest>(request);
     const mode: DuplicateMode = input.duplicateMode === "skip" || input.duplicateMode === "keep-both" ? input.duplicateMode : "replace";
     session.requireTarget();
+    if (uploadsInFlight > 0) throw new JobFailure("Files are still uploading - wait for them to finish", ERROR_CODES.busy);
     const sources = (await readdir(paths.uploadsDir))
       .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
       .map((name) => join(paths.uploadsDir, name));
@@ -278,12 +350,54 @@ export function createApp(options: AppOptions): App {
   });
 
   fastify.post(ROUTES.cleanup, async (request, reply) => {
-    const { world, dryRun } = body<CleanupRequest>(request);
+    const { world, dryRun, paths: picked } = body<CleanupRequest>(request);
     session.requireTarget();
-    return startJob(reply, "cleanup", dryRun ? "Previewing cleanup" : "Cleaning up", async (job) => {
+    const only = Array.isArray(picked) ? picked.filter((path): path is string => typeof path === "string") : undefined;
+    return startJob(
+      reply,
+      "cleanup",
+      dryRun ? "Previewing cleanup" : only?.length ? "Deleting pack folders" : "Cleaning up",
+      async (job) => {
+        const ctx = context(job);
+        ctx.target.storage.clearCache();
+        return runCleanup(ctx, await session.requireWorld(world), !!dryRun, only);
+      },
+    );
+  });
+
+  fastify.post(ROUTES.worldPacks, async (request, reply) => {
+    const { world, changes } = body<WorldPacksRequest>(request);
+    session.requireTarget();
+    const clean = cleanWorldPackChanges(changes);
+    if (!clean.length) throw new JobFailure("Nothing to change", ERROR_CODES.nothingSelected);
+    return startJob(reply, "world-packs", "Updating world packs", async (job) => {
       const ctx = context(job);
       ctx.target.storage.clearCache();
-      return runCleanup(ctx, await session.requireWorld(world), !!dryRun);
+      const path = await session.requireWorld(world);
+      for (const change of clean) {
+        if (change.type === "register" && change.worlds)
+          change.worlds = await Promise.all(change.worlds.map((other) => session.requireWorld(other)));
+      }
+      const result = await runWorldPacks(ctx, path, clean);
+      await session.refreshWorlds(result.worlds);
+      return result;
+    });
+  });
+
+  fastify.post(ROUTES.serverProperties, async (request, reply) => {
+    const { texturepackRequired } = body<ServerPropertiesRequest>(request);
+    if (typeof texturepackRequired !== "boolean") throw new JobFailure("texturepackRequired must be true or false", ERROR_CODES.badRequest);
+    const target = session.requireTarget();
+    if (!target.layout.serverProperties) throw new JobFailure("This server has no server.properties", ERROR_CODES.badRequest);
+    return startJob(reply, "server-properties", "Saving server.properties", async (job): Promise<ConnectResult> => {
+      const path = target.layout.serverProperties!;
+      target.storage.clearCache();
+      const before = await target.storage.readText(path);
+      await target.storage.writeText(path, setServerProperty(before, "texturepack-required", String(texturepackRequired)));
+      job.log("ok", `texturepack-required=${texturepackRequired} in ${target.describe(path)}`);
+      warn(job, "Restart the server for this to take effect");
+      const next = await session.relayout(session.overrides);
+      return { label: next.label, layout: next.layoutInfo(), worlds: session.worlds, defaultWorld: session.defaultWorld };
     });
   });
 
@@ -309,11 +423,16 @@ export function createApp(options: AppOptions): App {
   });
 
   fastify.post(ROUTES.worldEdit, async (request, reply) => {
-    const { world, beta, gamemode } = body<WorldEditRequest>(request);
+    const { world, experiments, gamemode } = body<WorldEditRequest>(request);
     if (gamemode && !GAMEMODES.includes(gamemode)) throw new JobFailure(`Unknown gamemode ${gamemode}`, ERROR_CODES.badRequest);
+    const toggles = Object.fromEntries(
+      Object.entries(experiments && typeof experiments === "object" ? experiments : {}).filter(
+        (pair): pair is [string, boolean] => /^[a-z0-9_]+$/.test(pair[0]) && typeof pair[1] === "boolean",
+      ),
+    );
     session.requireTarget();
     return startJob(reply, "world-edit", "Saving world settings", async (job) =>
-      runWorldEdit(context(job), await session.requireWorld(world), { beta: !!beta, gamemode: (gamemode as Gamemode) || null }),
+      runWorldEdit(context(job), await session.requireWorld(world), { experiments: toggles, gamemode: (gamemode as Gamemode) || null }),
     );
   });
 
@@ -338,16 +457,34 @@ export function createApp(options: AppOptions): App {
       mapJobError,
     );
     reply.hijack();
+    // The browser stopping the download (or the tab closing) cancels the backup instead of reading on.
+    const onClose = () => {
+      if (!reply.raw.writableFinished) runner.cancel(job.id);
+    };
+    reply.raw.on("close", onClose);
     await job.promise;
-    if (job.status !== "done" && !reply.raw.headersSent) {
+    reply.raw.off("close", onClose);
+    if (job.status === "done") {
+      if (!reply.raw.writableEnded) reply.raw.end();
+    } else if (!reply.raw.headersSent) {
       reply.raw.writeHead(500, { "Content-Type": "application/json" });
       reply.raw.end(JSON.stringify({ error: job.error, code: job.errorCode }));
-    } else if (!reply.raw.writableEnded) {
-      reply.raw.end();
+    } else {
+      // Part of the zip is already sent: break the connection so the browser marks the download failed
+      // instead of saving a truncated archive that looks complete.
+      reply.raw.destroy(new Error(job.error ?? "Backup failed"));
     }
   });
 
   // ---- jobs ---------------------------------------------------------------------------------------
+
+  fastify.get(ROUTES.jobs, async () => ({ jobs: runner.list() }));
+
+  fastify.get("/api/jobs/:id/log", async (request, reply) => {
+    const job = runner.get((request.params as { id: string }).id);
+    if (!job) return reply.code(404).send({ error: "Unknown job", code: "not_found" });
+    return reply.header("Content-Type", "text/plain; charset=utf-8").send(job.logText());
+  });
 
   fastify.get("/api/jobs/:id", async (request, reply) => {
     const job = runner.get((request.params as { id: string }).id);
@@ -379,20 +516,35 @@ export function createApp(options: AppOptions): App {
 
   // ---- uploads ------------------------------------------------------------------------------------
 
+  /** Files and bytes under a staged folder, read without blocking the server. */
+  async function folderSize(folder: string): Promise<{ files: number; size: number }> {
+    const entries = await readdir(folder, { recursive: true, withFileTypes: true });
+    const files = entries.filter((entry) => entry.isFile());
+    const sizes = await Promise.all(
+      files.map((file) =>
+        stat(join(file.parentPath, file.name)).then(
+          (info) => info.size,
+          () => 0,
+        ),
+      ),
+    );
+    return { files: files.length, size: sizes.reduce((sum, size) => sum + size, 0) };
+  }
+
   async function listUploads(): Promise<UploadEntry[]> {
-    const entries: UploadEntry[] = [];
-    for (const name of (await readdir(paths.uploadsDir).catch(() => [])).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))) {
-      const full = join(paths.uploadsDir, name);
-      const info = await stat(full);
-      if (info.isDirectory()) {
-        const files = (readdirSync(full, { recursive: true, withFileTypes: true }) as Dirent[]).filter((entry) => entry.isFile());
-        const size = files.reduce((sum, file) => sum + statSync(join(file.parentPath, file.name)).size, 0);
-        entries.push({ name, isDir: true, files: files.length, size });
-      } else {
-        entries.push({ name, isDir: false, files: 1, size: info.size });
-      }
-    }
-    return entries;
+    const names = (await readdir(paths.uploadsDir).catch(() => [] as string[])).sort((a, b) =>
+      a.toLowerCase().localeCompare(b.toLowerCase()),
+    );
+    const entries = await Promise.all(
+      names.map(async (name): Promise<UploadEntry | null> => {
+        const full = join(paths.uploadsDir, name);
+        const info = await stat(full).catch(() => null);
+        if (!info) return null;
+        if (!info.isDirectory()) return { name, isDir: false, files: 1, size: info.size };
+        return { name, isDir: true, ...(await folderSize(full)) };
+      }),
+    );
+    return entries.filter((entry): entry is UploadEntry => entry !== null);
   }
 
   async function clearUploads(name?: string): Promise<void> {
@@ -402,15 +554,18 @@ export function createApp(options: AppOptions): App {
       await rm(join(paths.uploadsDir, relative), { recursive: true, force: true });
       return;
     }
-    rmSync(paths.uploadsDir, { recursive: true, force: true });
+    await rm(paths.uploadsDir, { recursive: true, force: true });
     await mkdir(paths.uploadsDir, { recursive: true });
   }
+
+  /** Uploads still being written; an install waits for them, since it reads (and then clears) the same folder. */
+  let uploadsInFlight = 0;
+  const installRunning = () => runner.busy && runner.active?.kind === "install";
 
   fastify.get(ROUTES.uploads, async () => ({ uploads: await listUploads() }));
 
   fastify.put(ROUTES.uploads, async (request, reply) => {
-    if (runner.busy && runner.active?.kind === "install")
-      return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
+    if (installRunning()) return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
     const relative = safeRelative(str((request.query as Record<string, unknown>).path));
     if (!relative || relative.split("/").some((part) => JUNK_NAMES.has(part))) {
       if (relative) {
@@ -422,16 +577,74 @@ export function createApp(options: AppOptions): App {
     const destination = resolve(paths.uploadsDir, relative);
     if (!destination.startsWith(resolve(paths.uploadsDir) + sep))
       return reply.code(400).send({ error: "Bad upload path", code: ERROR_CODES.badRequest });
-    await mkdir(dirname(destination), { recursive: true });
-    await pipeline(request.raw, createWriteStream(destination));
+    uploadsInFlight++;
+    try {
+      await mkdir(dirname(destination), { recursive: true });
+      await pipeline(request.raw, createWriteStream(destination));
+    } catch (error) {
+      // An aborted upload must not leave half a file for the next install to pick up.
+      await rm(destination, { force: true }).catch(() => undefined);
+      throw error;
+    } finally {
+      uploadsInFlight--;
+    }
     return { ok: true };
   });
 
   fastify.delete(ROUTES.uploads, async (request, reply) => {
-    if (runner.busy && runner.active?.kind === "install")
-      return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
+    if (installRunning()) return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
     await clearUploads(str((request.query as Record<string, unknown>).name) || undefined);
     return { uploads: await listUploads() };
+  });
+
+  // ---- server files, host keys and logs -----------------------------------------------------------
+
+  /** Folders under a path on the connected server, for picking layout folders. */
+  fastify.get(ROUTES.browse, async (request, reply): Promise<BrowseResult | undefined> => {
+    const target = session.requireTarget();
+    const path = joinStorage(str((request.query as Record<string, unknown>).path));
+    try {
+      const entries = await target.storage.listDir(path);
+      return {
+        path,
+        display: target.describe(path),
+        parent: path && path !== "/" ? parentStorage(path) : null,
+        dirs: entries.filter((entry) => entry.isDir && !JUNK_NAMES.has(entry.name)).map((entry) => entry.name),
+      };
+    } catch (error) {
+      if (isNotFound(error)) return reply.code(404).send({ error: `${target.describe(path)} does not exist`, code: "not_found" });
+      throw error;
+    }
+  });
+
+  /** A pack's pack_icon.png. Only pack folders are readable this way, and only that one file. */
+  fastify.get(ROUTES.packIcon, async (request, reply) => {
+    const target = session.requireTarget();
+    const path = str((request.query as Record<string, unknown>).path);
+    if (!path || !target.isInPackFolder(path)) return reply.code(400).send({ error: "Not a pack folder", code: ERROR_CODES.badRequest });
+    // For a pack without a usable icon, answer "no content" (not an error the browser logs); the UI draws a tile.
+    reply.header("Cache-Control", "private, max-age=600");
+    const file = await target.storage.findChild(path, "pack_icon.png", "file");
+    const data = file ? await target.storage.readFile(file).catch(() => null) : null;
+    const png =
+      data && data.length <= 2 * 1024 * 1024 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if (!png) return reply.code(204).send();
+    return reply.header("Content-Type", "image/png").send(data);
+  });
+
+  fastify.get(ROUTES.knownHosts, async () => ({ hosts: knownHosts.list() }));
+  fastify.delete(ROUTES.knownHosts, async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const removed = knownHosts.forget(str(query.host).trim(), Number(query.port) || 22);
+    return { removed, hosts: knownHosts.list() };
+  });
+
+  fastify.get(ROUTES.appLog, async (_request, reply) => {
+    const text = await readFile(join(paths.logsDir, "latest.txt"), "utf8").catch(() => "");
+    return reply
+      .header("Content-Type", "text/plain; charset=utf-8")
+      .header("Content-Disposition", 'attachment; filename="bedrock-pack-manager-log.txt"')
+      .send(text);
   });
 
   // ---- profiles -----------------------------------------------------------------------------------
@@ -440,9 +653,9 @@ export function createApp(options: AppOptions): App {
   fastify.post(ROUTES.profiles, async (request, reply) => {
     const input = body<SaveProfileRequest>(request);
     const name = str(input.name).trim();
-    if (!name || !input.settings)
-      return reply.code(400).send({ error: "A profile needs a name and settings", code: ERROR_CODES.badRequest });
-    return { profiles: profiles.save(name, input.settings, cleanOverrides(input.layout)) };
+    const settings = cleanProfileSettings(input.settings);
+    if (!name || !settings) return reply.code(400).send({ error: "A profile needs a name and settings", code: ERROR_CODES.badRequest });
+    return { profiles: profiles.save(name, settings, cleanOverrides(input.layout)) };
   });
   fastify.delete(ROUTES.profiles, async (request) => ({ profiles: profiles.delete(str((request.query as Record<string, unknown>).name)) }));
 
@@ -457,9 +670,10 @@ export function createApp(options: AppOptions): App {
   };
 
   fastify.get("/*", async (request, reply) => {
-    const path = request.url.split("?")[0]!;
+    const path = safeDecode(request.url.split("?")[0]!);
+    if (path === null) return reply.code(400).send({ error: "Bad URL", code: ERROR_CODES.badRequest });
     if (path.startsWith("/api/")) return reply.code(404).send({ error: "Not found", code: "not_found" });
-    const relative = safeRelative(decodeURIComponent(path)) ?? "index.html";
+    const relative = safeRelative(path) ?? "index.html";
     let file = readStatic(relative);
     let served = relative;
     if (!file && !extname(relative)) {

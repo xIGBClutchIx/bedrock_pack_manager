@@ -49,7 +49,9 @@ export function classifyPack(manifest: Manifest): PackKind | null {
 
 /** Manifests use [1, 0, 0]; some newer ones use "1.0.0". World JSONs want the list. */
 export function normalizeVersion(version: unknown): Version {
-  if (Array.isArray(version)) return version.map((part) => (typeof part === "number" ? part : String(part)));
+  // ["1", "0", "0"] is the same version as [1, 0, 0].
+  if (Array.isArray(version))
+    return version.map((part) => (typeof part === "number" ? part : /^\d+$/.test(String(part)) ? Number(part) : String(part)));
   if (typeof version === "string") {
     const parts = version
       .split(/[.+-]/)
@@ -79,10 +81,62 @@ export function getPackInfo(manifest: Manifest): PackInfo {
   };
 }
 
+/**
+ * Script modules that older manifests (before `module_name`) depended on by UUID. They ship with the
+ * game, so they are never "missing packs".
+ */
+export const LEGACY_SCRIPT_MODULE_UUIDS = new Set([
+  "b26a4d4c-afdf-4690-88f8-931846312678", // mojang-minecraft
+  "6f4b6893-1bb6-42fd-b458-7fa3d0c89616", // mojang-gametest
+]);
+
 /** Pack-to-pack dependencies (script modules such as @minecraft/server are not packs). */
 export function getDependencies(manifest: Manifest): Dependency[] {
   const dependencies = Array.isArray(manifest.dependencies) ? manifest.dependencies : [];
-  return dependencies.map(asRecord).filter((dep) => typeof dep.uuid === "string" && !("module_name" in dep)) as Dependency[];
+  return dependencies
+    .map(asRecord)
+    .filter(
+      (dep) => typeof dep.uuid === "string" && !("module_name" in dep) && !LEGACY_SCRIPT_MODULE_UUIDS.has(uuidKey(dep.uuid)),
+    ) as Dependency[];
+}
+
+/** Script modules (`module_name` dependencies such as @minecraft/server) a pack needs from the game. */
+export function getModuleDependencies(manifest: Manifest): { moduleName: string; version: string }[] {
+  const dependencies = Array.isArray(manifest.dependencies) ? manifest.dependencies : [];
+  return dependencies
+    .map(asRecord)
+    .filter((dep) => typeof dep.module_name === "string")
+    .map((dep) => ({ moduleName: String(dep.module_name), version: formatAnyVersion(dep.version) }));
+}
+
+const formatAnyVersion = (version: unknown) => (Array.isArray(version) ? version.join(".") : String(version ?? "?"));
+
+export interface PackDetails {
+  description: string;
+  authors: string[];
+  minEngineVersion: string | null;
+  subpacks: { folder: string; name: string }[];
+}
+
+/** What the UI shows about a pack beyond its name and version. */
+export function getPackDetails(manifest: Manifest): PackDetails {
+  const header = asRecord(manifest.header);
+  const metadata = asRecord(manifest.metadata);
+  const authors = Array.isArray(metadata.authors)
+    ? metadata.authors.map(String)
+    : typeof metadata.authors === "string"
+      ? [metadata.authors]
+      : [];
+  const subpacks = (Array.isArray(manifest.subpacks) ? manifest.subpacks : [])
+    .map(asRecord)
+    .filter((subpack) => typeof subpack.folder_name === "string")
+    .map((subpack) => ({ folder: String(subpack.folder_name), name: stripFormatting(String(subpack.name ?? subpack.folder_name)) }));
+  return {
+    description: stripFormatting(String(header.description ?? "")).trim(),
+    authors: authors.map(stripFormatting),
+    minEngineVersion: header.min_engine_version === undefined ? null : formatAnyVersion(header.min_engine_version),
+    subpacks,
+  };
 }
 
 export function usesBetaApis(manifest: Manifest): boolean {
@@ -96,7 +150,7 @@ export const uuidKey = (uuid: unknown): string =>
     .toLowerCase();
 
 export function versionsEqual(a: Version | unknown, b: Version | unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(normalizeVersion(a)) === JSON.stringify(normalizeVersion(b));
 }
 
 /** Sort key where numbers compare numerically and text parts sort before them. */

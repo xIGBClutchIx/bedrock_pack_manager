@@ -3,10 +3,10 @@ import type { DuplicateMode, PlanItem } from "../../../shared/model";
 import { isNotFound } from "../../storage/errors";
 import { join } from "../../storage/path";
 import type { Target } from "../layout";
-import { uuidKey } from "../manifests";
+import { compareVersions, uuidKey } from "../manifests";
 import { folderOf, versionLabel, type InstalledPack, type PackIndex } from "../packIndex";
 import { upsertEntry, type WorldEntry } from "../worlds";
-import type { WorldPacks } from "../commands/status";
+import { otherWorldsUsing, type WorldJsonCache, type WorldPacks } from "../commands/status";
 import { packFolderName, versionText, type IncomingPack } from "./unpack";
 
 export interface PlannedPack {
@@ -18,6 +18,7 @@ export interface PlannedPack {
   replace: InstalledPack[];
   keep: InstalledPack[];
   registration: "added" | "updated" | "unchanged";
+  warnings: string[];
 }
 
 export interface PlanOptions {
@@ -65,7 +66,17 @@ export async function planInstall(
     replace: [],
     keep: [],
     registration: "unchanged",
+    warnings: [],
   });
+  const usageCache: WorldJsonCache = new Map();
+
+  // Two versions of one pack in the same install: only the newest goes in.
+  const newestIncoming = new Map<string, IncomingPack>();
+  for (const pack of incoming) {
+    const id = `${uuidKey(pack.uuid)}|${pack.kind}`;
+    const current = newestIncoming.get(id);
+    if (!current || compareVersions(pack.version, current.version) > 0) newestIncoming.set(id, pack);
+  }
 
   for (const pack of incoming) {
     const key = `${uuidKey(pack.uuid)}|${JSON.stringify(pack.version)}|${pack.kind}`;
@@ -74,8 +85,14 @@ export async function planInstall(
       plans.push({ ...base(pack), reason: `Same pack already queued from ${earlier.pack.sourceName}` });
       continue;
     }
+    const newer = newestIncoming.get(`${uuidKey(pack.uuid)}|${pack.kind}`)!;
+    if (compareVersions(newer.version, pack.version) > 0) {
+      plans.push({ ...base(pack), reason: `A newer version (v${versionText(newer)}) of this pack is in the same install` });
+      continue;
+    }
     const existing = index.find(pack.uuid, pack.kind);
     const sameVersion = existing.filter((copy) => same(copy.version, pack.version));
+    const warnings = reusedUuidWarnings(pack, existing);
 
     if (sameVersion.length && !options.reupload) {
       const registration = upsertEntry(pending[pack.kind], pack.uuid, pack.version);
@@ -104,14 +121,30 @@ export async function planInstall(
     }
 
     const targetDir = await target.installDir(world, pack.kind);
-    const plan: PlannedPack = { ...base(pack), action: "upload", targetDir };
+    const plan: PlannedPack = { ...base(pack), action: "upload", targetDir, warnings };
     if (existing.length && options.duplicateMode === "replace") {
-      // Never delete development copies or the game's own packs.
-      plan.replace = existing.filter((copy) => copy.scope !== "dev" && !copy.builtin);
-      plan.keep = existing.filter((copy) => copy.scope === "dev" || copy.builtin);
+      // Never delete development copies, the game's own packs, or a shared copy another world still needs.
+      for (const copy of existing) {
+        if (copy.scope === "dev" || copy.builtin) {
+          plan.keep.push(copy);
+          continue;
+        }
+        const users = copy.scope === "shared" ? await otherWorldsUsing(target, world, pack.kind, copy, usageCache, index) : [];
+        if (users.length) {
+          plan.keep.push(copy);
+          warnings.push(`Keeping v${versionLabel(copy)} (${folderOf(copy)}): still used by ${users.join(", ")}`);
+        } else {
+          plan.replace.push(copy);
+        }
+      }
       plan.reason = plan.replace.length
         ? `Replacing v${plan.replace.map(versionLabel).join(", ")}`
-        : "Upload (development copy left alone)";
+        : plan.keep.some((copy) => copy.scope === "dev" || copy.builtin)
+          ? "Upload (development copy left alone)"
+          : "Upload beside the copies other worlds use";
+      const downgrade = existing.filter((copy) => compareVersions(copy.version, pack.version) > 0);
+      if (downgrade.length)
+        warnings.push(`The server has a newer version (v${downgrade.map(versionLabel).join(", ")}); this installs an older one`);
     } else if (existing.length) {
       plan.keep = existing;
       plan.reason = "Uploading alongside existing copies (keep-both)";
@@ -144,5 +177,29 @@ export function toPlanItem(plan: PlannedPack, target: Target): PlanItem {
     target: plan.targetFolder ? target.describe(join(plan.targetDir, plan.targetFolder)) : "",
     replaces: plan.replace.map((copy) => target.describe(copy.path)),
     keeps: plan.keep.map((copy) => target.describe(copy.path)),
+    warnings: [...plan.warnings],
   };
+}
+
+const comparableName = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/\b(?:bp|rp|beh|res|behaviou?r|resources?|pack|addon)\b/g, "")
+    .replace(/v?\d+(?:\.\d+)*/g, "")
+    .replace(/[^a-z]+/g, "");
+
+/**
+ * Some add-ons are made by copying another pack's manifest, UUID and all. A different name on the
+ * same UUID is worth a second look before one replaces the other.
+ */
+function reusedUuidWarnings(pack: IncomingPack, existing: InstalledPack[]): string[] {
+  const mine = comparableName(pack.displayName);
+  if (!mine) return [];
+  const others = existing.filter((copy) => {
+    const theirs = comparableName(copy.name);
+    return theirs && !theirs.includes(mine) && !mine.includes(theirs);
+  });
+  return others.length
+    ? [`The server has a different-looking pack with the same UUID ('${others[0]!.name}') - check it is the same add-on`]
+    : [];
 }

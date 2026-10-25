@@ -74,6 +74,7 @@ export class SftpStorage extends Storage {
   private inFlight = 0;
   private lastHeard = Date.now();
   private stalled = false;
+  private closed = false;
 
   private constructor(private readonly options: SftpOptions) {
     // Requests are pipelined, so many can be in flight cheaply; spread over a few channels so one
@@ -99,6 +100,8 @@ export class SftpStorage extends Storage {
   // ---- connection -------------------------------------------------------------------------------
 
   private ensureConnected(): Promise<void> {
+    // Work still running after close() (a cancelled connect, say) must not open a new connection nobody owns.
+    if (this.closed) return Promise.reject(new StorageError("The connection was closed"));
     if (this.client && this.channels.length) return Promise.resolve();
     this.connecting ??= this.openConnection().finally(() => {
       this.connecting = null;
@@ -172,6 +175,10 @@ export class SftpStorage extends Storage {
       }
     });
     client.on("error", () => undefined);
+    if (this.closed) {
+      client.end();
+      throw new StorageError("The connection was closed");
+    }
     this.client = client;
 
     try {
@@ -234,7 +241,7 @@ export class SftpStorage extends Storage {
         return value;
       } catch (error) {
         const dropped = !this.client || /No response from server|Not connected|ECONNRESET|channel/i.test((error as Error).message ?? "");
-        if (attempt === 0 && dropped && !isMissing(error)) {
+        if (attempt === 0 && dropped && !isMissing(error) && !this.closed) {
           this.client?.end();
           this.client = null;
           this.channels = [];
@@ -252,6 +259,7 @@ export class SftpStorage extends Storage {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     this.client?.end();
     this.client = null;
     this.channels = [];
@@ -281,13 +289,14 @@ export class SftpStorage extends Storage {
     return Promise.all(
       list.map(async (item) => {
         let isDir = item.attrs.isDirectory();
-        if (item.attrs.isSymbolicLink()) {
+        const link = item.attrs.isSymbolicLink();
+        if (link) {
           isDir = await this.call<{ isDirectory(): boolean }>((sftp, done) => sftp.stat(`${target}/${item.filename}`, done)).then(
             (stats) => stats.isDirectory(),
             () => false,
           );
         }
-        return { name: item.filename, isDir, size: isDir ? null : item.attrs.size };
+        return { name: item.filename, isDir, size: isDir ? null : item.attrs.size, ...(link ? { link } : {}) };
       }),
     );
   }
@@ -314,13 +323,13 @@ export class SftpStorage extends Storage {
         first.copy(whole, 0, 0, firstRead);
         const offsets: number[] = [];
         for (let offset = firstRead; offset < size; offset += READ_CHUNK) offsets.push(offset);
-        await Promise.all(
-          offsets.map((offset) =>
-            ask<number>((done) =>
-              sftp.read(handle, whole, offset, Math.min(READ_CHUNK, size - offset), offset, (error, bytes) => done(error, bytes)),
-            ),
-          ),
-        );
+        // A server may answer a read with fewer bytes than asked; keep asking for the rest of that chunk.
+        const readChunk = async (offset: number, length: number): Promise<void> => {
+          const bytes = await ask<number>((done) => sftp.read(handle, whole, offset, length, offset, (error, got) => done(error, got)));
+          if (bytes <= 0) throw new Error(`file ended early at byte ${offset} of ${size}`);
+          if (bytes < length) await readChunk(offset + bytes, length - bytes);
+        };
+        await Promise.all(offsets.map((offset) => readChunk(offset, Math.min(READ_CHUNK, size - offset))));
         return whole;
       } finally {
         sftp.close(handle, () => undefined);
@@ -380,7 +389,21 @@ export class SftpStorage extends Storage {
     try {
       await this.call<void>((sftp, done) => sftp.ext_openssh_rename(a, b, done));
     } catch {
-      await this.call<void>((sftp, done) => sftp.rename(a, b, done));
+      try {
+        await this.call<void>((sftp, done) => sftp.rename(a, b, done));
+      } catch (error) {
+        // The reply to a rename that went through can be lost with a dropped connection, and the retry then
+        // finds no source. If the source is gone and the destination is there, the rename happened.
+        if (isMissing(error) && !(await this.pathExists(a)) && (await this.pathExists(b))) return;
+        throw error;
+      }
     }
+  }
+
+  private pathExists(path: string): Promise<boolean> {
+    return this.call<unknown>((sftp, done) => sftp.lstat(path, done)).then(
+      () => true,
+      (error: unknown) => (isMissing(error) ? false : Promise.reject(error)),
+    );
   }
 }

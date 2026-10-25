@@ -31,6 +31,9 @@ const isMissingCode = (error: unknown) =>
 const isDropped = (error: unknown) =>
   !(error instanceof FTPError) && /closed|ECONNRESET|EPIPE|timeout|Client is closed|socket/i.test((error as Error)?.message ?? "");
 
+/** Replies hosts give when a user already has as many sessions as allowed. */
+const TOO_MANY_CONNECTIONS = /\b421\b|too many|connection limit|max(?:imum)? (?:number of )?(?:connections|clients|sessions)/i;
+
 class Collector extends Writable {
   readonly chunks: Buffer[] = [];
   override _write(chunk: Buffer, _encoding: BufferEncoding, callback: () => void): void {
@@ -43,9 +46,10 @@ export class FtpStorage extends Storage {
   label = "";
   root = "/";
   private readonly idle: Client[] = [];
-  private readonly waiters: ((client: Client) => void)[] = [];
+  private readonly waiters: { resolve: (client: Client) => void; reject: (error: Error) => void }[] = [];
   private size = 0;
   private maxSize: number;
+  private closed = false;
 
   private constructor(private readonly options: FtpOptions) {
     const pool = Math.max(1, options.poolSize ?? 4);
@@ -102,6 +106,7 @@ export class FtpStorage extends Storage {
   }
 
   private async acquire(): Promise<Client> {
+    if (this.closed) throw new StorageError("The connection was closed");
     const idle = this.idle.pop();
     if (idle) return idle;
     if (this.size < this.maxSize) {
@@ -110,21 +115,28 @@ export class FtpStorage extends Storage {
         return await this.login();
       } catch (error) {
         this.size--;
-        // The host refuses more connections: shrink the pool and wait for a free client.
-        if (this.size > 0) {
+        // The host refuses more connections: shrink the pool for good and wait for a free client.
+        // Any other failure (a network blip) is just an error; the pool keeps its size.
+        if (this.size > 0 && TOO_MANY_CONNECTIONS.test((error as Error).message ?? "")) {
           this.maxSize = this.size;
           this.setConcurrency(this.size);
-          return new Promise((resolve) => this.waiters.push(resolve));
+          return this.waitForClient();
         }
         throw error;
       }
     }
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return this.waitForClient();
+  }
+
+  private waitForClient(): Promise<Client> {
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
   private release(client: Client): void {
+    // After close(), clients that were busy are closed as they come back instead of being pooled.
+    if (this.closed) return void client.close();
     const waiter = this.waiters.shift();
-    if (waiter) waiter(client);
+    if (waiter) waiter.resolve(client);
     else this.idle.push(client);
   }
 
@@ -147,7 +159,9 @@ export class FtpStorage extends Storage {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     for (const client of this.idle.splice(0)) client.close();
+    for (const waiter of this.waiters.splice(0)) waiter.reject(new StorageError("The connection was closed"));
     this.size = 0;
   }
 
@@ -177,8 +191,9 @@ export class FtpStorage extends Storage {
       .filter((info) => info.name && info.name !== "." && info.name !== "..")
       .map((info) => {
         const name = info.name.includes("/") ? info.name.slice(info.name.lastIndexOf("/") + 1) : info.name;
+        // FTP cannot tell where a link points; treat it as a folder for listings, but never follow it.
         const isDir = info.isDirectory || info.isSymbolicLink;
-        return { name, isDir, size: isDir ? null : info.size };
+        return { name, isDir, size: isDir ? null : info.size, ...(info.isSymbolicLink ? { link: true } : {}) };
       });
   }
 

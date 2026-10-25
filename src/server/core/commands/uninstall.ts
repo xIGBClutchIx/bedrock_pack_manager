@@ -1,13 +1,13 @@
 /** Remove packs from a world, and delete their folders when nothing else uses them. */
-import type { PackKind, UninstallResult } from "../../../shared/model";
+import type { PackKind, UninstallResult, Version } from "../../../shared/model";
 import { formatVersion, packKey } from "../../../shared/model";
 import { CancelledError, throwIfAborted } from "../../storage/errors";
 import { basename } from "../../storage/path";
 import type { CommandContext } from "../install";
 import { info, ok, section, warn } from "../log";
 import { PackIndex, type InstalledPack } from "../packIndex";
-import { removeEntry, saveWorldJson } from "../worlds";
-import { loadWorldPacks, otherWorldsUsing, worldStatus, worldSummaries } from "./status";
+import { entryVersion, removeEntry, saveWorldJson } from "../worlds";
+import { loadWorldPacks, otherWorldsUsing, worldStatus, worldSummaries, type WorldJsonCache } from "./status";
 
 const KIND_LABEL = { bp: "Behavior Pack", rp: "Resource Pack" } as const;
 
@@ -21,22 +21,23 @@ export async function runUninstall(ctx: CommandContext, world: string, keys: str
     key: string;
     kind: PackKind;
     uuid: string;
-    version: unknown[];
+    version: Version;
     name: string;
     installed: InstalledPack[];
   }
   const candidates = new Map<string, Candidate>();
   for (const kind of ["bp", "rp"] as const) {
     for (const entry of worldPacks[kind]) {
-      if (!entry.pack_id || !Array.isArray(entry.version)) continue;
-      const installed = index.findVersion(entry.pack_id, entry.version, kind);
+      const version = entryVersion(entry);
+      if (!entry.pack_id || !version) continue;
+      const installed = index.findVersion(entry.pack_id, version, kind);
       const any = index.find(entry.pack_id, kind);
-      const key = packKey(kind, entry.pack_id, entry.version);
+      const key = packKey(kind, entry.pack_id, version);
       candidates.set(key, {
         key,
         kind,
         uuid: entry.pack_id,
-        version: entry.version,
+        version,
         name: installed[0]?.name ?? any[0]?.name ?? entry.pack_id,
         installed,
       });
@@ -60,10 +61,10 @@ export async function runUninstall(ctx: CommandContext, world: string, keys: str
   for (const kind of changed) await saveWorldJson(target.storage, target.worldJson(world, kind), worldPacks[kind]);
 
   const deleted: string[] = [];
-  const cache = new Map<string, Set<string>>();
+  const cache: WorldJsonCache = new Map();
   for (const candidate of chosen) {
     throwIfAborted(ctx.signal);
-    section(log, `[${KIND_LABEL[candidate.kind]}] ${candidate.name} (v${formatVersion(candidate.version as never)})`);
+    section(log, `[${KIND_LABEL[candidate.kind]}] ${candidate.name} (v${formatVersion(candidate.version)})`);
     ok(log, `Unregistered from ${basename(target.worldJson(world, candidate.kind))}`);
     if (!candidate.installed.length) {
       info(log, "No matching pack folder on the server");
@@ -73,7 +74,7 @@ export async function runUninstall(ctx: CommandContext, world: string, keys: str
       info(log, "Kept the pack folder on the server");
       continue;
     }
-    const others = await otherWorldsUsing(target, world, candidate.kind, candidate.uuid, candidate.version, cache);
+    const others = await otherWorldsUsing(target, world, candidate.kind, candidate, cache, index);
     for (const pack of candidate.installed) {
       if (pack.builtin) {
         info(log, `Kept built-in game pack ${target.describe(pack.path)}`);

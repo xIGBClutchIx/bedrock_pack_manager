@@ -9,7 +9,18 @@ import { JUNK_NAMES, basename, join } from "../storage/path";
 import type { Entry } from "../storage/storage";
 import { PACK_CONTENT_DIRS, isBuiltinFolder, isTranslationKey } from "./builtins";
 import type { PackDir, Target } from "./layout";
-import { ManifestError, classifyPack, getDependencies, getPackInfo, parseManifest, uuidKey } from "./manifests";
+import {
+  ManifestError,
+  classifyPack,
+  getDependencies,
+  getModuleDependencies,
+  getPackDetails,
+  getPackInfo,
+  parseManifest,
+  uuidKey,
+  versionsEqual,
+  type PackDetails,
+} from "./manifests";
 import { packVersionKey } from "./worlds";
 
 export interface InstalledPack {
@@ -24,12 +35,25 @@ export interface InstalledPack {
   path: string;
   packDir: string;
   dependencies: Dependency[];
+  moduleDependencies: { moduleName: string; version: string }[];
+  details: PackDetails;
   nested: boolean;
   builtin: boolean;
 }
 
+export const NO_DETAILS: PackDetails = { description: "", authors: [], minEngineVersion: null, subpacks: [] };
+
 export const folderOf = (pack: InstalledPack): string => basename(pack.path);
 export const versionLabel = (pack: { version: Version }): string => formatVersion(pack.version);
+
+/** Drop translation keys ("pack.description") that mean nothing without the pack's language files. */
+function readableDetails(details: PackDetails): PackDetails {
+  return {
+    ...details,
+    description: isTranslationKey(details.description) ? "" : details.description,
+    subpacks: details.subpacks.map((subpack) => ({ ...subpack, name: isTranslationKey(subpack.name) ? subpack.folder : subpack.name })),
+  };
+}
 
 function looksLikePackContent(children: Entry[]): boolean {
   const real = children.filter((child) => !JUNK_NAMES.has(child.name));
@@ -174,6 +198,13 @@ export class PackIndex {
     }
     const builtin = dir.scope === "shared" && join(dir.path, basename(folder)) === folder && isBuiltinFolder(basename(folder));
     const kind = classifyPack(manifest);
+    if (report && !builtin && basename(manifestPath) !== "manifest.json") {
+      this.problems.push({
+        kind: "casing",
+        path: folder,
+        message: `${this.target.describe(manifestPath)} should be named manifest.json - a Linux server will not see '${basename(manifestPath)}'`,
+      });
+    }
     if (report && !builtin && kind && kind !== dir.kind) {
       const expected = kind === "bp" ? "behavior_packs" : "resource_packs";
       this.problems.push({
@@ -193,6 +224,8 @@ export class PackIndex {
         path: folder,
         packDir: dir.path,
         dependencies: getDependencies(manifest),
+        moduleDependencies: getModuleDependencies(manifest),
+        details: readableDetails(getPackDetails(manifest)),
         nested: false,
         builtin,
       },
@@ -229,7 +262,7 @@ export class PackIndex {
   }
 
   findVersion(uuid: string, version: Version, kind?: PackKind): InstalledPack[] {
-    return this.find(uuid, kind).filter((pack) => JSON.stringify(pack.version) === JSON.stringify(version));
+    return this.find(uuid, kind).filter((pack) => versionsEqual(pack.version, version));
   }
 
   ofKind(kind: PackKind): InstalledPack[] {

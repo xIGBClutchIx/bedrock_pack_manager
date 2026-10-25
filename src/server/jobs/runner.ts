@@ -84,6 +84,15 @@ export class Job implements JobLog {
     };
   }
 
+  /** The job's log lines as plain text, tagged like run/logs. */
+  logText(): string {
+    const tags: Partial<Record<LogLevel, string>> = { ok: "[OK] ", info: "[INFO] ", warn: "[WARNING] ", error: "[ERROR] ", section: "== " };
+    return this.events
+      .filter((event) => event.type === "log")
+      .map((event) => `${tags[event.level] ?? ""}${event.text}`)
+      .join("\n");
+  }
+
   finish(): void {
     this.finishedAt = Date.now();
     this.emit({ type: "end", seq: this.events.length, job: this.info() });
@@ -129,8 +138,8 @@ export class JobRunner {
 
     job.promise = (async () => {
       try {
+        // Work that finished counts as done even if a cancel arrived at the last moment: its changes are made.
         job.result = await run(job);
-        if (job.signal.aborted) throw new CancelledError();
         job.status = "done";
       } catch (error) {
         if (error instanceof CancelledError || job.signal.aborted) {
@@ -157,6 +166,17 @@ export class JobRunner {
 
   get(id: string): Job | undefined {
     return this.jobs.get(id);
+  }
+
+  /** Recent jobs, newest first, without their (possibly large) results. */
+  list(): JobInfo[] {
+    return [...this.order]
+      .reverse()
+      .map((id) => this.jobs.get(id)!)
+      .map((job) => {
+        const { result: _result, ...info } = job.info();
+        return info;
+      });
   }
 
   cancel(id: string): boolean {

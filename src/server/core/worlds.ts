@@ -2,7 +2,7 @@
 import type { Version } from "../../shared/model";
 import { isNotFound } from "../storage/errors";
 import type { Storage } from "../storage/storage";
-import { ManifestError, parseJsonLenient, uuidKey, versionsEqual } from "./manifests";
+import { ManifestError, normalizeVersion, parseJsonLenient, uuidKey, versionsEqual } from "./manifests";
 
 export interface WorldEntry {
   pack_id: string;
@@ -55,11 +55,21 @@ export function removeEntry(entries: WorldEntry[], uuid: string): boolean {
   return kept.length !== before;
 }
 
-/** `uuid|version` keys of every valid entry. */
-export function registeredKeys(entries: WorldEntry[]): Set<string> {
-  return new Set(
-    entries.filter((entry) => entry.pack_id && Array.isArray(entry.version)).map((entry) => packVersionKey(entry.pack_id, entry.version)),
-  );
+/** An entry's version as a list, accepting the "1.0.0" strings some tools write; null when there is none. */
+export function entryVersion(entry: WorldEntry): Version | null {
+  const raw = entry.version as unknown;
+  if (Array.isArray(raw) || typeof raw === "string") return normalizeVersion(raw);
+  return null;
 }
 
-export const packVersionKey = (uuid: string, version: Version): string => `${uuidKey(uuid)}|${JSON.stringify(version)}`;
+/** `uuid|version` keys of every valid entry. */
+export function registeredKeys(entries: WorldEntry[]): Set<string> {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    const version = entryVersion(entry);
+    if (entry.pack_id && version) keys.add(packVersionKey(entry.pack_id, version));
+  }
+  return keys;
+}
+
+export const packVersionKey = (uuid: string, version: Version): string => `${uuidKey(uuid)}|${JSON.stringify(normalizeVersion(version))}`;

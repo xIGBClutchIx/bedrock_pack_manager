@@ -124,6 +124,38 @@ describe("sftp connection", () => {
     expect(await storage.readText("f.txt")).toBe("ok");
     await storage.close();
   });
+
+  it("never reconnects once closed", async () => {
+    writeFile(joinLocal(dir.path, "f.txt"), "ok");
+    const storage = await SftpStorage.connect({ ...base(), trustedFingerprint: fingerprintOf(server.hostKey) });
+    await storage.close();
+    await expect(storage.readText("f.txt")).rejects.toThrow(/closed/);
+    expect((storage as unknown as { client: unknown }).client).toBeNull();
+  });
+});
+
+describe("sftp short reads", () => {
+  it("asks again for the rest when the server answers with fewer bytes", async () => {
+    const dir = tempDir();
+    const server = await startSftpServer(dir.path, { maxReadBytes: 1000 });
+    const big = Buffer.alloc(200_000);
+    for (let index = 0; index < big.length; index++) big[index] = index % 251;
+    writeFileSync(joinLocal(dir.path, "big.bin"), big);
+    const storage = await SftpStorage.connect({
+      host: server.host,
+      port: server.port,
+      username: server.username,
+      password: server.password,
+      trustedFingerprint: fingerprintOf(server.hostKey),
+    });
+    try {
+      expect((await storage.readFile("big.bin")).equals(big)).toBe(true);
+    } finally {
+      await storage.close();
+      await server.close();
+      dir.cleanup();
+    }
+  });
 });
 
 describe("ftp connection", () => {
@@ -160,6 +192,8 @@ describe("ftp connection", () => {
       expect(storage.describe("x")).toBe("/bedrock/x");
       const results = await storage.readMany(["a.txt", "b.txt", "c.txt"]);
       expect([...results.values()].map(String)).toEqual(["a", "b", "c"]);
+      await storage.close();
+      await expect(storage.readText("a.txt")).rejects.toThrow(/closed/);
     } finally {
       await storage.close();
       await server.close();
@@ -174,19 +208,19 @@ describe("openStorage", () => {
     try {
       writeFile(joinLocal(dir.path, "srv", "x"), "");
       const storage = await openStorage(
-        { protocol: "local", host: "", port: null, username: "", root: "srv", tlsVerify: true, passive: true },
+        { protocol: "local", host: "", port: null, username: "", root: "srv", tlsVerify: true },
         { baseDir: dir.path, knownHostsFile: null },
       );
       expect(storage).toBeInstanceOf(LocalStorage);
       await expect(
         openStorage(
-          { protocol: "local", host: "", port: null, username: "", root: "missing", tlsVerify: true, passive: true },
+          { protocol: "local", host: "", port: null, username: "", root: "missing", tlsVerify: true },
           { baseDir: dir.path, knownHostsFile: null },
         ),
       ).rejects.toThrow(/does not exist/);
       await expect(
         openStorage(
-          { protocol: "sftp", host: " ", port: null, username: "", root: "", tlsVerify: true, passive: true },
+          { protocol: "sftp", host: " ", port: null, username: "", root: "", tlsVerify: true },
           { baseDir: dir.path, knownHostsFile: null },
         ),
       ).rejects.toThrow(/host is required/);

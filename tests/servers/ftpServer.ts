@@ -33,8 +33,8 @@ const quietLog = {
   fatal: () => undefined,
 };
 
-export async function startFtpServer(root: string): Promise<FtpTestServer> {
-  const port = await freePort();
+export async function startFtpServer(root: string, options: { port?: number } = {}): Promise<FtpTestServer> {
+  const port = options.port ?? (await freePort());
   const pasvMin = 40000 + Math.floor(Math.random() * 20000);
   const server = new FtpSrv({
     url: `ftp://127.0.0.1:${port}`,

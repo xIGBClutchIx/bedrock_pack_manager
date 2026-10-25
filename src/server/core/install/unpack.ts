@@ -19,13 +19,19 @@ import {
   NON_PACK_MODULE_TYPES,
   classifyPack,
   getDependencies,
+  getModuleDependencies,
+  getPackDetails,
   getPackInfo,
   moduleTypes,
   parseManifest,
   usesBetaApis,
+  type PackDetails,
 } from "../manifests";
 
 const MAX_NESTED_DEPTH = 6;
+
+/** Limits per archive, so a zip bomb cannot fill the disk. Real add-ons are far below both. */
+export const ARCHIVE_LIMITS = { maxBytes: 4 * 1024 * 1024 * 1024, maxEntries: 200_000 };
 
 export class UnsafeArchiveError extends Error {}
 
@@ -37,6 +43,8 @@ export interface IncomingPack {
   displayName: string;
   kind: PackKind;
   dependencies: Dependency[];
+  moduleDependencies: { moduleName: string; version: string }[];
+  details: PackDetails;
   sourceName: string;
   usesBeta: boolean;
   /** Pack folders nested inside this one, which must not be uploaded twice. */
@@ -66,8 +74,8 @@ export async function isZipFile(path: string): Promise<boolean> {
   }
 }
 
-/** Extract a zip, refusing members that would land outside `dest`. */
-export async function extractZip(archive: string, dest: string): Promise<void> {
+/** Extract a zip, refusing members that would land outside `dest`, and archives that unpack to more than ARCHIVE_LIMITS. */
+export async function extractZip(archive: string, dest: string, limits = ARCHIVE_LIMITS): Promise<void> {
   const root = resolve(dest);
   await mkdir(root, { recursive: true });
   const zip = await new Promise<yauzl.ZipFile>((ok, fail) =>
@@ -82,7 +90,17 @@ export async function extractZip(archive: string, dest: string): Promise<void> {
         fail(/invalid relative path|absolute path/i.test(error.message) ? new UnsafeArchiveError(error.message) : error),
       );
       zip.on("end", () => done());
+      let entries = 0;
+      let bytes = 0;
       zip.on("entry", (entry: yauzl.Entry) => {
+        // yauzl checks that each entry's real size matches the size it declares, so counting declared sizes is enough.
+        bytes += entry.uncompressedSize;
+        if (++entries > limits.maxEntries || bytes > limits.maxBytes)
+          return fail(
+            new UnsafeArchiveError(
+              `Archive unpacks to more than ${limits.maxEntries} files or ${Math.round(limits.maxBytes / 1024 ** 3)} GB`,
+            ),
+          );
         const name = entry.fileName.replaceAll("\\", "/");
         if (name.startsWith("/") || /^[A-Za-z]:/.test(name))
           return fail(new UnsafeArchiveError(`Archive member '${entry.fileName}' uses an absolute path`));
@@ -245,6 +263,8 @@ export async function readIncomingPack(
     displayName,
     kind,
     dependencies: getDependencies(manifest),
+    moduleDependencies: getModuleDependencies(manifest),
+    details: getPackDetails(manifest),
     sourceName,
     usesBeta,
     exclude: new Set(),

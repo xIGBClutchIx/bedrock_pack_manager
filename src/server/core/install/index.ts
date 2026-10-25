@@ -41,8 +41,12 @@ async function worldBeta(target: Target, world: string): Promise<boolean | null>
   }
 }
 
-/** Upload a pack. When replacing a same-named folder, upload beside it first so a failed transfer never leaves the server without the pack. */
-async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => void): Promise<string> {
+/**
+ * Upload a pack. When replacing a same-named folder, upload beside it first so a failed transfer never
+ * leaves the server without the pack. Returns where it landed and the old copies that could not be removed
+ * (the new copy is in place, so the install still counts; the leftovers are reported).
+ */
+async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => void): Promise<{ path: string; leftovers: string[] }> {
   const { storage } = ctx.target;
   const finalPath = join(plan.targetDir, plan.targetFolder);
   const clashes = plan.replace.some((copy) => copy.path.toLowerCase() === finalPath.toLowerCase());
@@ -54,11 +58,21 @@ async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => 
     signal: ctx.signal,
     onProgress: onFile,
   });
+  const leftovers: string[] = [];
   for (const copy of plan.replace) {
-    await storage.removeTree(copy.path, { signal: ctx.signal });
-    info(ctx.log, `Removed old copy ${ctx.target.describe(copy.path)}`);
+    try {
+      await storage.removeTree(copy.path, { signal: ctx.signal });
+      info(ctx.log, `Removed old copy ${ctx.target.describe(copy.path)}`);
+    } catch (error) {
+      if (error instanceof CancelledError) throw error;
+      leftovers.push(copy.path);
+      warn(
+        ctx.log,
+        `Could not remove the old copy ${ctx.target.describe(copy.path)}: ${(error as Error).message} - delete it by hand or run Clean up`,
+      );
+    }
   }
-  if (uploadPath !== finalPath) {
+  if (uploadPath !== finalPath && !leftovers.some((path) => path.toLowerCase() === finalPath.toLowerCase())) {
     try {
       await storage.rename(uploadPath, finalPath);
       uploadPath = finalPath;
@@ -67,7 +81,7 @@ async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => 
     }
   }
   ok(ctx.log, `Uploaded ${count} file(s) to ${ctx.target.describe(uploadPath)}`);
-  return uploadPath;
+  return { path: uploadPath, leftovers };
 }
 
 async function applyInstall(
@@ -97,16 +111,16 @@ async function applyInstall(
       continue;
     }
     if (plan.action === "upload") {
-      let finalPath: string;
+      let uploaded: { path: string; leftovers: string[] };
       try {
-        finalPath = await uploadPack(ctx, plan, onFile);
+        uploaded = await uploadPack(ctx, plan, onFile);
       } catch (error) {
         if (error instanceof CancelledError) throw error;
         warn(log, `Upload of '${pack.displayName}' failed: ${(error as Error).message}`);
         stats.errors++;
         continue;
       }
-      for (const copy of plan.replace) index.remove(copy.path);
+      for (const copy of plan.replace) if (!uploaded.leftovers.includes(copy.path)) index.remove(copy.path);
       index.add({
         uuid: pack.uuid,
         version: pack.version,
@@ -114,9 +128,11 @@ async function applyInstall(
         kind: pack.kind,
         dirKind: pack.kind,
         scope: plan.targetDir.startsWith(`${world}/`) ? "world" : "shared",
-        path: finalPath,
+        path: uploaded.path,
         packDir: plan.targetDir,
         dependencies: pack.dependencies,
+        moduleDependencies: pack.moduleDependencies,
+        details: pack.details,
         nested: false,
         builtin: false,
       });
@@ -136,12 +152,19 @@ async function applyInstall(
 }
 
 function dependencyWarnings(index: PackIndex, worldPacks: WorldPacks, installed: PlannedPack[]): string[] {
-  const known = new Set([...index.uuids(), ...[...worldPacks.bp, ...worldPacks.rp].map((entry) => uuidKey(entry.pack_id))]);
+  const registered = new Set([...worldPacks.bp, ...worldPacks.rp].map((entry) => uuidKey(entry.pack_id)));
+  const onServer = index.uuids();
   const warnings: string[] = [];
   for (const { pack } of installed) {
     for (const dep of pack.dependencies) {
       const depUuid = uuidKey(dep.uuid);
-      if (depUuid && depUuid !== uuidKey(pack.uuid) && !known.has(depUuid)) {
+      if (!depUuid || depUuid === uuidKey(pack.uuid) || registered.has(depUuid)) continue;
+      if (onServer.has(depUuid)) {
+        const name = index.find(depUuid)[0]?.name ?? dep.uuid;
+        warnings.push(
+          `'${pack.displayName}' needs '${name}', which is on the server but not active in this world - activate it from the Packs tab`,
+        );
+      } else {
         warnings.push(
           `'${pack.displayName}' depends on UUID ${dep.uuid} (v${formatVersion(dep.version as never)}) which is not installed - it may not work. Install the matching pack too.`,
         );
@@ -179,6 +202,7 @@ export async function runInstall(ctx: CommandContext, options: InstallOptions): 
     const incoming = prepared.flatMap((source) => source.packs);
     const plans = await planInstall(target, world, incoming, index, worldPacks, options);
     result.plan = plans.map((plan) => toPlanItem(plan, target));
+    for (const plan of plans) for (const message of plan.warnings) warn(log, `${plan.pack.displayName}: ${message}`);
 
     if (options.dryRun) {
       const counts = { upload: 0, register: 0, skip: 0 };

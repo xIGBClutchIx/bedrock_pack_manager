@@ -47,13 +47,14 @@ async function main(): Promise<void> {
       "no-browser": { type: "boolean", default: false },
       "data-dir": { type: "string" },
       dev: { type: "boolean", default: false },
+      "test-server": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: false,
   });
   if (values.help) {
     console.log(
-      "Bedrock Pack Manager\n\nOptions:\n  --port <n>        Port to listen on (default: a free port)\n  --no-browser      Do not open the browser\n  --data-dir <dir>  Where to keep run data (default: run/ next to the app)",
+      "Bedrock Pack Manager\n\nOptions:\n  --port <n>        Port to listen on (default: a free port)\n  --no-browser      Do not open the browser\n  --data-dir <dir>  Where to keep run data (default: run/ next to the app)\n  --test-server     Offer the local demo server (npm run demo) on the connect page",
     );
     return;
   }
@@ -72,6 +73,7 @@ async function main(): Promise<void> {
     readAsset: isSea() ? readSeaAsset : undefined,
     extraHosts: dev ? ["localhost:5173", "127.0.0.1:5173"] : [],
     onLog: (level, text) => runLog.write(level, text),
+    testServer: values["test-server"],
   });
 
   await app.fastify.listen({ host: "127.0.0.1", port: Number(values.port) || 0 });
