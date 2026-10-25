@@ -5,24 +5,26 @@ import { ROUTES } from "../../shared/api";
 import type { UnknownHostKeyData } from "../../shared/events";
 import {
   DEFAULT_PORTS,
+  TEST_SERVER,
   describeConnection,
   type ConnectionSettings,
+  type KnownHost,
   type LayoutOverrides,
   type Profile,
   type Protocol,
 } from "../../shared/model";
-import { JobError, deleteProfile, saveProfile } from "../api/client";
+import { JobError, deleteProfile, forgetKnownHost, getKnownHosts, saveProfile } from "../api/client";
 import { useApp } from "../state/app";
-import { Brand, Icon } from "./common";
+import { Brand, Icon, Modal } from "./common";
 
 const PROTOCOL_CARDS: { id: Protocol; label: string; hint: string }[] = [
   { id: "sftp", label: "SFTP", hint: "SSH, port 22" },
   { id: "ftp", label: "FTP", hint: "Port 21" },
   { id: "ftps", label: "FTPS", hint: "TLS, port 21" },
-  { id: "ftps-implicit", label: "FTPS implicit", hint: "TLS, port 990" },
-  { id: "local", label: "This PC", hint: "A local folder" },
+  { id: "ftps-implicit", label: "Implicit FTPS", hint: "TLS from the start, port 990" },
+  { id: "local", label: "This PC", hint: "A server folder on this computer" },
 ];
-const TAGS: Record<Protocol, string> = { sftp: "SFTP", ftp: "FTP", ftps: "FTPS", "ftps-implicit": "FTPS", local: "LOCAL" };
+const TAGS: Record<Protocol, string> = { sftp: "SFTP", ftp: "FTP", ftps: "FTPS", "ftps-implicit": "FTPS", local: "Local" };
 
 interface FormState {
   protocol: Protocol;
@@ -74,6 +76,10 @@ export function ConnectScreen() {
   const [profileName, setProfileName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [hostKey, setHostKey] = useState<UnknownHostKeyData | null>(null);
+  const [keyChanged, setKeyChanged] = useState(false);
+  const [hostsOpen, setHostsOpen] = useState(false);
+  const [testMode, setTestMode] = useState(false);
+  const [testProtocol, setTestProtocol] = useState<"sftp" | "ftp">("sftp");
 
   // Start from the first saved server, so a returning user only types the password.
   useEffect(() => {
@@ -87,6 +93,7 @@ export function ConnectScreen() {
   const remote = form.protocol !== "local";
 
   function pick(profile: Profile) {
+    setTestMode(false);
     setActive(profile.name);
     setForm(fromProfile(profile));
     setProfileName(profile.name);
@@ -95,6 +102,20 @@ export function ConnectScreen() {
   }
 
   function settings(trustedFingerprint?: string): ConnectionSettings {
+    if (testMode) {
+      const sftp = testProtocol === "sftp";
+      return {
+        protocol: testProtocol,
+        host: TEST_SERVER.host,
+        port: sftp ? TEST_SERVER.sftpPort : TEST_SERVER.ftpPort,
+        username: TEST_SERVER.username,
+        password: TEST_SERVER.password,
+        root: "",
+        tlsVerify: true,
+        // The demo server's key is fixed and known, so there is nothing to confirm.
+        trustedFingerprint: sftp ? TEST_SERVER.fingerprint : undefined,
+      };
+    }
     return {
       protocol: form.protocol,
       host: form.host.trim(),
@@ -105,19 +126,19 @@ export function ConnectScreen() {
       keyFile: form.keyFile.trim() || undefined,
       keyPassphrase: form.keyPassphrase || undefined,
       tlsVerify: !form.allowSelfSigned,
-      passive: true,
       trustedFingerprint,
     };
   }
 
   async function connect(trustedFingerprint?: string) {
     setError(null);
+    setKeyChanged(false);
     setHostKey(null);
     const request = settings(trustedFingerprint);
     mark(`Connecting to ${describeConnection(request)}`);
     try {
-      await run(ROUTES.connect, { settings: request, layout: form.layout }, { title: "Connecting" });
-      if (saveAs) {
+      await run(ROUTES.connect, { settings: request, layout: testMode ? { packScope: "shared" } : form.layout }, { title: "Connecting" });
+      if (saveAs && !testMode) {
         const name = profileName.trim() || (remote ? form.host.trim() : "Local server");
         const { password: _password, keyPassphrase: _passphrase, trustedFingerprint: _fingerprint, ...publicPart } = request;
         if (name) await saveProfile({ name, settings: publicPart, layout: form.layout }).catch(() => undefined);
@@ -130,6 +151,7 @@ export function ConnectScreen() {
       }
       if (caught instanceof JobError && caught.job.status === "cancelled") return;
       setError((caught as Error).message);
+      setKeyChanged(caught instanceof JobError && caught.code === "host_key_mismatch");
     }
   }
 
@@ -148,16 +170,16 @@ export function ConnectScreen() {
     <div className="connect-screen">
       <aside className="connect-side">
         <Brand />
-        <h2 className="eyebrow">Saved servers</h2>
+        <h2 className="side-label">Saved servers</h2>
         <div className="profile-list">
-          {profiles.length === 0 && <p className="empty-note">No saved servers yet. Connect once with “Save as a server” ticked.</p>}
+          {profiles.length === 0 && <p className="empty-note">No saved servers yet. Servers you connect to are saved here.</p>}
           {profiles.map((profile) => (
             <div key={profile.name} className={`profile ${profile.name === active ? "active" : ""}`}>
-              <button type="button" className="profile-pick" onClick={() => pick(profile)}>
+              <button type="button" className="profile-pick" onClick={() => pick(profile)} title={describeConnection(profile.settings)}>
                 <span className={`proto-tag ${profile.settings.protocol}`}>{TAGS[profile.settings.protocol]}</span>
                 <span className="names">
                   <b>{profile.name}</b>
-                  <span className="addr">{describeConnection(profile.settings)}</span>
+                  <span className="addr">{describeConnection(profile.settings).replace(/^[a-z]+:\/\//, "")}</span>
                 </span>
               </button>
               <button type="button" className="del" aria-label={`Delete ${profile.name}`} onClick={() => void remove(profile.name)}>
@@ -172,15 +194,21 @@ export function ConnectScreen() {
           onClick={() => {
             setActive(null);
             setForm(EMPTY);
+            setTestMode(false);
             setProfileName("");
           }}
         >
-          + New server
+          <Icon name="plus" />
+          New server
         </button>
         <p className="side-foot">
-          Passwords are never saved. Trusted SFTP host keys are kept in <code>run/known_hosts</code>.
+          Passwords are never saved.{" "}
+          <button type="button" className="link-btn" onClick={() => setHostsOpen(true)}>
+            Manage trusted keys
+          </button>
         </p>
       </aside>
+      {hostsOpen && <KnownHostsDialog onClose={() => setHostsOpen(false)} />}
 
       <main className="connect-main">
         <form className="connect-form" onSubmit={submit} autoComplete="off">
@@ -196,18 +224,48 @@ export function ConnectScreen() {
                   type="radio"
                   name="protocol"
                   value={card.id}
-                  checked={form.protocol === card.id}
-                  onChange={() => set("protocol", card.id)}
+                  checked={!testMode && form.protocol === card.id}
+                  onChange={() => {
+                    setTestMode(false);
+                    set("protocol", card.id);
+                  }}
                 />
-                <span>
-                  <b>{card.label}</b>
-                  <small>{card.hint}</small>
-                </span>
+                <span title={card.hint}>{card.label}</span>
               </label>
             ))}
+            {state?.testServer && (
+              <label className="proto test">
+                <input type="radio" name="protocol" value="test" checked={testMode} onChange={() => setTestMode(true)} />
+                <span title="The local demo server from npm run demo">Test server</span>
+              </label>
+            )}
           </div>
 
-          {remote && (
+          {testMode && (
+            <div className="test-panel">
+              <p>
+                The local demo server from <code>npm run demo</code>: two worlds and a deliberately messy set of packs. Start it, then
+                connect. The address, login and host key are filled in for you.
+              </p>
+              <div className="setting">
+                <div className="grow">
+                  <b>Connect over</b>
+                  <div className="muted small">
+                    {TEST_SERVER.host}:{testProtocol === "sftp" ? TEST_SERVER.sftpPort : TEST_SERVER.ftpPort}, user {TEST_SERVER.username}
+                  </div>
+                </div>
+                <div className="segmented" role="group" aria-label="Test protocol">
+                  {(["sftp", "ftp"] as const).map((option) => (
+                    <button key={option} type="button" aria-pressed={testProtocol === option} onClick={() => setTestProtocol(option)}>
+                      {option.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!testMode && remote && (
             <div className="grid4">
               <label className="field span3">
                 Host
@@ -244,21 +302,23 @@ export function ConnectScreen() {
             </div>
           )}
 
-          <label className="field">
-            {remote ? "Folder on the server" : "Server folder on this computer"}
-            <input
-              className="mono"
-              value={form.root}
-              onChange={(e) => set("root", e.target.value)}
-              placeholder={
-                remote ? "Empty = login folder, e.g. /home/container" : "Empty = the bundled run/ folder, or e.g. C:\\servers\\bedrock"
-              }
-            />
-          </label>
+          {!testMode && (
+            <label className="field">
+              {remote ? "Folder on the server" : "Server folder on this computer"}
+              <input
+                className="mono"
+                value={form.root}
+                onChange={(e) => set("root", e.target.value)}
+                placeholder={
+                  remote ? "Empty = login folder, e.g. /home/container" : "Empty = the bundled run/ folder, or e.g. C:\\servers\\bedrock"
+                }
+              />
+            </label>
+          )}
 
-          <details className="advanced">
+          <details className="advanced" hidden={testMode}>
             <summary>
-              Advanced <span className="muted">— SSH key, certificates, layout overrides</span>
+              Advanced options <span className="muted small">SSH key, certificates and server folders</span>
             </summary>
             <div className="grid4">
               {form.protocol === "sftp" && (
@@ -308,19 +368,39 @@ export function ConnectScreen() {
             </div>
           )}
 
-          {error && <div className="banner danger">{error}</div>}
+          {error && (
+            <div className="banner danger">
+              <div className="grow">
+                {error}
+                {keyChanged && (
+                  <p className="small">
+                    If you know the server was reinstalled or moved, check its new fingerprint with your host, then forget the old key.
+                  </p>
+                )}
+              </div>
+              {keyChanged && (
+                <button type="button" className="btn sm" onClick={() => setHostsOpen(true)}>
+                  Trusted keys…
+                </button>
+              )}
+            </div>
+          )}
 
           <div className="row">
-            <label className="check">
-              <input type="checkbox" checked={saveAs} onChange={(e) => setSaveAs(e.target.checked)} /> Save as a server (no password)
-            </label>
-            <input
-              className="profile-name"
-              value={profileName}
-              onChange={(e) => setProfileName(e.target.value)}
-              placeholder="Name, e.g. SMP (main)"
-              aria-label="Server name"
-            />
+            {!testMode && (
+              <>
+                <label className="check">
+                  <input type="checkbox" checked={saveAs} onChange={(e) => setSaveAs(e.target.checked)} /> Save as a server (no password)
+                </label>
+                <input
+                  className="profile-name"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  placeholder="Name, e.g. SMP (main)"
+                  aria-label="Server name"
+                />
+              </>
+            )}
             <span className="grow" />
             {busy && (
               <button type="button" className="btn ghost lg" onClick={cancel}>
@@ -337,51 +417,104 @@ export function ConnectScreen() {
   );
 }
 
+/** Trusted SFTP host keys, with a way to forget one (after a server reinstall, say). */
+function KnownHostsDialog({ onClose }: { onClose: () => void }) {
+  const { confirm, toast } = useApp();
+  const [hosts, setHosts] = useState<KnownHost[] | null>(null);
+  useEffect(() => {
+    getKnownHosts().then(
+      (result) => setHosts(result.hosts),
+      (error: Error) => toast(error.message, true),
+    );
+  }, [toast]);
+
+  async function forget(host: KnownHost) {
+    const ok = await confirm({
+      title: `Forget the key for ${host.host}?`,
+      body: (
+        <p>
+          The next connection will show the server&apos;s current fingerprint for you to check again. Only do this if you know why the key
+          changed (a reinstall or a new host) - otherwise someone may be intercepting the connection.
+        </p>
+      ),
+      okLabel: "Forget key",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      setHosts((await forgetKnownHost(host.host, host.port)).hosts);
+    } catch (error) {
+      toast((error as Error).message, true);
+    }
+  }
+
+  return (
+    <Modal title="Trusted SFTP host keys" onClose={onClose}>
+      {hosts === null ? (
+        <p className="muted">Reading…</p>
+      ) : hosts.length === 0 ? (
+        <p className="muted">No trusted keys yet. A key is added when you confirm it on first connect.</p>
+      ) : (
+        <ul className="hosts-list">
+          {hosts.map((host) => (
+            <li key={`${host.host}:${host.port}:${host.fingerprint}`}>
+              <div className="grow">
+                <b>
+                  {host.host}:{host.port}
+                </b>
+                <code className="small">
+                  {host.keyType} {host.fingerprint}
+                </code>
+              </div>
+              <button type="button" className="btn sm ghost" onClick={() => void forget(host)}>
+                Forget
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="row end">
+        <button className="btn" type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+type LayoutFolder = "serverRoot" | "worldsDir" | "bpDir" | "rpDir";
+const LAYOUT_FOLDERS: { key: LayoutFolder; label: string; placeholder: string }[] = [
+  { key: "serverRoot", label: "Server folder", placeholder: "auto" },
+  { key: "worldsDir", label: "Worlds folder", placeholder: "auto (worlds)" },
+  { key: "bpDir", label: "Behavior packs folder", placeholder: "auto (behavior_packs)" },
+  { key: "rpDir", label: "Resource packs folder", placeholder: "auto (resource_packs)" },
+];
+
 export function LayoutFields({
   layout,
   onChange,
+  onBrowse,
 }: {
   layout: LayoutOverrides;
   onChange: (key: keyof LayoutOverrides, value: string) => void;
+  /** Offer a Browse button per folder (only when connected, so there is something to browse). */
+  onBrowse?: (key: LayoutFolder, label: string) => void;
 }) {
   return (
     <>
-      <label className="field span2">
-        Server folder
-        <input
-          className="mono"
-          value={layout.serverRoot ?? ""}
-          onChange={(e) => onChange("serverRoot", e.target.value)}
-          placeholder="auto"
-        />
-      </label>
-      <label className="field span2">
-        Worlds folder
-        <input
-          className="mono"
-          value={layout.worldsDir ?? ""}
-          onChange={(e) => onChange("worldsDir", e.target.value)}
-          placeholder="auto (worlds)"
-        />
-      </label>
-      <label className="field span2">
-        Behavior packs folder
-        <input
-          className="mono"
-          value={layout.bpDir ?? ""}
-          onChange={(e) => onChange("bpDir", e.target.value)}
-          placeholder="auto (behavior_packs)"
-        />
-      </label>
-      <label className="field span2">
-        Resource packs folder
-        <input
-          className="mono"
-          value={layout.rpDir ?? ""}
-          onChange={(e) => onChange("rpDir", e.target.value)}
-          placeholder="auto (resource_packs)"
-        />
-      </label>
+      {LAYOUT_FOLDERS.map(({ key, label, placeholder }) => (
+        <label key={key} className="field span2">
+          {label}
+          <span className="input-with-button">
+            <input className="mono" value={layout[key] ?? ""} onChange={(e) => onChange(key, e.target.value)} placeholder={placeholder} />
+            {onBrowse && (
+              <button type="button" className="btn sm" onClick={() => onBrowse(key, label)} aria-label={`Browse for ${label}`}>
+                Browse…
+              </button>
+            )}
+          </span>
+        </label>
+      ))}
       <label className="field span4">
         New packs go to
         <select value={layout.packScope} onChange={(e) => onChange("packScope", e.target.value)}>

@@ -5,14 +5,15 @@ import { ROUTES } from "../../shared/api";
 import type { DuplicateMode, InstallResult, PlanAction, UploadEntry } from "../../shared/model";
 import { deleteUploads, getUploads, uploadFile } from "../api/client";
 import { useApp } from "../state/app";
-import { Icon, formatBytes, plural } from "./common";
+import { Icon, formatBytes, plural, shortPath } from "./common";
 import type { WorldContext } from "./Dashboard";
 
 interface Item {
   file: File;
   path: string;
 }
-type Progress = Map<string, { done: number; total: number }>;
+/** Bytes sent of the total, and files finished of the count, per dropped item. */
+type Progress = Map<string, { done: number; total: number; files: number; filesDone: number }>;
 
 const JUNK = /(^|\/)(__MACOSX|\.DS_Store|Thumbs\.db|desktop\.ini)(\/|$)/;
 const LABELS: Record<PlanAction, string> = { upload: "Upload", replace: "Replace", register: "Register", skip: "Skip" };
@@ -52,6 +53,7 @@ function walkEntry(entry: FileSystemEntry, prefix = ""): Promise<Item[]> {
 export function InstallTab({ ctx }: { ctx: WorldContext }) {
   const { state, setState, run, confirm, toast, refresh, busy, mark } = useApp();
   const uploads = state?.uploads ?? [];
+  const root = state?.layout?.serverRoot;
   const [progress, setProgress] = useState<Progress>(new Map());
   const [over, setOver] = useState(false);
   const [mode, setMode] = useState<DuplicateMode>("replace");
@@ -95,28 +97,43 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
   async function upload(items: Item[]) {
     items = items.filter((item) => !JUNK.test(item.path));
     if (!items.length) return;
+    // Progress per top-level item (a file, or a dropped folder), in bytes, so a big archive moves too.
     const tally: Progress = new Map();
     for (const item of items) {
       const top = item.path.split("/")[0]!;
-      const entry = tally.get(top) ?? { done: 0, total: 0 };
-      entry.total++;
+      const entry = tally.get(top) ?? { done: 0, total: 0, files: 0, filesDone: 0 };
+      entry.total += item.file.size;
+      entry.files++;
       tally.set(top, entry);
     }
     setProgress(new Map(tally));
     const queue = [...items];
     let failed: Error | null = null;
+    let lastPaint = 0;
+    const paint = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastPaint < 100) return;
+      lastPaint = now;
+      setProgress(new Map([...tally].map(([name, entry]) => [name, { ...entry }])));
+    };
     await Promise.all(
       Array.from({ length: UPLOAD_CONCURRENCY }, async () => {
         while (queue.length && !failed) {
           const item = queue.shift()!;
+          const entry = tally.get(item.path.split("/")[0]!)!;
+          let sent = 0;
           try {
-            await uploadFile(item.path, item.file);
+            await uploadFile(item.path, item.file, (bytes) => {
+              entry.done += bytes - sent;
+              sent = bytes;
+              paint();
+            });
           } catch (error) {
             failed = error as Error;
             return;
           }
-          tally.get(item.path.split("/")[0]!)!.done++;
-          setProgress(new Map(tally));
+          entry.filesDone++;
+          paint(true);
         }
       }),
     );
@@ -149,12 +166,27 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
   async function install() {
     if (!plan) return;
     const actions = plan.plan.filter((item) => item.action !== "skip").length;
+    const warnings = plan.plan
+      .filter((item) => item.action !== "skip")
+      .flatMap((item) => item.warnings.map((warning) => `${item.name}: ${warning}`));
     const ok = await confirm({
       title: `Install ${plural(actions, "pack")}?`,
       body: (
-        <p>
-          Into <b>{ctx.status?.worldName ?? ctx.world}</b> on <code>{state?.label}</code>.
-        </p>
+        <>
+          <p>
+            Into <b>{ctx.status?.worldName ?? ctx.world}</b> on <code>{state?.label}</code>.
+          </p>
+          {warnings.length > 0 && (
+            <>
+              <p>Check these first:</p>
+              <ul>
+                {warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
       ),
       okLabel: "Install",
     });
@@ -196,7 +228,7 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
         >
           <Icon name="upload" />
           <b>Drop .mcaddon, .mcpack, .zip or pack folders</b>
-          <span className="muted small">Unpacked on this computer — only finished packs are uploaded</span>
+          <span className="muted small">They are unpacked here first, so only finished packs reach the server.</span>
           <div className="row center tight">
             <button className="btn sm" type="button" onClick={() => fileInput.current?.click()}>
               Choose files
@@ -232,32 +264,37 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
           {[...uploads.map((u) => [u.name, u] as const), ...pending.map(([name]) => [name, null] as const)].map(([name, entry]) => {
             const p = progress.get(name);
             const percent = p ? Math.round((p.done / Math.max(1, p.total)) * 100) : 100;
-            const meta =
-              p && p.done < p.total
-                ? `${p.done}/${p.total} files`
-                : entry
-                  ? `${entry.isDir ? `folder · ${entry.files} files · ` : ""}${formatBytes(entry.size)}`
-                  : "";
+            const uploading = !!p && p.filesDone < p.files;
+            const meta = uploading
+              ? `${formatBytes(p.done)} of ${formatBytes(p.total)}`
+              : entry
+                ? `${entry.isDir ? `${plural(entry.files, "file")}, ` : ""}${formatBytes(entry.size)}`
+                : "";
             return (
               <li key={name}>
                 <div className="q-row">
-                  <span className="q-name">{name}</span>
+                  <Icon name={entry?.isDir ? "folder" : "upload"} />
+                  <span className="q-name" title={name}>
+                    {name}
+                  </span>
                   <span className="q-meta">{meta}</span>
                   <button className="icon-btn" aria-label={`Remove ${name}`} onClick={() => void remove(name)} disabled={!entry}>
                     <Icon name="close" />
                   </button>
                 </div>
-                <div className={`bar ${percent >= 100 ? "done" : ""}`}>
-                  <div style={{ width: `${percent}%` }} />
-                </div>
+                {uploading && (
+                  <div className="bar">
+                    <span style={{ width: `${percent}%` }} />
+                  </div>
+                )}
               </li>
             );
           })}
         </ul>
 
-        <div className="grid2">
+        <div className="install-options">
           <label className="field">
-            Older version already on server
+            When an older version is on the server
             <select
               value={mode}
               onChange={(e) => {
@@ -270,7 +307,7 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
               <option value="keep-both">Keep both</option>
             </select>
           </label>
-          <label className="check pad-top">
+          <label className="check">
             <input
               type="checkbox"
               checked={reupload}
@@ -278,34 +315,31 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
                 setReupload(e.target.checked);
                 setStale(uploads.length > 0);
               }}
-            />{" "}
-            Re-upload same versions
+            />
+            Upload again when the same version is there
           </label>
         </div>
       </div>
 
       <div className="plan-card">
         <div className="plan-head">
-          <h2>Plan</h2>
-          <span className="muted small">
-            {applied
-              ? `Done — installed ${applied.stats.installed}, skipped ${applied.stats.skipped}, errors ${applied.stats.errors}`
-              : "Nothing changes until you install"}
-          </span>
+          <h2>{applied ? "Installed" : "Plan"}</h2>
           <span className="grow" />
           <span className="plan-counts">
-            {(Object.entries(counts) as [PlanAction, number][])
-              .filter(([, n]) => n)
-              .map(([action, n]) => (
-                <span key={action} className={`c-${action}`}>
-                  {n} {LABELS[action].toLowerCase()}
-                </span>
-              ))}
+            {applied
+              ? `${applied.stats.installed} installed, ${applied.stats.skipped} skipped${applied.stats.errors ? `, ${applied.stats.errors} failed` : ""}`
+              : (Object.entries(counts) as [PlanAction, number][])
+                  .filter(([, n]) => n)
+                  .map(([action, n]) => (
+                    <span key={action} className={`c-${action}`}>
+                      {n} {LABELS[action].toLowerCase()}
+                    </span>
+                  ))}
           </span>
         </div>
         <div className="plan-list">
           {!shown && (
-            <p className="plan-empty">Add packs on the left to see exactly what will be uploaded, replaced, or only registered.</p>
+            <p className="plan-empty">Add packs to see what will be uploaded, replaced or registered. Nothing changes until you install.</p>
           )}
           {shown && shown.plan.length === 0 && (
             <p className="plan-empty">No installable packs were found in what you added. The activity log says why.</p>
@@ -314,17 +348,25 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
             <div key={`${item.uuid}:${item.versionLabel}:${item.source}:${item.kind}`} className="plan-item">
               <span className={`action ${item.action}`}>{LABELS[item.action]}</span>
               <div className="names">
-                <div>
-                  <b>{item.name}</b>{" "}
-                  <span className="muted small">
-                    v{item.versionLabel} · {item.source}
-                  </span>
+                <div className="plan-name" title={`From ${item.source}`}>
+                  <b>{item.name}</b>
+                  <span className="muted">{item.versionLabel}</span>
                 </div>
                 <div className="reason">{item.reason}</div>
-                {item.target && <div className="target">→ {item.target}</div>}
+                {item.warnings.map((warning) => (
+                  <div key={warning} className="plan-warning">
+                    <Icon name="warn" />
+                    <span>{warning}</span>
+                  </div>
+                ))}
+                {item.target && (
+                  <div className="target" title={item.target}>
+                    To {shortPath(item.target, root)}
+                  </div>
+                )}
                 {item.replaces.map((path) => (
-                  <div key={path} className="target">
-                    removes {path}
+                  <div key={path} className="target" title={path}>
+                    Replaces {shortPath(path, root)}
                   </div>
                 ))}
               </div>

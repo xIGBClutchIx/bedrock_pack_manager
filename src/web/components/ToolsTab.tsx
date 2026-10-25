@@ -4,17 +4,18 @@ import type { CleanupResult, RebuildResult, WorldStatus } from "../../shared/mod
 import { backupUrl } from "../api/client";
 import { useApp } from "../state/app";
 import { plural } from "./common";
-import type { WorldContext } from "./Dashboard";
+import { useBackupLink, type WorldContext } from "./Dashboard";
 
 export function ToolsTab({ ctx }: { ctx: WorldContext }) {
   const { run, confirm, toast, refresh, busy, mark } = useApp();
+  const onBackup = useBackupLink();
 
   async function audit() {
-    mark("Auditing");
+    mark("Checking the world");
     try {
-      const job = await run<WorldStatus>(ROUTES.audit, { world: ctx.world }, { title: "Auditing" });
+      const job = await run<WorldStatus>(ROUTES.audit, { world: ctx.world }, { title: "Checking the world" });
       ctx.setStatus(job.result);
-      toast(job.warnings.length ? `Audit found ${plural(job.warnings.length, "issue")}` : "Audit clean", job.warnings.length > 0);
+      toast(job.warnings.length ? `Found ${plural(job.warnings.length, "problem")}` : "No problems found", job.warnings.length > 0);
     } catch (error) {
       toast((error as Error).message, true);
     }
@@ -22,23 +23,24 @@ export function ToolsTab({ ctx }: { ctx: WorldContext }) {
 
   async function rebuild() {
     const ok = await confirm({
-      title: "Rebuild world pack JSONs?",
+      title: "Register every pack on the server?",
       body: (
         <p>
-          This overwrites <code>world_behavior_packs.json</code> and <code>world_resource_packs.json</code> for this world with every pack
-          found on the server. Packs that are listed but missing are dropped. Built-in game packs are left out.
+          This registers every pack found on the server in <code>world_behavior_packs.json</code> and <code>world_resource_packs.json</code>{" "}
+          for this world, newest version of each. Packs already listed keep their order and subpack; listed packs that are missing are
+          dropped. Built-in game packs, skin packs and misplaced packs are left out.
         </p>
       ),
-      okLabel: "Rebuild",
+      okLabel: "Register all",
       danger: true,
     });
     if (!ok) return;
-    mark("Rebuilding world JSONs");
+    mark("Registering every pack");
     try {
-      const job = await run<RebuildResult>(ROUTES.rebuild, { world: ctx.world }, { title: "Rebuilding world JSONs" });
+      const job = await run<RebuildResult>(ROUTES.rebuild, { world: ctx.world }, { title: "Registering every pack" });
       ctx.setStatus(job.result.status);
       await refresh();
-      toast("Rebuilt");
+      toast("Registered every pack");
     } catch (error) {
       toast((error as Error).message, true);
     }
@@ -59,7 +61,10 @@ export function ToolsTab({ ctx }: { ctx: WorldContext }) {
                 </li>
               ))}
             </ul>
-            <p>No world registers these. Built-in game packs and development folders are never touched.</p>
+            {preview.result.kept.length > 0 && (
+              <p>{plural(preview.result.kept.length, "unregistered folder")} will be kept because another world uses it.</p>
+            )}
+            <p>No world needs these. Built-in game packs and development folders are never touched.</p>
           </>
         ),
         okLabel: "Delete folders",
@@ -75,40 +80,50 @@ export function ToolsTab({ ctx }: { ctx: WorldContext }) {
   }
 
   return (
-    <section className="panel tools">
-      <div className="tool">
-        <h3>Audit</h3>
-        <p>Registrations, missing files, wrong versions, nesting mistakes and missing dependencies. Changes nothing.</p>
-        <button className="btn" onClick={() => void audit()} disabled={busy}>
-          Run audit
-        </button>
-      </div>
-      <div className="tool">
-        <h3>Rebuild world JSONs</h3>
-        <p>Register every pack in the server folders, newest version of each. Game packs are skipped.</p>
-        <button className="btn" onClick={() => void rebuild()} disabled={busy}>
-          Rebuild…
-        </button>
-      </div>
-      <div className="tool">
-        <h3>Clean up folders</h3>
-        <p>Delete pack folders no world uses. Shows the list before deleting anything.</p>
-        <button className="btn" onClick={() => void cleanup()} disabled={busy}>
-          Preview cleanup…
-        </button>
-      </div>
-      <div className="tool">
-        <h3>Backup</h3>
-        <p>Download this world and the pack folders as a zip, streamed straight from the server.</p>
-        <div className="row tight">
-          <a className="btn" href={backupUrl(ctx.world)} aria-disabled={busy} onClick={(event) => busy && event.preventDefault()}>
-            This world
-          </a>
-          <a className="btn ghost" href={backupUrl(null)} aria-disabled={busy} onClick={(event) => busy && event.preventDefault()}>
-            Everything
-          </a>
-        </div>
-      </div>
+    <section className="panel narrow">
+      <ul className="tool-list">
+        <li>
+          <div className="grow">
+            <h3>Check this world</h3>
+            <p>Lists missing files, wrong versions, nesting mistakes and missing dependencies. Changes nothing.</p>
+          </div>
+          <button className="btn" onClick={() => void audit()} disabled={busy}>
+            Run check
+          </button>
+        </li>
+        <li>
+          <div className="grow">
+            <h3>Register every pack</h3>
+            <p>Adds the newest version of every pack on the server to this world, keeping the current order.</p>
+          </div>
+          <button className="btn" onClick={() => void rebuild()} disabled={busy}>
+            Register all…
+          </button>
+        </li>
+        <li>
+          <div className="grow">
+            <h3>Clean up folders</h3>
+            <p>Deletes pack folders no world uses. You see the list first.</p>
+          </div>
+          <button className="btn" onClick={() => void cleanup()} disabled={busy}>
+            Preview cleanup…
+          </button>
+        </li>
+        <li>
+          <div className="grow">
+            <h3>Back up</h3>
+            <p>Downloads a zip of the world and the pack folders. Stop the server first for a complete copy.</p>
+          </div>
+          <div className="row tight">
+            <a className="btn" href={backupUrl(ctx.world)} aria-disabled={busy} onClick={onBackup}>
+              This world
+            </a>
+            <a className="btn" href={backupUrl(null)} aria-disabled={busy} onClick={onBackup}>
+              Whole server
+            </a>
+          </div>
+        </li>
+      </ul>
     </section>
   );
 }

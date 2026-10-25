@@ -14,9 +14,9 @@ It is a Node.js + TypeScript app: a Fastify server with a React web UI, shipped 
 - `src/server/storage/`: `storage.ts` (base class: listing cache, concurrency limit, atomic writes, uploadTree/removeTree/scanTree), `local.ts`, `sftp.ts`, `ftp.ts`, `knownHosts.ts`, `connect.ts`, `path.ts`, `errors.ts`
 - `src/server/core/`: `manifests.ts`, `layout.ts` (layout detection and `Target`), `builtins.ts`, `packIndex.ts`, `worlds.ts`, `nbt.ts`, `log.ts`
 - `src/server/core/install/`: `unpack.ts`, `plan.ts`, `index.ts`
-- `src/server/core/commands/`: `status.ts`, `uninstall.ts`, `maintenance.ts` (audit, rebuild, cleanup, fix nesting), `worldEdit.ts`, `backup.ts`
+- `src/server/core/commands/`: `status.ts` (world status, `otherWorldsUsing`), `uninstall.ts`, `maintenance.ts` (audit, rebuild, cleanup, fix nesting), `worldPacks.ts` (register, reorder, subpack), `worldEdit.ts`, `backup.ts`
 - `src/server/app/`: `paths.ts` (run folder), `profiles.ts`, `logs.ts`
-- `src/web/`: React UI. `api/client.ts`, `state/app.tsx`, `components/*.tsx`, `styles/app.css`
+- `src/web/`: React UI. `api/client.ts`, `state/app.tsx` (runs and follows jobs, reattaches after a reload), `components/*.tsx`, `styles/app.css`
 - `scripts/`: `build-server.mjs` (esbuild bundle), `build-sea.mjs`, `bench.ts`, `demo-servers.ts`, git hook installers
 
 Change `src/shared/` first when the API changes, then the server and the UI against it.
@@ -34,11 +34,13 @@ Add new paths to `src/server/app/paths.ts` and `ensureDirs`.
 
 ## Security Rules
 
-- Bind to `127.0.0.1` only. Keep the per-launch token, Host header check, and CSP.
+- Bind to `127.0.0.1` only. Keep the per-launch token, Host and Origin checks, and CSP. Decide "is this the API" from the matched route and the decoded path, never the raw URL.
 - Never save or log passwords.
 - Never accept an SFTP host key silently: unknown keys go back to the user as `unknown_host_key`; changed keys are refused.
-- Upload paths go through `safeRelative`; archive extraction must reject zip-slip paths.
-- Never delete built-in packs, dev pack folders, or pack folders another world still uses.
+- Upload paths go through `safeRelative`; archive extraction must reject zip-slip paths and stay within `ARCHIVE_LIMITS`.
+- Commands only act on worlds from the session's world list (`Session.requireWorld`).
+- Never delete built-in packs, dev pack folders, or pack folders another world still uses. Check through `otherWorldsUsing` (pass the `PackIndex`), and treat a world whose pack list cannot be read as using the pack.
+- Tree operations never follow symlinks (`Entry.link`).
 
 ## Speed
 

@@ -58,14 +58,14 @@ test("connect over SFTP, install an addon, uninstall a pack", async ({ page }) =
 
   await expect(page.getByRole("heading", { name: "Survival", level: 1 })).toBeVisible();
   await expect(page.getByText(/nested one folder too deep/)).toBeVisible();
-  await expect(page.locator(".conn-chip")).toContainText("sftp://mc@127.0.0.1");
+  await expect(page.locator(".conn-chip")).toContainText("mc@127.0.0.1");
 
   await page.getByRole("button", { name: "Add packs" }).click();
   await page.locator('.dropzone input[type="file"]:not([webkitdirectory])').setInputFiles(join(FIXTURES, "installed", "addon.mcaddon"));
   await expect(page.locator(".plan-item")).toHaveCount(2);
   await page.getByRole("button", { name: "Install 2 packs" }).click();
   await page.locator(".modal").getByRole("button", { name: "Install" }).click();
-  await expect(page.getByText(/Done — installed 2/)).toBeVisible();
+  await expect(page.getByText(/2 installed, 0 skipped/)).toBeVisible();
 
   await page.getByRole("button", { name: /^Packs/ }).click();
   await expect(page.getByRole("row", { name: /Addon BP/ })).toContainText("Installed");
@@ -73,7 +73,38 @@ test("connect over SFTP, install an addon, uninstall a pack", async ({ page }) =
   await page.getByRole("button", { name: "Uninstall & delete files" }).click();
   await page.locator(".modal").getByRole("button", { name: "Uninstall" }).click();
   await expect(page.getByRole("row", { name: /Addon BP/ })).toHaveCount(0);
-  await expect(page.locator(".console")).toContainText("Uninstalling — done");
+  await expect(page.locator(".console-head")).toContainText(/Uninstalling\s*Done in/);
+
+  // The resource pack stayed; its details and the task history are one click away.
+  await page.getByRole("button", { name: "Details for Addon RP" }).click();
+  await expect(page.getByText("No other world uses it.")).toBeVisible();
+  await page.getByRole("button", { name: "History" }).click();
+  await expect(page.getByRole("row", { name: /Uninstalling/ })).toBeVisible();
+  await page
+    .getByRole("row", { name: /Uninstalling/ })
+    .getByRole("button", { name: "View log" })
+    .click();
+  await expect(page.locator(".log-view")).toContainText("Deleted");
+});
+
+test("a reload during a task picks it back up", async ({ page }) => {
+  await page.goto(url);
+  await expect(page.getByRole("heading", { name: "Survival", level: 1 })).toBeVisible();
+  await expect(page.locator(".console-head")).toContainText(/Reading world\s*Done in/);
+  let release!: () => void;
+  const held = app.runner.start("slow", "Holding the server", (job) => {
+    job.log("plain", "waiting");
+    return new Promise((resolve) => (release = () => resolve(null)));
+  });
+  await page.reload();
+  await expect(page.locator(".console-head")).toContainText("Holding the server");
+  await expect(page.locator(".console-head").getByRole("button", { name: "Cancel" })).toBeVisible();
+  release();
+  await held.promise;
+  // The world read that was waiting behind it runs next, instead of failing as "busy".
+  await expect(page.locator(".console-head")).toContainText(/Reading world\s*Done in/);
+  await expect(page.locator(".console")).not.toContainText("still running");
+  await expect(page.getByText("Reading the world…")).toHaveCount(0);
 });
 
 test("cancel a connect to a server that never answers", async ({ page }) => {

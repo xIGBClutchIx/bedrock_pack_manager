@@ -1,30 +1,48 @@
-/** Beta APIs and default gamemode, written to level.dat. */
+/** Experiments (Beta APIs and others) and default gamemode, written to level.dat; and server-wide settings. */
 import { useState } from "react";
 
 import { ROUTES } from "../../shared/api";
-import { GAMEMODES, type Gamemode, type WorldEditResult } from "../../shared/model";
+import { GAMEMODES, type ConnectResult, type Gamemode, type WorldEditResult } from "../../shared/model";
 import { useApp } from "../state/app";
 import { Icon } from "./common";
 import type { WorldContext } from "./Dashboard";
 
 export function WorldTab({ ctx }: { ctx: WorldContext }) {
-  const { run, confirm, toast, busy } = useApp();
+  const { state, run, confirm, toast, refresh, busy } = useApp();
   const level = ctx.status?.level;
-  // The parent remounts this tab when level.dat changes, so these start from the server's values.
-  const [beta, setBeta] = useState<boolean>(!!level?.beta);
+  const layout = state?.layout;
+  // The parent remounts this tab when level.dat or server.properties change, so these start from the server's values.
+  const [experiments, setExperiments] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries((level?.experiments ?? []).map((experiment) => [experiment.key, experiment.enabled])),
+  );
   const [mode, setMode] = useState<Gamemode | null>(level?.gamemode ?? null);
+  const [texturepackRequired, setTexturepackRequired] = useState(!!layout?.texturepackRequired);
 
   if (!level) return <p className="empty-note">Reading the world…</p>;
   const unusable = !level.exists || !!level.error;
-  const changed = (beta && !level.beta) || (mode !== null && mode !== level.gamemode);
+  const live = ctx.status?.isLevelName;
+  const toggled = Object.fromEntries(
+    level.experiments
+      .filter((experiment) => experiments[experiment.key] !== experiment.enabled)
+      .map((experiment) => [experiment.key, experiments[experiment.key]!]),
+  );
+  const changed = Object.keys(toggled).length > 0 || (mode !== null && mode !== level.gamemode);
 
   async function save() {
     const ok = await confirm({
       title: "Change level.dat?",
       body: (
         <p>
-          Make sure the server is <b>stopped</b>, otherwise it may overwrite the change. The current file is kept as{" "}
-          <code>level.dat.backup</code>.
+          {live ? (
+            <>
+              <b>This is the world the server loads.</b> Stop the server first, or it overwrites the change when it shuts down.
+            </>
+          ) : (
+            <>
+              Make sure the server is <b>stopped</b> if it has this world open.
+            </>
+          )}{" "}
+          The current file is kept as <code>level.dat.backup</code>.
         </p>
       ),
       okLabel: "Save",
@@ -33,11 +51,21 @@ export function WorldTab({ ctx }: { ctx: WorldContext }) {
     try {
       const job = await run<WorldEditResult>(
         ROUTES.worldEdit,
-        { world: ctx.world, beta: beta && !level!.beta, gamemode: mode !== level!.gamemode ? mode : null },
+        { world: ctx.world, experiments: toggled, gamemode: mode !== level!.gamemode ? mode : null },
         { title: "Saving world settings" },
       );
       ctx.setStatus(job.result.status);
-      toast("World updated");
+      toast(job.result.changed.length ? "World updated" : "Nothing needed changing");
+    } catch (error) {
+      toast((error as Error).message, true);
+    }
+  }
+
+  async function saveServer() {
+    try {
+      await run<ConnectResult>(ROUTES.serverProperties, { texturepackRequired }, { title: "Saving server.properties" });
+      await refresh();
+      toast("server.properties updated - restart the server");
     } catch (error) {
       toast((error as Error).message, true);
     }
@@ -45,9 +73,13 @@ export function WorldTab({ ctx }: { ctx: WorldContext }) {
 
   return (
     <section className="panel narrow">
-      <div className="banner warn">
-        <Icon name="info" />
-        Stop the server first — a running server overwrites level.dat when it shuts down. A backup is saved as level.dat.backup.
+      <div className={`banner ${live ? "warn" : "info"}`}>
+        <Icon name={live ? "warn" : "info"} />
+        <span>
+          {live
+            ? "The server loads this world. Stop it before saving, or it overwrites these settings when it shuts down."
+            : "If the server has this world open, stop it before saving."}
+        </span>
       </div>
       {unusable ? (
         <div className="banner muted-banner">
@@ -56,26 +88,32 @@ export function WorldTab({ ctx }: { ctx: WorldContext }) {
       ) : (
         <>
           <div className="settings-card">
-            <div className="setting">
-              <div className="grow">
-                <b>Beta APIs</b>
-                <div className="muted small">Turns on the experiments script add-ons need{level.beta ? " (already on)" : ""}</div>
+            <h3 className="card-title">Experiments</h3>
+            {level.experiments.map((experiment) => (
+              <div className="setting" key={experiment.key}>
+                <div className="grow">
+                  <b>{experiment.label}</b>
+                  <div className="muted small">
+                    {experiment.description}
+                    {experiment.enabled ? " (on now)" : ""}
+                  </div>
+                </div>
+                <button
+                  className="switch"
+                  role="switch"
+                  aria-checked={!!experiments[experiment.key]}
+                  aria-label={experiment.label}
+                  disabled={busy}
+                  onClick={() => setExperiments((current) => ({ ...current, [experiment.key]: !current[experiment.key] }))}
+                >
+                  <span />
+                </button>
               </div>
-              <button
-                className="switch"
-                role="switch"
-                aria-checked={beta}
-                aria-label="Beta APIs"
-                disabled={!!level.beta || busy}
-                onClick={() => setBeta(!beta)}
-              >
-                <span />
-              </button>
-            </div>
+            ))}
             <div className="setting">
               <div className="grow">
                 <b>Default gamemode</b>
-                <div className="muted small">Written to level.dat</div>
+                <div className="muted small">What new players start in</div>
               </div>
               <div className="segmented" role="group" aria-label="Gamemode">
                 {GAMEMODES.map((option) => (
@@ -89,6 +127,41 @@ export function WorldTab({ ctx }: { ctx: WorldContext }) {
           <div className="row end">
             <button className="btn primary" onClick={() => void save()} disabled={busy || !changed}>
               Save world settings
+            </button>
+          </div>
+        </>
+      )}
+
+      {layout?.serverProperties && (
+        <>
+          <div className="settings-card">
+            <h3 className="card-title">Whole server</h3>
+            <div className="setting">
+              <div className="grow">
+                <b>Require resource packs</b>
+                <div className="muted small" title={`texturepack-required in ${layout.serverProperties}`}>
+                  Players must download the resource packs to join
+                </div>
+              </div>
+              <button
+                className="switch"
+                role="switch"
+                aria-checked={texturepackRequired}
+                aria-label="Require resource packs"
+                disabled={busy}
+                onClick={() => setTexturepackRequired(!texturepackRequired)}
+              >
+                <span />
+              </button>
+            </div>
+          </div>
+          <div className="row end">
+            <button
+              className="btn"
+              onClick={() => void saveServer()}
+              disabled={busy || texturepackRequired === !!layout.texturepackRequired}
+            >
+              Save server setting
             </button>
           </div>
         </>

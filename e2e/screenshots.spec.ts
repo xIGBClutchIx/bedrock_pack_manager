@@ -61,7 +61,7 @@ test("screens", async ({ page }) => {
     await page.locator('.dropzone input[type="file"]:not([webkitdirectory])').setInputFiles(join(FIXTURES, "installed", "addon.mcaddon"));
     await page.locator(".plan-item").first().waitFor();
     await page.screenshot({ path: out("3-install-plan"), fullPage: true });
-    await page.getByRole("button", { name: "World settings" }).click();
+    await page.getByRole("button", { name: "World", exact: true }).click();
     await page.screenshot({ path: out("4-world"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: /^Packs/ }).click();
