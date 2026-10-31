@@ -4,12 +4,23 @@ import { CancelledError, throwIfAborted } from "../../storage/errors";
 import { JUNK_NAMES, basename, join } from "../../storage/path";
 import type { CommandContext } from "../install";
 import { info, ok, plain, section, warn } from "../log";
-import { compareVersions, uuidKey } from "../manifests";
+import { compareVersions, registrationVersion, uuidKey } from "../manifests";
 import { PackIndex, versionLabel, type InstalledPack } from "../packIndex";
 import { WorldJsonError, loadWorldJson, saveWorldJson, type WorldEntry } from "../worlds";
-import { loadWorldPacks, otherWorldsUsing, registrationNeeds, worldStatus, worldSummaries, type WorldJsonCache } from "./status";
+import {
+  cachedWorldJson,
+  loadWorldPacks,
+  otherWorldsUsing,
+  registrationNeeds,
+  worldStatus,
+  worldSummaries,
+  type WorldJsonCache,
+  type WorldPacks,
+} from "./status";
 
 export { worldSummaries };
+
+const KINDS = ["bp", "rp"] as const;
 
 const STATUS_WARNINGS: Record<string, (label: string, json: string, row: WorldStatus["packs"][number]) => string> = {
   missing: (label, json, row) => `${label} ${row.name} (${row.uuid}) is registered in ${json} but missing on the server`,
@@ -41,7 +52,8 @@ export async function runAudit(ctx: CommandContext, world: string): Promise<Worl
 /**
  * Register every pack on the server in the world JSONs (newest version of each). Entries that are
  * already there keep their place in the list (resource pack priority) and extra fields such as
- * `subpack`; packs that are no longer on the server are dropped; new ones go after them.
+ * `subpack`; packs that are no longer on the server are dropped; new ones go after them. Nested and
+ * built-in packs are never added, but entries for them are kept (a nested pack is one fix away from loading).
  */
 export async function runRebuild(ctx: CommandContext, world: string): Promise<RebuildResult> {
   const { target, log } = ctx;
@@ -51,8 +63,13 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
   const counts = { bp: 0, rp: 0 };
   for (const kind of ["bp", "rp"] as const) {
     const newest = new Map<string, InstalledPack>();
+    // Nested and built-in packs are never added, but a world that already lists one keeps it.
+    const notAdded = new Map<string, InstalledPack>();
     for (const pack of index.ofKind(kind)) {
-      if (pack.nested || pack.builtin) continue;
+      if (pack.nested || pack.builtin) {
+        notAdded.set(uuidKey(pack.uuid), pack);
+        continue;
+      }
       if (pack.kind !== kind) {
         // Skin packs, world templates and packs in the wrong folder would only confuse the game.
         warn(
@@ -86,18 +103,30 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
     for (const entry of existing) {
       const pack = newest.get(uuidKey(entry.pack_id));
       if (!pack || placed.has(uuidKey(pack.uuid))) {
+        const other = notAdded.get(uuidKey(entry.pack_id));
+        if (!pack && other && !placed.has(uuidKey(other.uuid))) {
+          placed.add(uuidKey(other.uuid));
+          entries.push(entry);
+          if (other.nested)
+            warn(
+              log,
+              `Kept ${other.name} in ${basename(jsonPath)}: it is nested one folder too deep (${target.describe(other.path)}) - fix the nesting so the server loads it`,
+            );
+          else info(log, `Kept the built-in game pack ${other.name} in ${basename(jsonPath)}`);
+          continue;
+        }
         if (!pack && entry.pack_id) info(log, `Dropped ${entry.pack_id}: not on the server`);
         continue;
       }
       placed.add(uuidKey(pack.uuid));
-      entries.push({ ...entry, pack_id: pack.uuid, version: pack.version });
+      entries.push({ ...entry, pack_id: pack.uuid, version: registrationVersion(pack.version) });
       ok(log, `[${kind.toUpperCase()}] ${pack.name} v${versionLabel(pack)}`);
     }
     const added = [...newest.values()]
       .filter((pack) => !placed.has(uuidKey(pack.uuid)))
       .sort((a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase()));
     for (const pack of added) {
-      entries.push({ pack_id: pack.uuid, version: pack.version });
+      entries.push({ pack_id: pack.uuid, version: registrationVersion(pack.version) });
       ok(log, `[${kind.toUpperCase()}] ${pack.name} v${versionLabel(pack)} (added)`);
     }
     await saveWorldJson(target.storage, jsonPath, entries);
@@ -109,14 +138,53 @@ export async function runRebuild(ctx: CommandContext, world: string): Promise<Re
 }
 
 /**
- * Delete pack folders that neither this world nor any other needs (see otherWorldsUsing). With `only`,
- * just those folders (storage paths) are considered.
+ * UUIDs that registered packs need, in any world, following dependencies of dependencies; each maps to
+ * the name of a pack that needs it. Worlds whose lists cannot be read are left to otherWorldsUsing, which
+ * already counts them as using everything.
+ */
+async function neededByRegisteredPacks(
+  target: CommandContext["target"],
+  world: string,
+  worldPacks: WorldPacks,
+  index: PackIndex,
+  cache: WorldJsonCache,
+): Promise<Map<string, string>> {
+  const others = (await target.listWorlds()).filter((other) => other !== world);
+  const lists = await Promise.all(
+    others.flatMap((other) => (["bp", "rp"] as const).map((kind) => cachedWorldJson(target, other, kind, cache))),
+  );
+  const users = [...index.packs].filter((pack) =>
+    [worldPacks.bp, worldPacks.rp, ...lists].some(
+      (entries) => !(entries instanceof Error) && entries.some((entry) => uuidKey(entry.pack_id) === uuidKey(pack.uuid)),
+    ),
+  );
+  const needed = new Map<string, string>();
+  const seen = new Set<InstalledPack>();
+  while (users.length) {
+    const pack = users.pop()!;
+    if (seen.has(pack)) continue;
+    seen.add(pack);
+    for (const dep of pack.dependencies) {
+      const uuid = uuidKey(dep.uuid);
+      if (!uuid || uuid === uuidKey(pack.uuid) || needed.has(uuid)) continue;
+      needed.set(uuid, pack.name);
+      users.push(...index.find(uuid));
+    }
+  }
+  return needed;
+}
+
+/**
+ * Delete pack folders that neither this world nor any other needs (see otherWorldsUsing): a pack counts
+ * as used when it is registered in either pack list (a misplaced pack may be listed under the other
+ * kind), or when a registered pack depends on it. With `only`, just those folders (storage paths) are considered.
  */
 export async function runCleanup(ctx: CommandContext, world: string, dryRun: boolean, only?: string[]): Promise<CleanupResult> {
   const { target, log } = ctx;
   section(log, dryRun ? "Clean up pack folders (preview)" : "Clean up pack folders");
   const [index, worldPacks] = await Promise.all([PackIndex.build(target, world), loadWorldPacks(target, world)]);
   const cache: WorldJsonCache = new Map();
+  const needed = await neededByRegisteredPacks(target, world, worldPacks, index, cache);
   const wanted = only?.length ? new Set(only) : null;
   const deleted: string[] = [];
   const kept: string[] = [];
@@ -133,6 +201,10 @@ export async function runCleanup(ctx: CommandContext, world: string, dryRun: boo
       if (wanted) keep(pack, "a built-in game pack");
       continue;
     }
+    if (pack.builtinName) {
+      keep(pack, "named like a built-in game pack - delete it by hand if it is yours");
+      continue;
+    }
     if (pack.scope === "dev") {
       if (wanted) keep(pack, "a development pack");
       continue;
@@ -141,11 +213,19 @@ export async function runCleanup(ctx: CommandContext, world: string, dryRun: boo
       if (wanted) keep(pack, "nested inside another folder - fix the nesting first");
       continue;
     }
-    if (registrationNeeds(worldPacks[pack.dirKind], pack.dirKind, pack, index)) {
+    if (KINDS.some((kind) => registrationNeeds(worldPacks[kind], kind, pack, index))) {
       if (wanted) keep(pack, "this world uses it");
       continue;
     }
-    const others = pack.scope === "shared" ? await otherWorldsUsing(target, world, pack.dirKind, pack, cache, index) : [];
+    const neededBy = needed.get(uuidKey(pack.uuid));
+    if (neededBy) {
+      keep(pack, `'${neededBy}' depends on it`);
+      continue;
+    }
+    const others =
+      pack.scope === "shared"
+        ? [...new Set((await Promise.all(KINDS.map((kind) => otherWorldsUsing(target, world, kind, pack, cache, index)))).flat())].sort()
+        : [];
     if (others.length) {
       keep(pack, `still used by ${others.join(", ")}`);
       continue;

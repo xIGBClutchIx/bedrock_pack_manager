@@ -28,7 +28,10 @@ export interface LevelDat {
 export function parseLevelDat(data: Buffer): LevelDat {
   if (data.length < 8) throw new Error("level.dat is too short to be valid");
   const version = data.readUInt32LE(0);
-  const root = nbt.parseUncompressed(data.subarray(8), "little");
+  // The header says how long the NBT is; anything after it (some tools pad the file) is not part of it.
+  const length = data.readUInt32LE(4);
+  if (8 + length > data.length) throw new Error(`level.dat is truncated (header says ${length} bytes, file has ${data.length - 8})`);
+  const root = nbt.parseUncompressed(data.subarray(8, 8 + length), "little");
   return { version, root };
 }
 

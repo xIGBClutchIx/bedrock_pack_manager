@@ -2,7 +2,7 @@
 import type { Version } from "../../shared/model";
 import { isNotFound } from "../storage/errors";
 import type { Storage } from "../storage/storage";
-import { ManifestError, normalizeVersion, parseJsonLenient, uuidKey, versionsEqual } from "./manifests";
+import { ManifestError, normalizeVersion, parseJsonLenient, registrationMatches, registrationVersion, uuidKey } from "./manifests";
 
 export interface WorldEntry {
   pack_id: string;
@@ -36,15 +36,26 @@ export async function saveWorldJson(storage: Storage, path: string, entries: Wor
   await storage.writeText(path, `${JSON.stringify(entries, null, 2)}\n`);
 }
 
-/** Add a pack or update its version. */
-export function upsertEntry(entries: WorldEntry[], uuid: string, version: Version): "added" | "updated" | "unchanged" {
+/**
+ * Add a pack or update its version (written as the three numbers world JSONs use). When the version
+ * changes and `subpacks` (the folder names the new version offers) is given, a chosen subpack the new
+ * version does not have is dropped; without `subpacks` it is kept, since nothing is known about it.
+ */
+export function upsertEntry(
+  entries: WorldEntry[],
+  uuid: string,
+  version: Version,
+  subpacks?: readonly string[],
+): "added" | "updated" | "unchanged" {
+  const listed = registrationVersion(version);
   const existing = entries.find((entry) => uuidKey(entry.pack_id) === uuidKey(uuid));
   if (existing) {
-    if (versionsEqual(existing.version, version)) return "unchanged";
-    existing.version = version;
+    if (registrationMatches(existing.version, listed)) return "unchanged";
+    existing.version = listed;
+    if (subpacks && typeof existing.subpack === "string" && !subpacks.includes(existing.subpack)) delete existing.subpack;
     return "updated";
   }
-  entries.push({ pack_id: uuid, version });
+  entries.push({ pack_id: uuid, version: listed });
   return "added";
 }
 
@@ -72,4 +83,6 @@ export function registeredKeys(entries: WorldEntry[]): Set<string> {
   return keys;
 }
 
-export const packVersionKey = (uuid: string, version: Version): string => `${uuidKey(uuid)}|${JSON.stringify(normalizeVersion(version))}`;
+/** `uuid|version` as a world entry sees it: prereleases share the key of their release (see registrationVersion). */
+export const packVersionKey = (uuid: string, version: Version): string =>
+  `${uuidKey(uuid)}|${JSON.stringify(registrationVersion(version))}`;

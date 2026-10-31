@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { join as joinLocal } from "node:path";
 
+import { LocalStorage } from "../src/server/storage/local";
 import { NotFoundError, StorageError } from "../src/server/storage/errors";
 import { basename, join, parent, relative } from "../src/server/storage/path";
 import { BACKENDS, makeStorage, tempDir, writeFile, type StorageHarness } from "./helpers";
@@ -120,6 +121,47 @@ describe.each(BACKENDS)("%s storage", (backend) => {
     }
   });
 
+  it("uploads into an existing tree, creating only the missing folders", async () => {
+    const source = tempDir();
+    try {
+      writeFile(joinLocal(h.root, "packs", "P", "textures", "a", "old.png"), "old");
+      writeFile(joinLocal(source.path, "textures", "a", "x.png"), "x");
+      writeFile(joinLocal(source.path, "textures", "b", "c", "y.png"), "y");
+      writeFile(joinLocal(source.path, "texts", "z.txt"), "z");
+      await h.storage.listDir("packs/P/textures"); // a cached parent listing must not hide the new folders
+      expect(await h.storage.uploadTree(source.path, "packs/P")).toBe(3);
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "a", "x.png"), "utf8")).toBe("x");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "a", "old.png"), "utf8")).toBe("old");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "b", "c", "y.png"), "utf8")).toBe("y");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "texts", "z.txt"), "utf8")).toBe("z");
+      expect((await h.storage.listDir("packs/P/textures")).map((e) => e.name)).toEqual(["a", "b"]);
+    } finally {
+      source.cleanup();
+    }
+  });
+
+  it("writes and reads back a file many chunks long", async () => {
+    const big = Buffer.alloc(300_000);
+    for (let index = 0; index < big.length; index++) big[index] = (index * 7) % 251;
+    await h.storage.writeFile("big/data.bin", big);
+    expect(readFileSync(joinLocal(h.root, "big", "data.bin")).equals(big)).toBe(true);
+    expect((await h.storage.readFile("big/data.bin")).equals(big)).toBe(true);
+    await h.storage.writeFile("big/empty.bin", Buffer.alloc(0));
+    expect(readFileSync(joinLocal(h.root, "big", "empty.bin")).length).toBe(0);
+  });
+
+  it("downloads more files than the read window, in scan order", async () => {
+    for (let index = 0; index < 70; index++) writeFile(joinLocal(h.root, "w", `f${String(index).padStart(2, "0")}.txt`), String(index));
+    const seen: string[] = [];
+    for await (const [path, data] of h.storage.downloadFiles("w")) {
+      expect(data.toString()).toBe(String(Number(path.slice(1, 3))));
+      seen.push(path);
+    }
+    const { files } = await h.storage.scanTree("w");
+    expect(seen).toEqual(files.map((file) => file.slice(2)));
+    expect(seen).toHaveLength(70);
+  });
+
   it("downloads files with relative paths and scans trees", async () => {
     writeFile(joinLocal(h.root, "w", "level.dat"), "L");
     writeFile(joinLocal(h.root, "w", "db", "CURRENT"), "C");
@@ -173,6 +215,50 @@ describe.each(BACKENDS)("%s storage", (backend) => {
 });
 
 // The FTP test server cannot report links, so this runs where links are visible.
+describe("download window", () => {
+  /** Local storage with slow reads that counts reads still running and fails one file. */
+  class SlowStorage extends LocalStorage {
+    active = 0;
+    protected override async rawRead(path: string, signal?: AbortSignal): Promise<Buffer> {
+      this.active++;
+      try {
+        if (path.endsWith("bad.txt")) throw new Error("unreadable");
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 50);
+          signal?.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
+        });
+        signal?.throwIfAborted();
+        return await super.rawRead(path);
+      } finally {
+        this.active--;
+      }
+    }
+  }
+
+  let dir: ReturnType<typeof tempDir>;
+  beforeEach(() => {
+    dir = tempDir();
+    writeFile(joinLocal(dir.path, "w", "a-bad.txt"), "x");
+    for (let index = 0; index < 20; index++) writeFile(joinLocal(dir.path, "w", `f${index}.txt`), "x");
+  });
+  afterEach(() => dir.cleanup());
+
+  it("leaves no reads running after a failed file", async () => {
+    const storage = new SlowStorage(dir.path);
+    await expect(async () => {
+      for await (const _file of storage.downloadFiles("w")) void _file;
+    }).rejects.toThrow("unreadable");
+    expect(storage.active).toBe(0);
+  });
+
+  it("leaves no reads running when the consumer stops early", async () => {
+    rmSync(joinLocal(dir.path, "w", "a-bad.txt"));
+    const storage = new SlowStorage(dir.path);
+    for await (const _file of storage.downloadFiles("w")) break;
+    expect(storage.active).toBe(0);
+  });
+});
+
 describe.each(["local", "sftp"] as const)("%s storage and symlinks", (backend) => {
   let h: StorageHarness;
   beforeEach(async () => {

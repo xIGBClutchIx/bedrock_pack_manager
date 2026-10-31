@@ -3,8 +3,8 @@ import type { DuplicateMode, PlanItem } from "../../../shared/model";
 import { isNotFound } from "../../storage/errors";
 import { join } from "../../storage/path";
 import type { Target } from "../layout";
-import { compareVersions, uuidKey } from "../manifests";
-import { folderOf, versionLabel, type InstalledPack, type PackIndex } from "../packIndex";
+import { compareVersions, uuidKey, versionsEqual } from "../manifests";
+import { folderOf, isProtectedPack, versionLabel, type InstalledPack, type PackIndex } from "../packIndex";
 import { upsertEntry, type WorldEntry } from "../worlds";
 import { otherWorldsUsing, type WorldJsonCache, type WorldPacks } from "../commands/status";
 import { packFolderName, versionText, type IncomingPack } from "./unpack";
@@ -25,8 +25,6 @@ export interface PlanOptions {
   duplicateMode: DuplicateMode;
   reupload: boolean;
 }
-
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 export async function planInstall(
   target: Target,
@@ -91,11 +89,12 @@ export async function planInstall(
       continue;
     }
     const existing = index.find(pack.uuid, pack.kind);
-    const sameVersion = existing.filter((copy) => same(copy.version, pack.version));
+    const sameVersion = existing.filter((copy) => versionsEqual(copy.version, pack.version));
     const warnings = reusedUuidWarnings(pack, existing);
+    const subpacks = pack.details.subpacks.map((subpack) => subpack.folder);
 
     if (sameVersion.length && !options.reupload) {
-      const registration = upsertEntry(pending[pack.kind], pack.uuid, pack.version);
+      const registration = upsertEntry(pending[pack.kind], pack.uuid, pack.version, subpacks);
       const plan: PlannedPack =
         registration === "unchanged"
           ? { ...base(pack), reason: "Same UUID and version already installed and registered", keep: sameVersion }
@@ -125,8 +124,9 @@ export async function planInstall(
     if (existing.length && options.duplicateMode === "replace") {
       // Never delete development copies, the game's own packs, or a shared copy another world still needs.
       for (const copy of existing) {
-        if (copy.scope === "dev" || copy.builtin) {
+        if (copy.scope === "dev" || isProtectedPack(copy)) {
           plan.keep.push(copy);
+          if (copy.builtinName) warnings.push(`Keeping ${folderOf(copy)}: it is named like a built-in game pack`);
           continue;
         }
         const users = copy.scope === "shared" ? await otherWorldsUsing(target, world, pack.kind, copy, usageCache, index) : [];
@@ -139,7 +139,7 @@ export async function planInstall(
       }
       plan.reason = plan.replace.length
         ? `Replacing v${plan.replace.map(versionLabel).join(", ")}`
-        : plan.keep.some((copy) => copy.scope === "dev" || copy.builtin)
+        : plan.keep.some((copy) => copy.scope === "dev" || isProtectedPack(copy))
           ? "Upload (development copy left alone)"
           : "Upload beside the copies other worlds use";
       const downgrade = existing.filter((copy) => compareVersions(copy.version, pack.version) > 0);
@@ -157,9 +157,22 @@ export async function planInstall(
     const freed = new Set(plan.replace.filter((copy) => copy.packDir === targetDir).map((copy) => folderOf(copy).toLowerCase()));
     plan.targetFolder = packFolderName(pack.displayName, pack.folder, pack.kind, new Set([...names].filter((name) => !freed.has(name))));
     names.add(plan.targetFolder.toLowerCase());
-    plan.registration = upsertEntry(pending[pack.kind], pack.uuid, pack.version);
+    plan.registration = upsertEntry(pending[pack.kind], pack.uuid, pack.version, subpacks);
     plans.push(plan);
     queued.set(key, plan);
+  }
+
+  // A behavior and a resource pack with one UUID is a copy-paste mistake the game refuses to load.
+  for (const plan of plans) {
+    const other = plan.pack.kind === "bp" ? "rp" : "bp";
+    const clash =
+      incoming.find((pack) => pack.kind === other && uuidKey(pack.uuid) === uuidKey(plan.pack.uuid)) ??
+      index.find(plan.pack.uuid).find((copy) => (copy.kind ?? copy.dirKind) === other);
+    if (!clash) continue;
+    const name = "displayName" in clash ? clash.displayName : clash.name;
+    plan.warnings.push(
+      `Shares its UUID with the ${other === "bp" ? "behavior" : "resource"} pack '${name}' - the game will not load both; each pack needs its own UUID`,
+    );
   }
   return plans;
 }

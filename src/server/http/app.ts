@@ -6,6 +6,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createWriteStream, existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
+import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -88,6 +89,7 @@ const MIME: Record<string, string> = {
   ".woff2": "font/woff2",
   ".json": "application/json",
 };
+const SSE_HEARTBEAT_MS = 15_000;
 const CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
 
@@ -210,9 +212,12 @@ export function createApp(options: AppOptions): App {
     return reply.code(status).send({ error: error.message, code: status === 400 ? ERROR_CODES.badRequest : "error" });
   });
 
-  /** Start a job and answer with its id; the UI follows it over SSE. */
-  const startJob = (reply: FastifyReply, kind: string, title: string, run: (job: Job) => Promise<unknown>) => {
-    const job = runner.start(kind, title, run, mapJobError);
+  /**
+   * Start a job and answer with its id; the UI follows it over SSE. `quiet` marks read-only jobs (world reads,
+   * dry runs), which the history keeps fewer of.
+   */
+  const startJob = (reply: FastifyReply, kind: string, title: string, run: (job: Job) => Promise<unknown>, quiet = false) => {
+    const job = runner.start(kind, title, run, mapJobError, { quiet });
     return reply.code(202).send({ job: job.id });
   };
   const body = <T>(request: FastifyRequest) => (request.body ?? {}) as T;
@@ -239,10 +244,14 @@ export function createApp(options: AppOptions): App {
   fastify.post(ROUTES.connect, async (request, reply) => {
     const { settings, layout } = body<ConnectRequest>(request);
     if (!settings || !PROTOCOLS.includes(settings.protocol)) throw new JobFailure("Unknown protocol", ERROR_CODES.badRequest);
+    // Empty (or 0) means the protocol's default port; anything else must be a real port number.
+    const port = settings.port === null || settings.port === undefined || String(settings.port).trim() === "" ? 0 : Number(settings.port);
+    if (port !== 0 && !(Number.isInteger(port) && port >= 1 && port <= 65535))
+      throw new JobFailure("Port must be a whole number from 1 to 65535", ERROR_CODES.badRequest);
     const clean = {
       protocol: settings.protocol,
       host: str(settings.host).trim(),
-      port: Number.isFinite(Number(settings.port)) && settings.port ? Number(settings.port) : null,
+      port: port || null,
       username: str(settings.username).trim(),
       root: str(settings.root).trim(),
       password: str(settings.password) || undefined,
@@ -290,37 +299,59 @@ export function createApp(options: AppOptions): App {
   fastify.post(ROUTES.status, async (request, reply) => {
     const { world, refreshWorlds } = body<StatusRequest>(request);
     session.requireTarget();
-    return startJob(reply, "status", "Reading world", async (job) => {
-      const target = session.requireTarget();
-      target.storage.clearCache();
-      if (refreshWorlds) await session.refreshWorlds();
-      const path = await session.requireWorld(world);
-      const status = await worldStatus(target, path);
-      job.log("plain", `${status.packs.length} pack(s), ${status.problems.length} problem(s)`);
-      return status;
-    });
+    return startJob(
+      reply,
+      "status",
+      "Reading world",
+      async (job) => {
+        const target = session.requireTarget();
+        target.storage.clearCache();
+        if (refreshWorlds) await session.refreshWorlds();
+        const path = await session.requireWorld(world);
+        const status = await worldStatus(target, path);
+        job.log("plain", `${status.packs.length} pack(s), ${status.problems.length} problem(s)`);
+        return status;
+      },
+      true,
+    );
   });
 
   fastify.post(ROUTES.install, async (request, reply) => {
     const input = body<InstallRequest>(request);
     const mode: DuplicateMode = input.duplicateMode === "skip" || input.duplicateMode === "keep-both" ? input.duplicateMode : "replace";
     session.requireTarget();
+    const dryRun = !!input.dryRun;
     if (uploadsInFlight > 0) throw new JobFailure("Files are still uploading - wait for them to finish", ERROR_CODES.busy);
-    const sources = (await readdir(paths.uploadsDir))
-      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
-      .map((name) => join(paths.uploadsDir, name));
-    if (!sources.length) throw new JobFailure("Add some packs first", ERROR_CODES.noUploads);
-    return startJob(reply, "install", input.dryRun ? "Planning install" : `Installing ${sources.length} item(s)`, async (job) => {
-      const ctx = context(job);
-      ctx.target.storage.clearCache();
-      const world = await session.requireWorld(input.world);
-      const result = await runInstall(ctx, { world, sources, duplicateMode: mode, reupload: !!input.reupload, dryRun: !!input.dryRun });
-      if (result.applied) {
-        await session.refreshWorlds(result.worlds);
-        if (result.stats.errors === 0) await clearUploads();
-      }
-      return result;
-    });
+    if (installPending || runner.busy) throw new BusyError(`Another task (${runner.active?.title ?? "an install"}) is still running`);
+    // A real install reads and then clears the uploads folder: refuse uploads from here on, before the first await.
+    if (!dryRun) installPending = true;
+    try {
+      const sources = (await readdir(paths.uploadsDir))
+        .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+        .map((name) => join(paths.uploadsDir, name));
+      if (!sources.length) throw new JobFailure("Add some packs first", ERROR_CODES.noUploads);
+      const job = runner.start(
+        "install",
+        dryRun ? "Planning install" : `Installing ${sources.length} item(s)`,
+        async (job) => {
+          const ctx = context(job);
+          ctx.target.storage.clearCache();
+          const world = await session.requireWorld(input.world);
+          const result = await runInstall(ctx, { world, sources, duplicateMode: mode, reupload: !!input.reupload, dryRun });
+          if (result.applied) {
+            await session.refreshWorlds(result.worlds);
+            if (result.stats.errors === 0) await clearUploads();
+          }
+          return result;
+        },
+        mapJobError,
+        { quiet: dryRun },
+      );
+      if (!dryRun) installJob = job;
+      return reply.code(202).send({ job: job.id });
+    } finally {
+      installPending = false;
+    }
   });
 
   fastify.post(ROUTES.uninstall, async (request, reply) => {
@@ -362,6 +393,7 @@ export function createApp(options: AppOptions): App {
         ctx.target.storage.clearCache();
         return runCleanup(ctx, await session.requireWorld(world), !!dryRun, only);
       },
+      !!dryRun,
     );
   });
 
@@ -415,11 +447,17 @@ export function createApp(options: AppOptions): App {
     const { world, paths: picked, dryRun } = body<FixNestingRequest>(request);
     session.requireTarget();
     const wanted = Array.isArray(picked) ? picked.filter((path): path is string => typeof path === "string") : [];
-    return startJob(reply, "fix-nesting", dryRun ? "Previewing nesting fix" : "Fixing nested packs", async (job) => {
-      const ctx = context(job);
-      ctx.target.storage.clearCache();
-      return runFixNesting(ctx, await session.requireWorld(world), wanted, !!dryRun);
-    });
+    return startJob(
+      reply,
+      "fix-nesting",
+      dryRun ? "Previewing nesting fix" : "Fixing nested packs",
+      async (job) => {
+        const ctx = context(job);
+        ctx.target.storage.clearCache();
+        return runFixNesting(ctx, await session.requireWorld(world), wanted, !!dryRun);
+      },
+      !!dryRun,
+    );
   });
 
   fastify.post(ROUTES.worldEdit, async (request, reply) => {
@@ -440,39 +478,53 @@ export function createApp(options: AppOptions): App {
   fastify.get(ROUTES.backup, async (request, reply) => {
     const worldParam = str((request.query as Record<string, unknown>).world);
     session.requireTarget();
+    // Checked before requireWorld, which may rescan the worlds while another job uses the connection.
+    if (runner.busy) throw new BusyError(`Another task (${runner.active!.title}) is still running`);
     const world = worldParam ? await session.requireWorld(worldParam) : null;
     const name = backupFileName(world);
+    // The zip goes through this stream rather than straight into the response: the headers go out with the
+    // first chunk, and ending the zip (even an aborted one) does not end the response, so a failure before any
+    // data still answers with a JSON error. The route ends the response once the job has finished.
+    const raw = reply.raw;
+    const download = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        if (!raw.headersSent) {
+          raw.writeHead(200, {
+            "Content-Type": "application/zip",
+            "Content-Disposition": `attachment; filename="${name}"`,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          });
+        }
+        if (raw.write(chunk)) callback();
+        else raw.once("drain", () => callback());
+      },
+    });
+    download.on("error", () => undefined); // runBackup sees it too; this only keeps a late one from going unhandled
+    raw.on("close", () => download.destroy(new Error("The download was closed")));
     const job = runner.start(
       "backup",
       world ? "Backing up world" : "Backing up the server",
-      async (j) => {
-        reply.raw.writeHead(200, {
-          "Content-Type": "application/zip",
-          "Content-Disposition": `attachment; filename="${name}"`,
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        });
-        return runBackup(context(j), world, reply.raw);
-      },
+      async (j) => runBackup(context(j), world, download),
       mapJobError,
     );
     reply.hijack();
     // The browser stopping the download (or the tab closing) cancels the backup instead of reading on.
     const onClose = () => {
-      if (!reply.raw.writableFinished) runner.cancel(job.id);
+      if (!raw.writableFinished) runner.cancel(job.id);
     };
-    reply.raw.on("close", onClose);
+    raw.on("close", onClose);
     await job.promise;
-    reply.raw.off("close", onClose);
+    raw.off("close", onClose);
     if (job.status === "done") {
-      if (!reply.raw.writableEnded) reply.raw.end();
-    } else if (!reply.raw.headersSent) {
-      reply.raw.writeHead(500, { "Content-Type": "application/json" });
-      reply.raw.end(JSON.stringify({ error: job.error, code: job.errorCode }));
+      if (!raw.writableEnded) raw.end();
+    } else if (!raw.headersSent) {
+      raw.writeHead(500, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      raw.end(JSON.stringify({ error: job.error, code: job.errorCode }));
     } else {
       // Part of the zip is already sent: break the connection so the browser marks the download failed
       // instead of saving a truncated archive that looks complete.
-      reply.raw.destroy(new Error(job.error ?? "Backup failed"));
+      raw.destroy(new Error(job.error ?? "Backup failed"));
     }
   });
 
@@ -505,13 +557,25 @@ export function createApp(options: AppOptions): App {
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     });
-    const send = (event: unknown) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    const raw = reply.raw;
+    const send = (event: unknown) => raw.write(`data: ${JSON.stringify(event)}\n\n`);
     const unsubscribe = job.subscribe(since, (event) => {
       send(event);
-      if (event.type === "end") reply.raw.end();
+      if (event.type === "end") raw.end();
     });
-    if (job.status !== "running") reply.raw.end();
-    request.raw.on("close", unsubscribe);
+    if (job.status !== "running") {
+      raw.end();
+      return;
+    }
+    // A comment line now and then keeps proxies and idle timeouts from dropping a quiet stream.
+    const heartbeat = setInterval(() => {
+      if (!raw.writableEnded) raw.write(": ping\n\n");
+    }, SSE_HEARTBEAT_MS);
+    heartbeat.unref();
+    raw.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   });
 
   // ---- uploads ------------------------------------------------------------------------------------
@@ -560,7 +624,14 @@ export function createApp(options: AppOptions): App {
 
   /** Uploads still being written; an install waits for them, since it reads (and then clears) the same folder. */
   let uploadsInFlight = 0;
-  const installRunning = () => runner.busy && runner.active?.kind === "install";
+  /** Set from an install request's first check until its job starts (or the request fails). */
+  let installPending = false;
+  /** The last real (not dry-run) install job. */
+  let installJob: Job | null = null;
+  /** A real install is starting or running. A dry run only plans, so uploads may continue (the UI marks the plan stale). */
+  const installRunning = () => installPending || installJob?.status === "running";
+  /** Any install, dry runs included: deleting files a plan is reading would fail it. */
+  const anyInstallRunning = () => installRunning() || (runner.busy && runner.active?.kind === "install");
 
   fastify.get(ROUTES.uploads, async () => ({ uploads: await listUploads() }));
 
@@ -592,7 +663,7 @@ export function createApp(options: AppOptions): App {
   });
 
   fastify.delete(ROUTES.uploads, async (request, reply) => {
-    if (installRunning()) return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
+    if (anyInstallRunning()) return reply.code(409).send({ error: "An install is running", code: ERROR_CODES.busy });
     await clearUploads(str((request.query as Record<string, unknown>).name) || undefined);
     return { uploads: await listUploads() };
   });
@@ -696,6 +767,11 @@ export function createApp(options: AppOptions): App {
     setPort(port: number) {
       allowedHosts.add(`127.0.0.1:${port}`);
       allowedHosts.add(`localhost:${port}`);
+      // Browsers leave the default port out of Host and Origin.
+      if (port === 80) {
+        allowedHosts.add("127.0.0.1");
+        allowedHosts.add("localhost");
+      }
     },
   };
 }

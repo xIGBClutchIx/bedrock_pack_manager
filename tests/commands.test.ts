@@ -38,7 +38,7 @@ describe("world status", () => {
       type: "resources",
       name: "Stray",
     });
-    writeManifest(join(s.root, "behavior_packs", "vanilla_1.20"), { uuid: "fe9f8597-0000-0000-0000-000000000000" });
+    writeManifest(join(s.root, "behavior_packs", "vanilla_1.20"), { uuid: "fe9f8597-0000-0000-0000-000000000000", name: "pack.name" });
     writeWorldJson(bpJson(), [
       { pack_id: PACK_UUID, version: [1, 0, 0] },
       { pack_id: OTHER, version: [2, 0, 0] },
@@ -146,18 +146,40 @@ describe("maintenance", () => {
     writeManifest(join(s.root, "behavior_packs", "A v2"), { version: [2, 0, 0] });
     writeManifest(join(s.root, "resource_packs", "R"), { uuid: OTHER, type: "resources" });
     writeManifest(join(s.root, "behavior_packs", "Wrap", "Nested"), { uuid: "77777777-7777-7777-7777-777777777777" });
-    writeManifest(join(s.root, "behavior_packs", "vanilla"), { uuid: "fe9f8597-0000-0000-0000-000000000000" });
+    writeManifest(join(s.root, "behavior_packs", "vanilla"), { uuid: "fe9f8597-0000-0000-0000-000000000000", name: "pack.name" });
     const result = await runRebuild(s.ctx, s.world);
     expect([result.behaviorPacks, result.resourcePacks]).toEqual([1, 1]);
     expect(readJson(bpJson())).toEqual([{ pack_id: PACK_UUID, version: [2, 0, 0] }]);
     expect(s.log.warnings.join()).toContain("several versions installed");
   });
 
+  it("rebuild keeps a registered nested pack and registers add-ons named like game packs", async () => {
+    const nested = "77777777-7777-7777-7777-777777777777";
+    const tweaks = "a1000000-0000-0000-0000-000000000000";
+    writeManifest(join(s.root, "behavior_packs", "Wrap", "Nested"), { uuid: nested, name: "Nested" });
+    writeManifest(join(s.root, "behavior_packs", "Vanilla_Tweaks"), { uuid: tweaks, name: "Vanilla Tweaks" });
+    writeWorldJson(bpJson(), [{ pack_id: nested, version: [1, 0, 0] }]);
+    await runRebuild(s.ctx, s.world);
+    expect(readJson(bpJson())).toEqual([
+      { pack_id: nested, version: [1, 0, 0] },
+      { pack_id: tweaks, version: [1, 0, 0] },
+    ]);
+    expect(s.log.warnings.join()).toContain("nested one folder too deep");
+  });
+
+  it("rebuild writes three-number versions for prerelease packs", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Beta"), { version: "1.2.0-beta.1" });
+    await runRebuild(s.ctx, s.world);
+    expect(readJson(bpJson())).toEqual([{ pack_id: PACK_UUID, version: [1, 2, 0] }]);
+    const status = await worldStatus(s.target, s.world);
+    expect(status.packs[0]?.status).toBe("ok");
+  });
+
   it("cleanup previews, then deletes only unused folders", async () => {
     writeManifest(join(s.root, "behavior_packs", "Used"));
     writeManifest(join(s.root, "behavior_packs", "Unused"), { uuid: OTHER });
     writeManifest(join(s.root, "behavior_packs", "Shared"), { uuid: "88888888-8888-8888-8888-888888888888" });
-    writeManifest(join(s.root, "behavior_packs", "editor"), { uuid: "99999999-0000-0000-0000-000000000000" });
+    writeManifest(join(s.root, "behavior_packs", "editor"), { uuid: "99999999-0000-0000-0000-000000000000", name: "pack.name" });
     writeWorldJson(bpJson(), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
     writeWorldJson(join(s.root, "worlds", "Other", "world_behavior_packs.json"), [
       { pack_id: "88888888-8888-8888-8888-888888888888", version: [1, 0, 0] },
@@ -209,6 +231,32 @@ describe("maintenance", () => {
     const result = await runCleanup(s.ctx, s.world, false);
     expect(result.deleted).toEqual([]);
     expect(readdirSync(join(s.root, "behavior_packs")).sort()).toEqual(["Mine", "Theirs"]);
+  });
+
+  it("cleanup keeps dependencies of registered packs, misplaced registered packs, and game-pack names", async () => {
+    const lib = "77777777-7777-7777-7777-777777777777";
+    const deeper = "78787878-7878-7878-7878-787878787878";
+    const misplaced = "44444444-4444-4444-4444-444444444444";
+    const otherLib = "79797979-7979-7979-7979-797979797979";
+    writeManifest(join(s.root, "behavior_packs", "Main"), { dependencies: [{ uuid: lib, version: [1, 0, 0] }] });
+    writeManifest(join(s.root, "behavior_packs", "Lib"), { uuid: lib, dependencies: [{ uuid: deeper, version: [1, 0, 0] }] });
+    writeManifest(join(s.root, "behavior_packs", "Deeper"), { uuid: deeper });
+    writeManifest(join(s.root, "behavior_packs", "Wrong Folder RP"), { uuid: misplaced, type: "resources" });
+    writeManifest(join(s.root, "behavior_packs", "Vanilla_Tweaks"), { uuid: "a1000000-0000-0000-0000-000000000000", name: "Tweaks" });
+    // Another world's pack needs this one.
+    writeManifest(join(s.root, "behavior_packs", "Their Main"), { uuid: OTHER, dependencies: [{ uuid: otherLib, version: [1, 0, 0] }] });
+    writeManifest(join(s.root, "behavior_packs", "Their Lib"), { uuid: otherLib });
+    writeManifest(join(s.root, "behavior_packs", "Unused"), { uuid: "55555555-5555-5555-5555-555555555555" });
+    writeWorldJson(bpJson(), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeWorldJson(join(s.worldDir, "world_resource_packs.json"), [{ pack_id: misplaced, version: [1, 0, 0] }]);
+    writeWorldJson(join(s.root, "worlds", "Other", "world_behavior_packs.json"), [{ pack_id: OTHER, version: [1, 0, 0] }]);
+
+    const result = await runCleanup(s.ctx, s.world, false);
+    expect(result.deleted.map((path) => path.split(/[\\/]/).pop())).toEqual(["Unused"]);
+    expect(readdirSync(join(s.root, "behavior_packs")).sort()).toEqual(
+      ["Deeper", "Lib", "Main", "Their Lib", "Their Main", "Vanilla_Tweaks", "Wrong Folder RP"].sort(),
+    );
+    expect(s.log.text()).toContain("named like a built-in game pack");
   });
 
   it("cleanup can target chosen folders and says why it keeps the rest", async () => {
@@ -364,6 +412,35 @@ describe("world pack edits", () => {
     expect(result.status.packs.find((candidate) => candidate.uuid === PACK_UUID)?.usedBy).toEqual([
       { world: "Other", versionLabel: "1.0.0" },
     ]);
+  });
+
+  it("refuses unknown subpacks and drops a subpack the newly registered version lacks", async () => {
+    const rp = "aaaaaaaa-0000-0000-0000-00000000000a";
+    const rpDir = join(s.root, "resource_packs");
+    const withSubpacks = (folder: string, version: number[], subpacks: string[]) =>
+      writeFile(
+        join(rpDir, folder, "manifest.json"),
+        JSON.stringify({
+          format_version: 2,
+          header: { name: "Shaders", uuid: rp, version },
+          modules: [{ type: "resources", uuid: "22222222-2222-2222-2222-222222222222", version }],
+          subpacks: subpacks.map((name) => ({ folder_name: name, name })),
+        }),
+      );
+    withSubpacks("V1", [1, 0, 0], ["high", "low"]);
+    withSubpacks("V2", [2, 0, 0], ["low"]);
+    const rpJson = join(s.worldDir, "world_resource_packs.json");
+    writeWorldJson(rpJson, [{ pack_id: rp, version: [1, 0, 0] }]);
+
+    await runWorldPacks(s.ctx, s.world, [{ type: "subpack", uuid: rp, subpack: "ultra" }]);
+    expect(readJson(rpJson)).toEqual([{ pack_id: rp, version: [1, 0, 0] }]);
+    expect(s.log.warnings.join()).toContain("has no subpack 'ultra'");
+
+    await runWorldPacks(s.newJob(), s.world, [{ type: "subpack", uuid: rp, subpack: "high" }]);
+    expect(readJson(rpJson)).toEqual([{ pack_id: rp, version: [1, 0, 0], subpack: "high" }]);
+
+    await runWorldPacks(s.newJob(), s.world, [{ type: "register", kind: "rp", uuid: rp, version: [2, 0, 0] }]);
+    expect(readJson(rpJson)).toEqual([{ pack_id: rp, version: [2, 0, 0] }]);
   });
 
   it("offers a newer version on the server and flags a lowercase-sensitive manifest name", async () => {

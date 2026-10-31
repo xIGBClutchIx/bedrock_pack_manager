@@ -10,7 +10,10 @@ import {
   getPackInfo,
   normalizeVersion,
   parseManifest,
+  registrationMatches,
+  registrationVersion,
   usesBetaApis,
+  versionsEqual,
 } from "../src/server/core/manifests";
 import {
   betaEnabled,
@@ -23,7 +26,16 @@ import {
   setGamemode,
 } from "../src/server/core/nbt";
 import { PackIndex } from "../src/server/core/packIndex";
-import { WorldJsonError, loadWorldJson, registeredKeys, removeEntry, saveWorldJson, upsertEntry } from "../src/server/core/worlds";
+import { formatVersion } from "../src/shared/model";
+import {
+  WorldJsonError,
+  loadWorldJson,
+  registeredKeys,
+  removeEntry,
+  saveWorldJson,
+  upsertEntry,
+  type WorldEntry,
+} from "../src/server/core/worlds";
 import { LocalStorage } from "../src/server/storage/local";
 import { PACK_UUID, levelDatBytes, makeStorage, tempDir, writeFile, writeManifest, writeWorldJson } from "./helpers";
 
@@ -40,7 +52,8 @@ describe("manifests", () => {
     const manifest = parseManifest(
       '﻿{ // comment\n "header": {"name": "§aCool", "uuid": " abc ", "version": "1.2.3-beta"}, /* x */ "modules": [{"type": "resources"},],}',
     );
-    expect(getPackInfo(manifest)).toEqual({ uuid: "abc", version: [1, 2, 3], name: "Cool" });
+    // The prerelease is kept so 1.2.3-beta and 1.2.3 stay different versions.
+    expect(getPackInfo(manifest)).toEqual({ uuid: "abc", version: [1, 2, 3, "beta"], name: "Cool" });
     expect(classifyPack(manifest)).toBe("rp");
     expect(() => parseManifest("{")).toThrow(ManifestError);
     expect(() => parseManifest("[1]")).toThrow(ManifestError);
@@ -70,6 +83,39 @@ describe("manifests", () => {
     expect(compareVersions([1, 2, 0], [1, 10, 0])).toBeLessThan(0);
     expect(compareVersions([1, "beta"], [1, 0])).toBeLessThan(0);
   });
+
+  it("keeps prereleases apart from releases, in semver order", () => {
+    expect(normalizeVersion("1.0.0-beta.2")).toEqual([1, 0, 0, "beta.2"]);
+    expect(normalizeVersion("1.0.0-2+build.5")).toEqual([1, 0, 0, "2"]);
+    expect(normalizeVersion("1.0.0+build.5")).toEqual([1, 0, 0]);
+    expect(normalizeVersion([1, 0])).toEqual([1, 0, 0]);
+    expect(versionsEqual([1, 0], "1.0")).toBe(true);
+    expect(versionsEqual("1.0.0-beta", "1.0.0")).toBe(false);
+    expect(registrationVersion("1.0.0-beta.2")).toEqual([1, 0, 0]);
+    expect(registrationMatches("1.0.0-beta.2", [1, 0, 0])).toBe(true);
+    const ordered = [
+      "1.0.0",
+      "1.0.0-alpha.beta",
+      "1.0.0-alpha",
+      "1.0.0-beta.11",
+      "1.0.0-10",
+      "1.0.0-beta.2",
+      "1.0.0-alpha.1",
+      "1.0.0-2",
+      "0.9.9",
+    ].map(normalizeVersion);
+    expect(ordered.sort(compareVersions).map(formatVersion)).toEqual([
+      "0.9.9",
+      "1.0.0-2",
+      "1.0.0-10",
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0",
+    ]);
+  });
 });
 
 describe("world JSON", () => {
@@ -98,6 +144,19 @@ describe("world JSON", () => {
     expect(removeEntry(entries, "zzz")).toBe(false);
     expect(entries).toEqual([{ pack_id: "def", version: [1, 0, 0] }]);
   });
+
+  it("writes three-number versions and drops a subpack the new version lacks", () => {
+    const entries: WorldEntry[] = [{ pack_id: "a", version: [1, 0, 0], subpack: "high" }];
+    expect(upsertEntry(entries, "a", [1, 0, 0, "beta.2"], ["low"])).toBe("unchanged");
+    expect(upsertEntry(entries, "a", [2, 0, 0, "rc"], ["high"])).toBe("updated");
+    expect(entries).toEqual([{ pack_id: "a", version: [2, 0, 0], subpack: "high" }]);
+    expect(upsertEntry(entries, "a", [3, 0, 0])).toBe("updated");
+    expect(entries[0]?.subpack).toBe("high"); // nothing known about v3's subpacks
+    expect(upsertEntry(entries, "a", [4, 0, 0], ["low"])).toBe("updated");
+    expect(entries).toEqual([{ pack_id: "a", version: [4, 0, 0] }]);
+    expect(upsertEntry(entries, "b", [1, 2, 0, "beta"])).toBe("added");
+    expect(entries[1]).toEqual({ pack_id: "b", version: [1, 2, 0] });
+  });
 });
 
 describe("level.dat", () => {
@@ -117,6 +176,15 @@ describe("level.dat", () => {
     expect([betaEnabled(updated), gamemodeOf(updated)]).toEqual([true, "creative"]);
     expect(await storage.exists("level.dat.backup")).toBe(true);
     expect(() => parseLevelDat(Buffer.alloc(3))).toThrow(/too short/);
+  });
+
+  it("reads only as much NBT as the header says, ignoring trailing bytes", () => {
+    const original = levelDatBytes({ LevelName: { type: "string", value: "Padded" } });
+    const padded = Buffer.concat([original, Buffer.from([0xde, 0xad, 0xbe, 0xef])]);
+    const level = parseLevelDat(padded);
+    expect(levelNameOf(level)).toBe("Padded");
+    expect(serializeLevelDat(level).equals(original)).toBe(true);
+    expect(() => parseLevelDat(original.subarray(0, original.length - 2))).toThrow(/truncated/);
   });
 });
 
@@ -275,8 +343,11 @@ describe("pack index", () => {
     for (const folder of ["vanilla", "vanilla_1.14", "vanilla_1.15"])
       writeManifest(joinLocal(bp, folder), { uuid: "fe9f8597-5454-481a-8730-8d070a8e2e58", name: "resourcePack.vanilla_server.name" });
     for (const folder of ["chemistry_1.21.30", "editor", "experimental_creator_cameras", "server_ui_library"]) {
-      writeManifest(joinLocal(bp, folder), { uuid: `${folder.length}0000000-0000-0000-0000-000000000000`, type: "resources" });
+      writeManifest(joinLocal(bp, folder), { uuid: `${folder.length}0000000-0000-0000-0000-000000000000`, name: "pack.name" });
     }
+    // Add-ons named like game packs, whose manifests have real titles: shown, but protected from deletion.
+    writeManifest(joinLocal(bp, "Vanilla_Tweaks"), { uuid: "a1000000-0000-0000-0000-000000000000", name: "Vanilla Tweaks" });
+    writeManifest(joinLocal(bp, "experimental_weapons"), { uuid: "a2000000-0000-0000-0000-000000000000", name: "More Weapons" });
     writeManifest(joinLocal(bp, "My Addon"), { name: "pack.name" });
     for (let n = 0; n < 3; n++)
       writeManifest(local("run", "resource_packs", "old", `Origin${n}`), {
@@ -299,6 +370,12 @@ describe("pack index", () => {
       "vanilla_1.14",
       "vanilla_1.15",
     ]);
+    expect(
+      index.packs
+        .filter((p) => p.builtinName)
+        .map((p) => p.name)
+        .sort(),
+    ).toEqual(["More Weapons", "Vanilla Tweaks"]);
     expect(index.problems).toEqual([]);
     expect(index.find(PACK_UUID)[0]?.name).toBe("My Addon");
     expect(index.notes.join()).toContain("old holds 3 packs");

@@ -6,7 +6,7 @@ import type { CommandContext } from "../install";
 import { info, ok, section, warn } from "../log";
 import { uuidKey } from "../manifests";
 import { PackIndex } from "../packIndex";
-import { loadWorldJson, saveWorldJson, upsertEntry, type WorldEntry } from "../worlds";
+import { entryVersion, loadWorldJson, saveWorldJson, upsertEntry, type WorldEntry } from "../worlds";
 import { worldStatus, worldSummaries } from "./status";
 
 export async function runWorldPacks(ctx: CommandContext, world: string, changes: WorldPackChange[]): Promise<WorldPacksResult> {
@@ -26,11 +26,13 @@ export async function runWorldPacks(ctx: CommandContext, world: string, changes:
   for (const change of changes) {
     if (change.type === "register") {
       const label = `${nameOf(change.uuid, change.kind)} v${formatVersion(change.version)}`;
-      if (!index.findVersion(change.uuid, change.version, change.kind).length)
-        warn(log, `${label} is not on the server - the world will list it as missing`);
+      const copies = index.findVersion(change.uuid, change.version, change.kind);
+      if (!copies.length) warn(log, `${label} is not on the server - the world will list it as missing`);
+      // Subpacks that version offers; unknown (so a chosen subpack is kept) when the server has no copy.
+      const subpacks = copies.length ? copies.flatMap((pack) => pack.details.subpacks.map((subpack) => subpack.folder)) : undefined;
       for (const where of change.worlds?.length ? change.worlds : [world]) {
         const { path, entries } = await listFor(where, change.kind);
-        const result = upsertEntry(entries, change.uuid, change.version);
+        const result = upsertEntry(entries, change.uuid, change.version, subpacks);
         const worldName = basename(where) || target.label;
         if (result === "unchanged") info(log, `${label} was already registered in '${worldName}'`);
         else {
@@ -62,8 +64,14 @@ export async function runWorldPacks(ctx: CommandContext, world: string, changes:
         warn(log, `${nameOf(change.uuid, "rp")} is not registered in this world - register it before picking a subpack`);
         continue;
       }
-      const offered = index.find(change.uuid, "rp").flatMap((pack) => pack.details.subpacks.map((subpack) => subpack.folder));
-      if (change.subpack && !offered.includes(change.subpack)) warn(log, `${nameOf(change.uuid, "rp")} has no subpack '${change.subpack}'`);
+      // Only subpacks of the registered version count; the game ignores (or fails on) any other name.
+      const version = entryVersion(entry);
+      const copies = version ? index.findVersion(change.uuid, version, "rp") : index.find(change.uuid, "rp");
+      const offered = copies.flatMap((pack) => pack.details.subpacks.map((subpack) => subpack.folder));
+      if (change.subpack && !offered.includes(change.subpack)) {
+        warn(log, `${nameOf(change.uuid, "rp")} has no subpack '${change.subpack}' - not changed`);
+        continue;
+      }
       if ((entry.subpack ?? null) === change.subpack) continue;
       if (change.subpack) entry.subpack = change.subpack;
       else delete entry.subpack;

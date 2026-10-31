@@ -15,7 +15,8 @@
   --text: #ecebf0;
   --text-2: #c9c8d2;
   --muted: #9c9aa8;
-  --faint: #767483;
+  /* 4.8:1 on --bg (WCAG AA for small text); was #767483 at 3.5:1 */
+  --faint: #8d8b9b;
   /* amethyst */
   --accent: #a486f2;
   --accent-hover: #b39af5;
@@ -378,6 +379,19 @@ input[type="radio"] {
 .banner .small {
   margin-top: 4px;
   opacity: 0.85;
+}
+/* Floats over the layout so the dashboard keeps its shape; it stays until the page is replaced. */
+.stale-link {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 60;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--surface);
+  border: 1px solid var(--danger);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 .dot {
@@ -1989,8 +2003,34 @@ table.packs.history th:nth-child(5) {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 #toast.error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 8px;
   background: var(--danger);
   color: #fff;
+}
+#toast .toast-close {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+#toast .toast-close:hover,
+#toast .toast-close:focus-visible {
+  background: rgba(0, 0, 0, 0.18);
+}
+#toast .toast-close svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.4;
 }
 
 /* ---- smaller screens --------------------------------------------------------------------------- */

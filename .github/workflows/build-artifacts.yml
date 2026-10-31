@@ -6,20 +6,33 @@ on:
       - main
       - master
   workflow_dispatch:
+  # release.yml reuses this workflow to build the files it attaches to a release.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   single-executable:
+    name: single-executable (${{ matrix.platform }}-${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: bedrock-pack-manager-linux
-            artifact_path: dist/bedrock-pack-manager
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
           - os: windows-latest
-            artifact_name: bedrock-pack-manager-windows
-            artifact_path: dist/bedrock-pack-manager.exe
+            platform: windows
+            arch: x64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
 
     steps:
       - name: Checkout repository
@@ -28,8 +41,16 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version-file: .nvmrc
           cache: npm
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=bedrock-pack-manager-$version-${{ matrix.platform }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: npm ci
@@ -38,12 +59,27 @@ jobs:
         run: npm run build:sea
 
       - name: Smoke-test the executable
+        run: npm run smoke:sea
+
+      # upload-artifact drops the exec bit, so Linux and macOS builds ship as .tar.gz.
+      - name: Package (Linux, macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          ./${{ matrix.artifact_path }} --help
+          mkdir -p dist/package
+          chmod +x dist/bedrock-pack-manager
+          tar -czf "dist/package/${{ steps.version.outputs.name }}.tar.gz" -C dist bedrock-pack-manager
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/package | Out-Null
+          Compress-Archive -Path dist/bedrock-pack-manager.exe -DestinationPath "dist/package/${{ steps.version.outputs.name }}.zip"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_path }}
+          name: ${{ steps.version.outputs.name }}
+          path: dist/package/*
+          if-no-files-found: error

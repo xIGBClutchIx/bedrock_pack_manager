@@ -7,7 +7,7 @@ import { formatVersion } from "../../shared/model";
 import { NotFoundError, isNotFound } from "../storage/errors";
 import { JUNK_NAMES, basename, join } from "../storage/path";
 import type { Entry } from "../storage/storage";
-import { PACK_CONTENT_DIRS, isBuiltinFolder, isTranslationKey } from "./builtins";
+import { PACK_CONTENT_DIRS, isBuiltinFolder, isBuiltinPack, isTranslationKey } from "./builtins";
 import type { PackDir, Target } from "./layout";
 import {
   ManifestError,
@@ -16,12 +16,12 @@ import {
   getModuleDependencies,
   getPackDetails,
   getPackInfo,
+  normalizeVersion,
   parseManifest,
+  registrationMatches,
   uuidKey,
-  versionsEqual,
   type PackDetails,
 } from "./manifests";
-import { packVersionKey } from "./worlds";
 
 export interface InstalledPack {
   uuid: string;
@@ -38,8 +38,17 @@ export interface InstalledPack {
   moduleDependencies: { moduleName: string; version: string }[];
   details: PackDetails;
   nested: boolean;
+  /** One of the game's own packs (folder name and manifest agree): hidden, never registered or deleted. */
   builtin: boolean;
+  /**
+   * Named like a game pack but the manifest does not confirm it (often an add-on such as "Vanilla_Tweaks").
+   * Shown and registered like any pack, but never deleted, in case it is the game's after all.
+   */
+  builtinName: boolean;
 }
+
+/** Never delete this folder: a game pack, or something named like one. */
+export const isProtectedPack = (pack: InstalledPack): boolean => pack.builtin || pack.builtinName;
 
 export const NO_DETAILS: PackDetails = { description: "", authors: [], minEngineVersion: null, subpacks: [] };
 
@@ -196,7 +205,8 @@ export class PackIndex {
         });
       return { pack: null, missing: false };
     }
-    const builtin = dir.scope === "shared" && join(dir.path, basename(folder)) === folder && isBuiltinFolder(basename(folder));
+    const builtinName = dir.scope === "shared" && join(dir.path, basename(folder)) === folder && isBuiltinFolder(basename(folder));
+    const builtin = builtinName && isBuiltinPack(basename(folder), info);
     const kind = classifyPack(manifest);
     if (report && !builtin && basename(manifestPath) !== "manifest.json") {
       this.problems.push({
@@ -228,6 +238,7 @@ export class PackIndex {
         details: readableDetails(getPackDetails(manifest)),
         nested: false,
         builtin,
+        builtinName: builtinName && !builtin,
       },
       missing: false,
     };
@@ -237,7 +248,8 @@ export class PackIndex {
     const byKey = new Map<string, InstalledPack[]>();
     for (const pack of this.packs) {
       if (pack.builtin) continue;
-      const key = packVersionKey(pack.uuid, pack.version);
+      // Exact versions: a 1.0.0-beta copy beside 1.0.0 is not a duplicate.
+      const key = `${uuidKey(pack.uuid)}|${JSON.stringify(normalizeVersion(pack.version))}`;
       byKey.set(key, [...(byKey.get(key) ?? []), pack]);
     }
     for (const copies of byKey.values()) {
@@ -261,8 +273,9 @@ export class PackIndex {
       .sort((a, b) => folderOf(a).toLowerCase().localeCompare(folderOf(b).toLowerCase()));
   }
 
+  /** Copies a world entry at `version` points at (world JSONs hold three numbers, so a prerelease matches its release). */
   findVersion(uuid: string, version: Version, kind?: PackKind): InstalledPack[] {
-    return this.find(uuid, kind).filter((pack) => versionsEqual(pack.version, version));
+    return this.find(uuid, kind).filter((pack) => registrationMatches(pack.version, version));
   }
 
   ofKind(kind: PackKind): InstalledPack[] {

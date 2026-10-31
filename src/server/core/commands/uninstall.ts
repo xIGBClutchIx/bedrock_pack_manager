@@ -5,7 +5,7 @@ import { CancelledError, throwIfAborted } from "../../storage/errors";
 import { basename } from "../../storage/path";
 import type { CommandContext } from "../install";
 import { info, ok, section, warn } from "../log";
-import { PackIndex, type InstalledPack } from "../packIndex";
+import { PackIndex, isProtectedPack, type InstalledPack } from "../packIndex";
 import { entryVersion, removeEntry, saveWorldJson } from "../worlds";
 import { loadWorldPacks, otherWorldsUsing, worldStatus, worldSummaries, type WorldJsonCache } from "./status";
 
@@ -76,8 +76,13 @@ export async function runUninstall(ctx: CommandContext, world: string, keys: str
     }
     const others = await otherWorldsUsing(target, world, candidate.kind, candidate, cache, index);
     for (const pack of candidate.installed) {
-      if (pack.builtin) {
-        info(log, `Kept built-in game pack ${target.describe(pack.path)}`);
+      if (isProtectedPack(pack)) {
+        info(
+          log,
+          pack.builtin
+            ? `Kept built-in game pack ${target.describe(pack.path)}`
+            : `Kept ${target.describe(pack.path)}: it is named like a built-in game pack - delete it by hand if it is yours`,
+        );
         continue;
       }
       if (pack.scope === "dev") {

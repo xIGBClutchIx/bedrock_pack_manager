@@ -30,25 +30,26 @@ The UI is only reachable from this computer: the server binds to `127.0.0.1`, ch
 - **Connect** over SFTP, FTP, FTPS (explicit or implicit on port 990), or to a local folder. Save connection profiles; passwords are never saved or logged.
 - **Packs tab**: every pack in the selected world with its icon, filters (installed, update available, wrong version, missing, not registered), and anything that needs attention above the list.
   Paths are shown relative to the server folder.
-  Built-in game packs (vanilla, chemistry, editor, experimental, server libraries) are hidden and protected.
+  Built-in game packs (vanilla, chemistry, editor, experimental, server libraries) are hidden and protected. A folder is only treated as built-in when its manifest agrees; an add-on that merely has a game-like folder name (such as `Vanilla_Tweaks`) is shown and can be registered, but is never deleted automatically.
+  Bulk actions only apply to selected packs the current filter and search show.
   Every row has the action it needs:
   - **Add to world** for a pack that is on the server but not registered
   - **Use vX** to switch to a newer (or the only) version on the server
   - **Drop entry** for a registration whose files are gone
   - the **details** arrow for the description, authors, minimum game version, folder and UUID, the load order (move up or down; the first resource pack wins), what the pack needs (with **Activate** for dependencies already on the server), which other worlds use it (and **Add to other worlds…**), and a subpack picker for resource packs
 - **Install tab**: drop files or whole folders. The plan panel previews exactly what will be uploaded, replaced, only registered, or skipped, and flags downgrades and UUIDs shared with a different-looking pack, then installs with live upload and per-file progress.
-  "Replace" never removes a copy another world still uses.
+  "Replace" never removes a copy another world still uses. You can keep adding files while a plan is being built; the plan is rebuilt before Install is enabled again.
 - **Uninstall** selected packs, or **Delete folder** for packs no world registers. Pack folders are only deleted when no world needs them (a world that registers a version the server lacks keeps the closest copy, and a world whose pack list cannot be read counts as needing it); dev folders and built-ins are never deleted. A keep-files option removes the registration only.
 - **World tab**: switch experiments on or off (Beta APIs, Upcoming Creator Features, Molang, custom biomes, and any others the world already has) and set the gamemode, with one `level.dat.backup` of the untouched file. For the server, set `texturepack-required` in `server.properties`.
-- **Tools**: check the world, register every pack on the server (newest version of each, keeping the existing order and subpacks), clean up unused pack folders (with a preview), and download a backup zip of a world or the whole server. Nested packs are fixed from the Packs tab.
-- **History**: the last 30 tasks with their logs, and a download of the app log.
+- **Tools**: check the world, register every pack on the server (newest version of each, keeping the existing order and subpacks), clean up unused pack folders (with a preview; packs that a registered pack depends on, or that are registered under the other pack kind, are kept), and download a backup zip of a world or the whole server. Nested packs are fixed from the Packs tab.
+- **History**: the last 30 tasks that changed something (plus the last 10 world reads and previews) with their logs, and a download of the app log.
 - **Activity bar**: the bar at the bottom shows the running task and its progress, with **Cancel** for long ones. **Show log** opens the full colour log, which can be resized. Reloading the page during a task picks it back up.
 - **Server menu** (the **⋯** next to the server in the sidebar): see and override the server folders (with a folder browser), rescan the worlds, or disconnect.
 
 ### SFTP host keys
 
 On the first SFTP connection the host key fingerprint (SHA256) is shown and must be confirmed with **Trust and connect**.
-Trusted keys are stored in `run/known_hosts`. If a known host's key changes, the connection is refused.
+Trusted keys are stored in `run/known_hosts`, per key type. If a known host's key changes, the connection is refused; if the host offers a key type you have not trusted yet, its fingerprint is shown for confirmation again.
 **Manage trusted keys** on the connect screen lists them; after a server reinstall, forget the old key there and confirm the new fingerprint on the next connect.
 
 ### Server layouts
@@ -68,15 +69,17 @@ Folders that hold several packs (like an `old/` storage folder) are left alone w
 
 ### How installs work
 
-- Archives are unpacked on this computer, including archives nested at any depth and zips with odd extensions. `__MACOSX`, `.DS_Store` and similar junk are dropped. Zip-slip paths are rejected, and so are archives that would unpack to more than 4 GB or 200,000 files.
+- Archives are unpacked on this computer, including archives nested at any depth and zips with odd extensions. `__MACOSX`, `.DS_Store` and similar junk are dropped. Zip-slip paths are rejected, and so are sources that would unpack to more than 4 GB or 200,000 files in total, counting every nested archive.
 - When one install holds two versions of the same pack, only the newest goes in. A `Manifest.json` in odd casing is uploaded as `manifest.json`.
-- `manifest.json` files with comments, trailing commas, a BOM, or string versions are accepted.
+- `manifest.json` files with comments, trailing commas, a BOM, or string versions are accepted. Prerelease versions (`1.0.0-beta.2`) sort before their release, so installing `1.0.0` replaces the beta; world JSONs still store three numbers.
+- A behavior pack and a resource pack sharing one UUID are flagged in the plan.
 - Only finished pack folders, world JSONs, and `level.dat` cross the network. `manifest.json` is uploaded last, so an interrupted upload never looks like a complete pack.
-- Replacing a same-named folder uploads beside it, then swaps. The world JSON is written once at the end.
+- Replacing a same-named folder uploads beside it, then swaps. The world JSONs are written at the end, and also when an install is cancelled or fails part-way, so a world never points at a version that was just replaced.
+- Cancel stops large transfers mid-file.
 - Missing dependencies, beta-API requirements, and odd `.mcaddon` / `.mcpack` contents are reported as warnings.
 
 Stop the Minecraft server before changing world settings, or it may overwrite `level.dat` when it shuts down.
-Stop it for backups too: files it rewrites while running are skipped (and listed in the log) rather than ending the backup. A backup that fails part-way is reported as a failed download, never saved as a truncated zip, and stopping the download cancels it.
+Stop it for backups too: files it rewrites while running are skipped (and listed in the log) rather than ending the backup. Backups download without leaving the page; one that fails before it starts shows the error as a message. A backup that fails part-way is reported as a failed download, never saved as a truncated zip, and stopping the download cancels it.
 
 Symbolic links on the server are never followed: deleting one removes the link, not the folder it points at.
 
@@ -89,6 +92,7 @@ Everything the app writes lives under `run/` (beside the executable, or the curr
 - `run/staging/unpack/`: scratch space for unpacking archives
 - `run/known_hosts`: SFTP host keys you have trusted
 - `run/profiles.json`: saved connection profiles (no passwords)
+- `run/instance.lock`: held while the app runs. Only one copy can use a data folder at a time; start a second one with `--data-dir`. A lock left by a crashed copy is taken over.
 
 ## Development
 
@@ -117,7 +121,7 @@ With `npm run dev` (or the `--test-server` option) the connect page has a **Test
 | `npm run demo`        | Start local SFTP (2022) and FTP (2021) demo servers with a messy layout      |
 | `npm run lint`        | ESLint                                                                       |
 | `npm run format`      | Prettier                                                                     |
-| `npm run typecheck`   | `tsc --noEmit`                                                               |
+| `npm run typecheck`   | `tsc` for server (Node only), web (DOM only), then everything                |
 
 Run `npx playwright install chromium` once before the Playwright commands.
 
@@ -125,6 +129,9 @@ Run `npx playwright install chromium` once before the Playwright commands.
 
 `npm run build:sea` uses Node's single executable applications: the bundled server becomes the entry point and every file of the built UI is embedded as an asset.
 On Windows the copied `node.exe` signature is invalidated by the injection, so the exe is unsigned and SmartScreen may warn about it.
+On macOS the binary is ad-hoc signed after injection.
+The exe embeds the bundled code with a V8 code cache, so build it on the OS and architecture it is for, with the Node version in `.nvmrc`.
+`npm run smoke:sea` starts the built exe on a fixed port, fetches the UI and one asset, checks that the API still needs the token, and stops it.
 
 ### Git hooks
 
@@ -141,8 +148,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_git_hooks.ps1
 
 ### GitHub Actions
 
-- `.github/workflows/quality-checks.yml`: lint, typecheck, and tests on Node 24, plus the Playwright smoke test in Chromium (traces uploaded on failure)
-- `.github/workflows/build-artifacts.yml`: builds the Windows and Linux executables, runs `--help` on each, and uploads them as artifacts
+All workflows use the Node version pinned in `.nvmrc`.
+
+- `.github/workflows/quality-checks.yml`: lint and typecheck on Linux, tests on Linux and Windows, plus the Playwright smoke test in Chromium (traces uploaded on failure)
+- `.github/workflows/build-artifacts.yml`: builds the Windows x64, Linux x64/arm64 and macOS arm64 executables, runs `npm run smoke:sea` on each, and uploads them as versioned artifacts (`.zip` for Windows, `.tar.gz` for Linux and macOS so the exec bit survives)
+- `.github/workflows/release.yml`: on a `v*` tag that matches the `package.json` version, runs the same builds and attaches them to a GitHub Release
 
 ## Project Layout
 

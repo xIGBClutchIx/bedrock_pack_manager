@@ -79,8 +79,9 @@ export function PacksTab({ ctx }: { ctx: WorldContext }) {
   const count = (id: Filter) => rows.filter((row) => matches(row, id)).length;
   const selectable = visible.filter((row) => rowId(row));
   const allSelected = selectable.length > 0 && selectable.every((row) => selected.has(rowId(row)));
-  // Only rows that are on screen in this world count; nothing hidden is ever acted on.
-  const chosen = rows.filter((row) => selected.has(rowId(row)));
+  // Only selected rows that are on screen (in this world, under the current filter and search) count; nothing
+  // hidden is ever acted on. A selection hidden by the filter comes back when the filter is cleared.
+  const chosen = visible.filter((row) => selected.has(rowId(row)));
   const chosenRegistered = chosen.filter((row) => row.registered && row.key);
   const chosenFolders = chosen.filter((row) => !row.registered && row.path);
   const otherWorlds = (state?.worlds ?? []).filter((world) => world.path !== ctx.world);
@@ -212,6 +213,7 @@ export function PacksTab({ ctx }: { ctx: WorldContext }) {
         { title: "Fixing nested pack" },
       );
       if (job.result.status) ctx.setStatus(job.result.status);
+      await refresh().catch(() => undefined); // sidebar pack counts; the move itself is done
       toast("Moved");
     } catch (error) {
       toast((error as Error).message, true);
@@ -431,7 +433,7 @@ function PackIcon({ row }: { row: PackRow }) {
         {row.name === row.uuid ? "?" : (row.name.trim()[0]?.toUpperCase() ?? "?")}
       </span>
     );
-  return <img className="pack-icon" src={packIconUrl(row.path)} alt="" loading="lazy" onError={() => setFailed(true)} />;
+  return <img className="pack-icon" src={packIconUrl(row.path, row.versionLabel)} alt="" loading="lazy" onError={() => setFailed(true)} />;
 }
 
 function PackRowView({
@@ -471,7 +473,8 @@ function PackRowView({
       </td>
       <td className="pack-cell">
         <div className="pack-name">
-          <PackIcon key={row.path ?? row.uuid} row={row} />
+          {/* Keyed by version too: a replaced pack in the same folder gets a fresh icon (and a fresh failed state). */}
+          <PackIcon key={`${row.path ?? row.uuid}:${row.versionLabel}`} row={row} />
           <span className="names">
             <span className="name-line" title={row.name}>
               {unknown ? "Unknown pack" : row.name}

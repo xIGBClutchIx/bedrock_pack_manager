@@ -41,11 +41,15 @@ export class Job implements JobLog {
   promise!: Promise<unknown>;
   private readonly listeners = new Set<Listener>();
   private lastProgress = 0;
+  /** Event ids only ever grow, even when a superseded progress event is dropped from `events`. */
+  private nextSeq = 0;
 
   constructor(
     readonly kind: string,
     readonly title: string,
     private readonly sink?: (level: LogLevel, text: string) => void,
+    /** A read-only or background job (world read, preview): kept in a smaller history bucket. */
+    readonly quiet = false,
   ) {}
 
   get signal(): AbortSignal {
@@ -59,7 +63,7 @@ export class Job implements JobLog {
 
   log(level: LogLevel, text: string): void {
     this.sink?.(level, text);
-    this.emit({ type: "log", seq: this.events.length, level, text });
+    this.emit({ type: "log", seq: this.nextSeq++, level, text });
   }
 
   progress(label: string, done: number, total: number, unit: "files" | "items" | "bytes" = "files"): void {
@@ -67,7 +71,16 @@ export class Job implements JobLog {
     const now = Date.now();
     if (done < total && now - this.lastProgress < 80) return;
     this.lastProgress = now;
-    this.emit({ type: "progress", seq: this.events.length, label, done, total, unit });
+    // Only the latest progress per label is worth replaying: drop the one it replaces so a long job's
+    // event list stays small. Later events keep higher ids, so replay from any `since` stays in order.
+    for (let index = this.events.length - 1; index >= 0; index--) {
+      const old = this.events[index]!;
+      if (old.type === "progress" && old.label === label) {
+        this.events.splice(index, 1);
+        break;
+      }
+    }
+    this.emit({ type: "progress", seq: this.nextSeq++, label, done, total, unit });
   }
 
   info(): JobInfo {
@@ -79,6 +92,7 @@ export class Job implements JobLog {
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
       warnings: [...this.warnings],
+      ...(this.quiet ? { quiet: true } : {}),
       ...(this.status === "running" ? {} : { result: this.result }),
       ...(this.error ? { error: this.error, errorCode: this.errorCode, errorData: this.errorData } : {}),
     };
@@ -95,13 +109,14 @@ export class Job implements JobLog {
 
   finish(): void {
     this.finishedAt = Date.now();
-    this.emit({ type: "end", seq: this.events.length, job: this.info() });
+    this.emit({ type: "end", seq: this.nextSeq++, job: this.info() });
     this.listeners.clear();
   }
 
-  /** Replay events after `since`, then follow live ones. Returns an unsubscribe function. */
+  /** Replay events with `seq >= since`, then follow live ones. Returns an unsubscribe function. */
   subscribe(since: number, listener: Listener): () => void {
-    for (const event of this.events.slice(since)) listener(event);
+    const first = this.events.findIndex((event) => event.seq >= since);
+    if (first >= 0) for (const event of this.events.slice(first)) listener(event);
     if (this.status !== "running") return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -113,9 +128,14 @@ export class JobRunner {
   private readonly order: string[] = [];
   active: Job | null = null;
 
+  /**
+   * `keep` jobs that change things are kept, plus `keepQuiet` quiet ones (world reads, previews), so a burst
+   * of background reads never pushes a real install's log out of the history.
+   */
   constructor(
     private readonly sink?: (level: LogLevel, text: string) => void,
     private readonly keep = 30,
+    private readonly keepQuiet = 10,
   ) {}
 
   get busy(): boolean {
@@ -127,14 +147,15 @@ export class JobRunner {
     title: string,
     run: (job: Job) => Promise<unknown>,
     mapError: (error: unknown) => JobFailure | null = () => null,
+    options: { quiet?: boolean } = {},
   ): Job {
     if (this.busy) throw new BusyError(`Another task (${this.active!.title}) is still running`);
-    const job = new Job(kind, title, this.sink);
+    const job = new Job(kind, title, this.sink, !!options.quiet);
     this.sink?.("section", `${title} (job ${job.id})`);
     this.active = job;
     this.jobs.set(job.id, job);
     this.order.push(job.id);
-    while (this.order.length > this.keep) this.jobs.delete(this.order.shift()!);
+    this.evict(job.quiet);
 
     job.promise = (async () => {
       try {
@@ -162,6 +183,16 @@ export class JobRunner {
       return job.result;
     })();
     return job;
+  }
+
+  /** Drop the oldest jobs of one bucket beyond its limit. The newest job (the active one) is never dropped. */
+  private evict(quiet: boolean): void {
+    const limit = Math.max(1, quiet ? this.keepQuiet : this.keep);
+    const bucket = this.order.filter((id) => this.jobs.get(id)!.quiet === quiet);
+    const drop = new Set(bucket.slice(0, Math.max(0, bucket.length - limit)));
+    if (!drop.size) return;
+    for (const id of drop) this.jobs.delete(id);
+    this.order.splice(0, this.order.length, ...this.order.filter((id) => !drop.has(id)));
   }
 
   get(id: string): Job | undefined {

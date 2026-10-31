@@ -4,6 +4,10 @@ export type LogLevel = "section" | "ok" | "info" | "warn" | "error" | "plain" | 
 
 export type JobStatus = "running" | "done" | "error" | "cancelled";
 
+/**
+ * `seq` grows with every event; resume with `since = last seq + 1`. Only the latest progress event per label is
+ * kept for replay, so a replay may skip seq numbers.
+ */
 export type JobEvent =
   | { type: "log"; seq: number; level: LogLevel; text: string }
   | { type: "progress"; seq: number; label: string; done: number; total: number; unit: "files" | "items" | "bytes" }
@@ -17,6 +21,8 @@ export interface JobInfo {
   startedAt: number;
   finishedAt: number | null;
   warnings: string[];
+  /** A read-only or background job (world read, dry run). Absent for jobs that change things. */
+  quiet?: boolean;
   result?: unknown;
   error?: string;
   errorCode?: string;

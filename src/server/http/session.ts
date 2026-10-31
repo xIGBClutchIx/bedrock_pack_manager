@@ -38,9 +38,11 @@ export class Session {
     return path;
   }
 
-  /** Connect and scan the worlds. Aborting `signal` gives up at once and closes whatever opened. */
+  /**
+   * Connect and scan the worlds. The current connection stays in place until the new one is ready, so a
+   * failed connect leaves the app connected as before. Aborting `signal` gives up at once and closes whatever opened.
+   */
   async connect(settings: ConnectionSettings, overrides: LayoutOverrides, signal?: AbortSignal): Promise<Target> {
-    await this.disconnect();
     // The bundled run/ folder is the default local server, as in the original tool.
     const local = settings.protocol === "local" && !settings.root;
     const opening = openStorage(local ? { ...settings, root: this.paths.runDir } : settings, {
@@ -48,22 +50,25 @@ export class Session {
       knownHostsFile: this.paths.knownHostsFile,
     });
     const storage = await abortable(opening, signal, (late) => late.close());
+    let target: Target;
+    let worlds: WorldSummary[];
+    let defaultWorld: string | null;
     try {
-      const target = await abortable(Target.open(storage, overrides), signal);
-      const worlds = await abortable(worldSummaries(target), signal);
-      this.target = target;
-      this.settings = settings;
-      this.overrides = { ...overrides };
-      await abortable(this.refreshWorlds(worlds), signal);
-      return target;
+      target = await abortable(Target.open(storage, overrides), signal);
+      worlds = await abortable(worldSummaries(target), signal);
+      defaultWorld = await abortable(target.defaultWorld(worlds.map((world) => world.path)), signal);
     } catch (error) {
-      this.target = null;
-      this.settings = null;
-      this.worlds = [];
-      this.defaultWorld = null;
-      await storage.close();
+      await storage.close().catch(() => undefined);
       throw error;
     }
+    const previous = this.target;
+    this.target = target;
+    this.settings = settings;
+    this.overrides = { ...overrides };
+    this.worlds = worlds;
+    this.defaultWorld = defaultWorld;
+    if (previous && previous.storage !== storage) await previous.storage.close().catch(() => undefined);
+    return target;
   }
 
   async relayout(overrides: LayoutOverrides): Promise<Target> {

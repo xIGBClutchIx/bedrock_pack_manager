@@ -47,22 +47,43 @@ export function classifyPack(manifest: Manifest): PackKind | null {
   return null;
 }
 
-/** Manifests use [1, 0, 0]; some newer ones use "1.0.0". World JSONs want the list. */
+const versionPart = (part: unknown): number | string =>
+  typeof part === "number" ? part : /^\d+$/.test(String(part)) ? Number(part) : String(part);
+
+/**
+ * Manifests use [1, 0, 0]; some newer ones use "1.0.0" or semver strings such as "1.0.0-beta.2". The result
+ * always has at least three parts; a prerelease follows them as one text part ([1, 0, 0, "beta.2"]), so that
+ * compareVersions puts 1.0.0-beta.2 before 1.0.0. Build metadata ("+abc") is ignored, as in semver.
+ * World JSONs want only the first three parts: see registrationVersion.
+ */
 export function normalizeVersion(version: unknown): Version {
   // ["1", "0", "0"] is the same version as [1, 0, 0].
-  if (Array.isArray(version))
-    return version.map((part) => (typeof part === "number" ? part : /^\d+$/.test(String(part)) ? Number(part) : String(part)));
-  if (typeof version === "string") {
-    const parts = version
-      .split(/[.+-]/)
-      .slice(0, 3)
-      .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+  if (Array.isArray(version)) {
+    const parts = version.map(versionPart);
     while (parts.length < 3) parts.push(0);
     return parts;
+  }
+  if (typeof version === "string") {
+    const text = version.trim().split("+")[0]!;
+    const dash = text.indexOf("-");
+    const core = (dash < 0 ? text : text.slice(0, dash)).split(".").map(versionPart);
+    while (core.length < 3) core.push(0);
+    if (dash < 0) return core;
+    // The whole prerelease stays one text part: text sorts before numbers, so it comes before the release,
+    // and compareVersions orders two prereleases by semver rules (1.0.0-2 before 1.0.0-10).
+    const pre = text
+      .slice(dash + 1)
+      .split(".")
+      .filter(Boolean)
+      .join(".");
+    return pre ? [...core, pre] : core;
   }
   if (typeof version === "number") return [version, 0, 0];
   return [0, 0, 0];
 }
+
+/** The version as world JSONs list it: the first three parts, without any prerelease. */
+export const registrationVersion = (version: unknown): Version => normalizeVersion(version).slice(0, 3);
 
 export const stripFormatting = (text: string): string => text.replace(/§./g, "");
 
@@ -149,8 +170,14 @@ export const uuidKey = (uuid: unknown): string =>
     .trim()
     .toLowerCase();
 
+/** Exact equality, prerelease included: 1.0.0-beta is not 1.0.0. */
 export function versionsEqual(a: Version | unknown, b: Version | unknown): boolean {
   return JSON.stringify(normalizeVersion(a)) === JSON.stringify(normalizeVersion(b));
+}
+
+/** Whether a world entry at version `a` points at a pack of version `b` (world JSONs only hold three numbers). */
+export function registrationMatches(a: Version | unknown, b: Version | unknown): boolean {
+  return JSON.stringify(registrationVersion(a)) === JSON.stringify(registrationVersion(b));
 }
 
 /** Sort key where numbers compare numerically and text parts sort before them. */
@@ -163,7 +190,27 @@ export function compareVersions(a: Version, b: Version): number {
     if (typeof x === "number" && typeof y === "number") return x - y;
     if (typeof x === "number") return 1;
     if (typeof y === "number") return -1;
-    return String(x).localeCompare(String(y));
+    return comparePrerelease(String(x), String(y));
+  }
+  return 0;
+}
+
+/** Semver prerelease order: dot-separated identifiers, numbers numerically and before text, shorter first. */
+function comparePrerelease(a: string, b: string): number {
+  const left = a.split(".");
+  const right = b.split(".");
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const x = left[index];
+    const y = right[index];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumber = /^\d+$/.test(x);
+    const yNumber = /^\d+$/.test(y);
+    if (xNumber && yNumber) return Number(x) - Number(y);
+    if (xNumber) return -1;
+    if (yNumber) return 1;
+    return x < y ? -1 : 1;
   }
   return 0;
 }

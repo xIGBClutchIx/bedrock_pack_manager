@@ -52,10 +52,10 @@ export abstract class Storage {
 
   /** List a folder or throw NotFoundError. */
   protected abstract rawList(path: string): Promise<Entry[]>;
-  /** Read a whole file or throw NotFoundError. */
-  protected abstract rawRead(path: string): Promise<Buffer>;
-  /** Write a whole file, replacing it. The parent folder exists. */
-  protected abstract rawWrite(path: string, data: Buffer): Promise<void>;
+  /** Read a whole file or throw NotFoundError. A backend may stop a big transfer early when `signal` aborts (CancelledError). */
+  protected abstract rawRead(path: string, signal?: AbortSignal): Promise<Buffer>;
+  /** Write a whole file, replacing it. The parent folder exists. A backend may stop early when `signal` aborts (CancelledError). */
+  protected abstract rawWrite(path: string, data: Buffer, signal?: AbortSignal): Promise<void>;
   /** Create one folder level. May throw when it already exists. */
   protected abstract rawMkdir(path: string): Promise<void>;
   protected abstract rawRemoveFile(path: string): Promise<void>;
@@ -88,6 +88,26 @@ export abstract class Storage {
     this.listingCache.delete(parent(key));
     const prefix = `${key}/`;
     for (const cached of this.listingCache.keys()) if (cached.startsWith(prefix)) this.listingCache.delete(cached);
+  }
+
+  /**
+   * Record a folder this job just created: add it to the cached parent listing (instead of dropping that
+   * listing, which would make the next sibling list the parent again) and cache it as empty.
+   */
+  private noteCreatedDir(path: string): void {
+    if (!this.cacheListings) return;
+    const key = join(path);
+    const up = parent(key);
+    const name = basename(key);
+    const listing = up !== key ? this.listingCache.get(up) : undefined;
+    if (listing) {
+      const entries = [...listing.filter((entry) => entry.name !== name), { name, isDir: true, size: null }];
+      entries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+      this.listingCache.set(up, entries);
+    }
+    const prefix = `${key}/`;
+    for (const cached of this.listingCache.keys()) if (cached.startsWith(prefix)) this.listingCache.delete(cached);
+    this.listingCache.set(key, []);
   }
 
   // ---- concurrency ------------------------------------------------------------------------------
@@ -188,7 +208,7 @@ export abstract class Storage {
   /** Read several files at once. Missing files map to NotFoundError. */
   async readMany(paths: readonly string[], signal?: AbortSignal): Promise<Map<string, Buffer | Error>> {
     const keys = paths.map((path) => join(path));
-    const results = await this.map(keys, (key) => this.rawRead(key), signal);
+    const results = await this.map(keys, (key) => this.rawRead(key, signal), signal);
     return new Map(keys.map((key, index) => [key, results[index]!]));
   }
 
@@ -244,8 +264,9 @@ export abstract class Storage {
     } catch (error) {
       this.invalidate(key);
       if (!(await this.isDir(key))) throw error;
+      return;
     }
-    this.invalidate(key);
+    this.noteCreatedDir(key);
   }
 
   async removeFile(path: string): Promise<void> {
@@ -365,26 +386,37 @@ export abstract class Storage {
     const total = uploads.length + manifests.length;
     let done = 0;
     const put = async ([local, remote]: [string, string]) => {
-      await this.rawWrite(remote, await readFile(local));
+      await this.rawWrite(remote, await readFile(local), options.signal);
       options.onProgress?.(++done, total, remote);
     };
 
     try {
-      if (fresh) {
-        // Brand-new tree: nothing can exist yet, so skip existence checks and create a whole depth level at once.
-        const depth = (folder: string) => folder.split("/").length;
-        const byDepth = new Map<number, string[]>();
-        for (const folder of folders) byDepth.set(depth(folder), [...(byDepth.get(depth(folder)) ?? []), folder]);
-        for (const level of [...byDepth.keys()].sort((a, b) => a - b).map((key) => byDepth.get(key)!)) {
-          throwIfAborted(options.signal);
-          const results = await this.map(level, (folder) => this.rawMkdir(folder), options.signal);
-          // A failed fast create (odd server) falls back to the careful path for that folder.
-          for (const [index, result] of results.entries()) if (result instanceof Error) await this.mkdirs(level[index]!);
+      // Create a whole depth level at once. A brand-new tree cannot hold anything yet, so it skips the
+      // existence checks; otherwise each parent is listed once (in parallel) and only missing folders are made.
+      const depth = (folder: string) => folder.split("/").length;
+      const byDepth = new Map<number, string[]>();
+      for (const folder of folders) byDepth.set(depth(folder), [...(byDepth.get(depth(folder)) ?? []), folder]);
+      for (const level of [...byDepth.keys()].sort((a, b) => a - b).map((key) => byDepth.get(key)!)) {
+        throwIfAborted(options.signal);
+        let missing = level;
+        if (!fresh) {
+          const parents = [...new Set(level.map((folder) => parent(folder)))];
+          const listings = await this.map(parents, (folder) => this.listDir(folder), options.signal);
+          const existing = new Set<string>();
+          for (const [index, listing] of listings.entries()) {
+            if (listing instanceof CancelledError) throw listing;
+            // An unreadable parent is left to the careful path below, which reports the real problem.
+            if (listing instanceof Error) continue;
+            for (const entry of listing) if (entry.isDir) existing.add(join(parents[index]!, entry.name));
+          }
+          missing = level.filter((folder) => !existing.has(folder));
         }
-      } else {
-        for (const folder of folders) {
-          throwIfAborted(options.signal);
-          await this.mkdirs(folder);
+        const results = await this.map(missing, (folder) => this.rawMkdir(folder), options.signal);
+        for (const [index, result] of results.entries()) {
+          if (result instanceof CancelledError) throw result;
+          // A failed fast create (odd server, or a name taken by a file) falls back to the careful path for that folder.
+          if (result instanceof Error) await this.mkdirs(missing[index]!);
+          else this.noteCreatedDir(missing[index]!);
         }
       }
       Storage.raiseFirst(await this.map(uploads, put, options.signal));
@@ -400,7 +432,7 @@ export abstract class Storage {
   }
 
   /**
-   * Yield `[relativePath, data]` for every file under `path`, fetched in parallel batches. Symlinks are
+   * Yield `[relativePath, data]` for every file under `path`, fetched several at a time. Symlinks are
    * not followed. A file that disappears after the scan (a running server rewrites its database) is
    * reported to `onSkip` and left out instead of ending the download.
    */
@@ -413,20 +445,41 @@ export abstract class Storage {
     const { files, links } = await this.scanTree(root, signal);
     const relativeTo = (file: string) => (root ? file.slice(root.length + 1) : file);
     for (const link of links) onSkip?.(relativeTo(link), "symbolic link, not followed");
-    const batchSize = 32;
-    for (let start = 0; start < files.length; start += batchSize) {
-      const chunk = files.slice(start, start + batchSize);
-      const results = await this.map(chunk, (file) => this.rawRead(file), signal);
-      for (let index = 0; index < chunk.length; index++) {
-        const data = results[index]!;
-        const file = chunk[index]!;
+    // A sliding window: keep `window` reads in flight (one slow file no longer holds up a whole batch),
+    // hand results out in scan order, and never buffer more than `window` files.
+    const window = Math.max(1, Math.min(this.concurrency, 32));
+    // Our own signal, so reads still in flight stop when we fail or the consumer stops early, not only on cancel.
+    const local = new AbortController();
+    const onAbort = () => local.abort();
+    if (signal?.aborted) local.abort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    const read = (file: string): Promise<Buffer | Error> =>
+      local.signal.aborted
+        ? Promise.resolve(new CancelledError())
+        : this.rawRead(file, local.signal).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+    const pending: Promise<Buffer | Error>[] = [];
+    let started = 0;
+    const fill = () => {
+      while (started < files.length && pending.length < window) pending.push(read(files[started++]!));
+    };
+    try {
+      fill();
+      for (const file of files) {
+        const data = await pending.shift()!;
         if (isNotFound(data)) {
+          fill();
           onSkip?.(relativeTo(file), "disappeared while backing up");
           continue;
         }
         if (data instanceof Error) throw data;
+        fill();
         yield [relativeTo(file), data];
       }
+    } finally {
+      // Never leave transfers running behind a finished (or failed) backup: the next job could overlap them.
+      local.abort();
+      signal?.removeEventListener("abort", onAbort);
+      await Promise.allSettled(pending);
     }
   }
 }

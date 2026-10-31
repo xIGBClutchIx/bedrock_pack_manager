@@ -6,8 +6,10 @@ import yauzl from "yauzl";
 import { ROUTES, TOKEN_HEADER } from "../src/shared/api";
 import type { JobEvent, JobInfo } from "../src/shared/events";
 import type { ConnectResult, InstallResult, UninstallResult, WorldPacksResult, WorldStatus } from "../src/shared/model";
+import { acquireLock } from "../src/server/app/lock";
 import { buildPaths, ensureDirs } from "../src/server/app/paths";
 import { createApp, safeRelative, windowsSafe, type App } from "../src/server/http/app";
+import { JobRunner } from "../src/server/jobs/runner";
 import { CancelledError } from "../src/server/storage/errors";
 import { fingerprintOf } from "../src/server/storage/knownHosts";
 import { FIXTURES, levelDatBytes, tempDir, writeFile, writeManifest } from "./helpers";
@@ -262,6 +264,228 @@ describe("connect and world flow", () => {
     const log = await call("GET", ROUTES.jobLog(connected.id));
     expect(log.headers["content-type"]).toContain("text/plain");
     expect(log.body).toContain("[OK] Connected");
+  });
+});
+
+/** Hold every listing on the connected server until the returned function is called. */
+function holdListings(): () => void {
+  const storage = app.session.target!.storage;
+  const original = storage.listDir;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  storage.listDir = async (...args) => {
+    await gate;
+    return original.apply(storage, args);
+  };
+  return () => {
+    storage.listDir = original;
+    open();
+  };
+}
+
+describe("uploads, installs and backups", () => {
+  const addon = () => readFileSync(join(FIXTURES, "installed", "addon.mcaddon"));
+
+  it("takes uploads during a plan preview but not during a real install", async () => {
+    await connectLocal();
+    expect((await call("PUT", `${ROUTES.uploads}?path=addon.mcaddon`, addon())).statusCode).toBe(200);
+
+    let release = holdListings();
+    const preview = await call("POST", ROUTES.install, { world: "worlds/W", dryRun: true });
+    expect(preview.statusCode).toBe(202);
+    expect(app.runner.get(preview.json().job)!.status).toBe("running");
+    expect((await call("PUT", `${ROUTES.uploads}?path=more.mcpack`, Buffer.from("x"))).statusCode).toBe(200);
+    // Deleting a file the plan is reading is still refused.
+    expect((await call("DELETE", `${ROUTES.uploads}?name=more.mcpack`)).statusCode).toBe(409);
+    release();
+    await app.runner.get(preview.json().job)!.promise;
+    await call("DELETE", `${ROUTES.uploads}?name=more.mcpack`);
+
+    release = holdListings();
+    const install = await call("POST", ROUTES.install, { world: "worlds/W", dryRun: false });
+    expect(install.statusCode).toBe(202);
+    const refused = await call("PUT", `${ROUTES.uploads}?path=late.mcpack`, Buffer.from("x"));
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().code).toBe("busy");
+    release();
+    await app.runner.get(install.json().job)!.promise;
+    expect((await call("PUT", `${ROUTES.uploads}?path=late.mcpack`, Buffer.from("x"))).statusCode).toBe(200);
+  });
+
+  it("answers a backup that fails before any data with a JSON error, and refuses one while busy", async () => {
+    await connectLocal();
+    const storage = app.session.target!.storage;
+    const isDir = storage.isDir;
+    storage.isDir = async () => {
+      throw new Error("connection dropped");
+    };
+    const failed = await call("GET", ROUTES.backup);
+    storage.isDir = isDir;
+    expect(failed.statusCode).toBe(500);
+    expect(failed.headers["content-type"]).toContain("application/json");
+    expect(failed.headers["content-disposition"]).toBeUndefined();
+    expect(failed.json().error).toContain("connection dropped");
+
+    let finish!: () => void;
+    const running = app.runner.start("slow", "Slow", () => new Promise((resolve) => (finish = () => resolve(null))));
+    const busy = await call("GET", `${ROUTES.backup}?world=worlds/W`);
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json().code).toBe("busy");
+    finish();
+    await running.promise;
+  });
+
+  it("keeps the working connection when a new connect fails", async () => {
+    await connectLocal();
+    const failed = await job(ROUTES.connect, {
+      settings: { protocol: "local", host: "", port: null, username: "", root: join(dir.path, "nope"), tlsVerify: true },
+      layout: {},
+    });
+    expect(failed.status).toBe("error");
+    const state = (await call("GET", ROUTES.state)).json();
+    expect(state).toMatchObject({ connected: true, defaultWorld: "worlds/W" });
+    expect((await job(ROUTES.status, { world: "worlds/W" })).status).toBe("done");
+  });
+
+  it("range-checks the connect port", async () => {
+    const connect = (port: unknown) =>
+      call("POST", ROUTES.connect, {
+        settings: { protocol: "local", host: "", port, username: "", root: server, tlsVerify: true },
+        layout: {},
+      });
+    for (const port of [70000, -1, 1.5, "abc", 65536]) {
+      const response = await connect(port);
+      expect(response.statusCode, String(port)).toBe(400);
+      expect(response.json().code).toBe("bad_request");
+    }
+    const ok = await connect(22);
+    expect(ok.statusCode).toBe(202);
+    await app.runner.get(ok.json().job)!.promise;
+  });
+});
+
+describe("tokens and hosts", () => {
+  it("answers a missing or stale token with bad_token", async () => {
+    for (const token of ["", "from-an-earlier-launch"]) {
+      const response = await call("GET", ROUTES.state, undefined, { [TOKEN_HEADER]: token });
+      expect(response.statusCode).toBe(403);
+      expect(response.json().code).toBe("bad_token");
+    }
+  });
+
+  it("accepts a Host without the port only when the port is 80", async () => {
+    const bareHost = (host: string, origin?: string) =>
+      app.fastify.inject({ method: "GET", url: ROUTES.state, headers: { host, [TOKEN_HEADER]: app.token, ...(origin ? { origin } : {}) } });
+    expect((await bareHost("127.0.0.1")).statusCode).toBe(403);
+    app.setPort(80);
+    expect((await bareHost("127.0.0.1")).statusCode).toBe(200);
+    expect((await bareHost("localhost", "http://localhost")).statusCode).toBe(200);
+    expect((await bareHost("127.0.0.1:81")).statusCode).toBe(403);
+    expect((await bareHost("evil.example")).statusCode).toBe(403);
+  });
+});
+
+describe("job history and events", () => {
+  it("keeps the last meaningful jobs however many quiet ones run", async () => {
+    const runner = new JobRunner(undefined, 3, 2);
+    const run = async (kind: string, quiet: boolean) => {
+      const started = runner.start(kind, kind, async () => null, undefined, { quiet });
+      await started.promise;
+      return started;
+    };
+    const installs = [await run("install-1", false), await run("install-2", false), await run("install-3", false)];
+    for (let index = 0; index < 10; index++) await run(`status-${index}`, true);
+    expect(installs.every((kept) => runner.get(kept.id))).toBe(true);
+    const listed = runner.list();
+    expect(listed.map((info) => info.kind)).toEqual(["status-9", "status-8", "install-3", "install-2", "install-1"]);
+    expect(listed[0]?.quiet).toBe(true);
+    expect(listed[2]).not.toHaveProperty("quiet");
+    await run("install-4", false);
+    expect(runner.get(installs[0]!.id)).toBeUndefined();
+    expect(runner.list().filter((info) => !info.quiet)).toHaveLength(3);
+  });
+
+  it("marks world reads and dry runs as quiet through the API", async () => {
+    await connectLocal();
+    expect((await job(ROUTES.status, { world: "worlds/W" })).quiet).toBe(true);
+    expect((await job(ROUTES.cleanup, { world: "worlds/W", dryRun: true })).quiet).toBe(true);
+    expect((await job(ROUTES.rebuild, { world: "worlds/W" })).quiet).toBeUndefined();
+  });
+
+  it("keeps only the latest progress event per label, with ids that keep growing", async () => {
+    const runner = new JobRunner();
+    let finish!: () => void;
+    const running = runner.start("long", "Long", (j) => {
+      j.log("plain", "start");
+      j.progress("Uploading", 0, 10);
+      j.progress("Uploading", 5, 10); // throttled away (too soon)
+      j.progress("Scanning", 1, 1);
+      j.progress("Uploading", 10, 10); // the last one always goes out, replacing the first
+      j.log("plain", "middle");
+      return new Promise((resolve) => (finish = () => resolve(null)));
+    });
+    expect(running.events.map((event) => [event.type, event.seq])).toEqual([
+      ["log", 0],
+      ["progress", 2],
+      ["progress", 3],
+      ["log", 4],
+    ]);
+    const progress = running.events.filter((event) => event.type === "progress");
+    expect(progress.map((event) => [event.label, event.done])).toEqual([
+      ["Scanning", 1],
+      ["Uploading", 10],
+    ]);
+
+    const replay = (since: number) => {
+      const seen: JobEvent[] = [];
+      running.subscribe(since, (event) => seen.push(event))();
+      return seen.map((event) => event.seq);
+    };
+    expect(replay(0)).toEqual([0, 2, 3, 4]);
+    // A client that saw seq 0 and 1 (the dropped progress) resumes from 2 and gets the latest state.
+    expect(replay(2)).toEqual([2, 3, 4]);
+    expect(replay(1)).toEqual([2, 3, 4]);
+    expect(replay(5)).toEqual([]);
+
+    const live: JobEvent[] = [];
+    running.subscribe(5, (event) => live.push(event));
+    finish();
+    await running.promise;
+    expect(live.map((event) => [event.type, event.seq])).toEqual([["end", 5]]);
+  });
+});
+
+describe("instance lock", () => {
+  it("refuses a second live instance and takes over a stale lock", () => {
+    const file = join(dir.path, "run", "instance.lock");
+    const first = acquireLock(file);
+    expect(first.ok).toBe(true);
+    // A live process (this test's parent) holding it: refused.
+    writeFile(file, `${process.ppid}\n`);
+    expect(acquireLock(file)).toEqual({ ok: false, pid: process.ppid });
+    // A pid that is not running: taken over.
+    writeFile(file, "999999999\n");
+    const taken = acquireLock(file);
+    expect(taken.ok).toBe(true);
+    expect(readFileSync(file, "utf8").trim()).toBe(String(process.pid));
+    if (taken.ok) taken.release();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("writes the pid before the lock appears and leaves no temp files", () => {
+    const file = join(dir.path, "run", "instance.lock");
+    // Another live instance starting against the same folder is refused while the first holds it.
+    const first = acquireLock(file, process.ppid);
+    expect(first.ok).toBe(true);
+    expect(readFileSync(file, "utf8").trim()).toBe(String(process.ppid));
+    expect(acquireLock(file)).toEqual({ ok: false, pid: process.ppid });
+    expect(readdirSync(join(dir.path, "run")).filter((name) => name.startsWith("instance.lock."))).toEqual([]);
+    if (first.ok) first.release();
+    // An empty lock can only be junk (locks are never half-written), so it is taken over.
+    writeFile(file, "");
+    const taken = acquireLock(file);
+    expect(taken.ok).toBe(true);
+    if (taken.ok) taken.release();
   });
 });
 
