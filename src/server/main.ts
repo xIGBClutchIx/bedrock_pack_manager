@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
+import { acquireLock } from "./app/lock";
 import { buildPaths, ensureDirs, isSea } from "./app/paths";
 import { RunLog } from "./app/logs";
 import { createApp } from "./http/app";
@@ -61,6 +62,15 @@ async function main(): Promise<void> {
 
   const paths = buildPaths(values["data-dir"]);
   ensureDirs(paths);
+  // Before touching anything in run/: another instance using it would lose its staging and log.
+  const lock = acquireLock(paths.lockFile);
+  if (!lock.ok) {
+    console.error(
+      `\n  Bedrock Pack Manager is already running with this data folder (process ${lock.pid}):\n    ${paths.runDir}\n\n  Use the window that is already open, close it first, or start with --data-dir <another folder>.\n  If no copy is running, delete ${paths.lockFile} and try again.\n`,
+    );
+    process.exit(1);
+  }
+  process.on("exit", lock.release);
   rmSync(paths.unpackDir, { recursive: true, force: true });
   ensureDirs(paths);
   const runLog = new RunLog(paths.logsDir);
@@ -95,6 +105,8 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  // Closing the console window (Windows) or the terminal: still release the lock and close the connection.
+  process.on("SIGHUP", stop);
 }
 
 main().catch((error) => {

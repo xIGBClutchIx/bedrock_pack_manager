@@ -10,6 +10,8 @@ export interface AppPaths {
   unpackDir: string;
   knownHostsFile: string;
   profilesFile: string;
+  /** Held by the running instance, so two copies never share (and wipe) one run folder. */
+  lockFile: string;
 }
 
 export function isSea(): boolean {
@@ -37,6 +39,7 @@ export function buildPaths(dataDir?: string): AppPaths {
     unpackDir: join(stagingDir, "unpack"),
     knownHostsFile: join(runDir, "known_hosts"),
     profilesFile: join(runDir, "profiles.json"),
+    lockFile: join(runDir, "instance.lock"),
   };
 }
 
