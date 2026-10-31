@@ -15,7 +15,7 @@ It is a Node.js + TypeScript app: a Fastify server with a React web UI, shipped 
 - `src/server/core/`: `manifests.ts`, `layout.ts` (layout detection and `Target`), `builtins.ts`, `packIndex.ts`, `worlds.ts`, `nbt.ts`, `log.ts`
 - `src/server/core/install/`: `unpack.ts`, `plan.ts`, `index.ts`
 - `src/server/core/commands/`: `status.ts` (world status, `otherWorldsUsing`), `uninstall.ts`, `maintenance.ts` (audit, rebuild, cleanup, fix nesting), `worldPacks.ts` (register, reorder, subpack), `worldEdit.ts`, `backup.ts`
-- `src/server/app/`: `paths.ts` (run folder), `profiles.ts`, `logs.ts`
+- `src/server/app/`: `paths.ts` (run folder), `profiles.ts`, `logs.ts`, `lock.ts` (one instance per data dir)
 - `src/web/`: React UI. `api/client.ts`, `state/app.tsx` (runs and follows jobs, reattaches after a reload), `components/*.tsx`, `styles/app.css`
 - `scripts/`: `build-server.mjs` (esbuild bundle), `build-sea.mjs`, `bench.ts`, `demo-servers.ts`, git hook installers
 
@@ -29,6 +29,7 @@ Do not put runtime data in the repo root. Everything the app writes goes under `
 - `run/staging/uploads/` and `run/staging/unpack/`
 - `run/known_hosts`
 - `run/profiles.json`
+- `run/instance.lock`
 
 Add new paths to `src/server/app/paths.ts` and `ensureDirs`.
 
