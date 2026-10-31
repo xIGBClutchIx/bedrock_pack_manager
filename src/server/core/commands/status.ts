@@ -22,7 +22,7 @@ export async function loadWorldPacks(target: Target, world: string): Promise<Wor
 /** Other worlds' pack lists, read once per job: entries, or the error that stopped the read. */
 export type WorldJsonCache = Map<string, WorldEntry[] | Error>;
 
-async function cachedWorldJson(target: Target, world: string, kind: PackKind, cache: WorldJsonCache): Promise<WorldEntry[] | Error> {
+export async function cachedWorldJson(target: Target, world: string, kind: PackKind, cache: WorldJsonCache): Promise<WorldEntry[] | Error> {
   const cacheKey = `${world}|${kind}`;
   if (!cache.has(cacheKey)) {
     const entries = await loadWorldJson(target.storage, target.worldJson(world, kind)).catch((error: unknown) =>

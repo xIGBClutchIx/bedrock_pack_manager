@@ -4,7 +4,7 @@
  */
 import { createWriteStream } from "node:fs";
 import { mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import yauzl from "yauzl";
@@ -30,10 +30,27 @@ import {
 
 const MAX_NESTED_DEPTH = 6;
 
-/** Limits per archive, so a zip bomb cannot fill the disk. Real add-ons are far below both. */
+/**
+ * Limits for one install source, counted across the archive and every archive nested inside it, so a
+ * zip bomb (nested or not) cannot fill the disk. Real add-ons are far below both.
+ */
 export const ARCHIVE_LIMITS = { maxBytes: 4 * 1024 * 1024 * 1024, maxEntries: 200_000 };
 
+export type ArchiveLimits = typeof ARCHIVE_LIMITS;
+
+/** What one source may still unpack; shared by every extractZip call for that source. */
+export interface ArchiveBudget {
+  limits: ArchiveLimits;
+  bytes: number;
+  entries: number;
+}
+
+export const archiveBudget = (limits: ArchiveLimits = ARCHIVE_LIMITS): ArchiveBudget => ({ limits, bytes: 0, entries: 0 });
+
 export class UnsafeArchiveError extends Error {}
+
+/** The source unpacks to more than its ArchiveBudget allows. */
+export class ArchiveTooLargeError extends UnsafeArchiveError {}
 
 export interface IncomingPack {
   folder: string;
@@ -74,8 +91,14 @@ export async function isZipFile(path: string): Promise<boolean> {
   }
 }
 
-/** Extract a zip, refusing members that would land outside `dest`, and archives that unpack to more than ARCHIVE_LIMITS. */
-export async function extractZip(archive: string, dest: string, limits = ARCHIVE_LIMITS): Promise<void> {
+/**
+ * Extract a zip, refusing members that would land outside `dest`, and unpacking more than the budget
+ * allows. Pass the same budget for every archive of one source so nested archives share it; plain
+ * limits start a fresh budget.
+ */
+export async function extractZip(archive: string, dest: string, budget: ArchiveBudget | ArchiveLimits = ARCHIVE_LIMITS): Promise<void> {
+  const shared = "limits" in budget ? budget : archiveBudget(budget);
+  const { limits } = shared;
   const root = resolve(dest);
   await mkdir(root, { recursive: true });
   const zip = await new Promise<yauzl.ZipFile>((ok, fail) =>
@@ -90,15 +113,13 @@ export async function extractZip(archive: string, dest: string, limits = ARCHIVE
         fail(/invalid relative path|absolute path/i.test(error.message) ? new UnsafeArchiveError(error.message) : error),
       );
       zip.on("end", () => done());
-      let entries = 0;
-      let bytes = 0;
       zip.on("entry", (entry: yauzl.Entry) => {
         // yauzl checks that each entry's real size matches the size it declares, so counting declared sizes is enough.
-        bytes += entry.uncompressedSize;
-        if (++entries > limits.maxEntries || bytes > limits.maxBytes)
+        shared.bytes += entry.uncompressedSize;
+        if (++shared.entries > limits.maxEntries || shared.bytes > limits.maxBytes)
           return fail(
-            new UnsafeArchiveError(
-              `Archive unpacks to more than ${limits.maxEntries} files or ${Math.round(limits.maxBytes / 1024 ** 3)} GB`,
+            new ArchiveTooLargeError(
+              `Archive unpacks to more than ${limits.maxEntries} files or ${formatBytes(limits.maxBytes)}, counting archives inside it`,
             ),
           );
         const name = entry.fileName.replaceAll("\\", "/");
@@ -125,6 +146,13 @@ export async function extractZip(archive: string, dest: string, limits = ARCHIVE
   }
 }
 
+const formatBytes = (bytes: number) =>
+  bytes >= 1024 ** 3
+    ? `${Math.round(bytes / 1024 ** 3)} GB`
+    : bytes >= 1024 ** 2
+      ? `${Math.round(bytes / 1024 ** 2)} MB`
+      : `${bytes} bytes`;
+
 async function walkFiles(folder: string): Promise<string[]> {
   const out: string[] = [];
   const visit = async (dir: string) => {
@@ -139,9 +167,24 @@ async function walkFiles(folder: string): Promise<string[]> {
   return out;
 }
 
-/** Unpack archives inside archives, repeating until none are left. */
-export async function extractNestedArchives(folder: string, log: JobLog): Promise<boolean> {
+/** A folder name for a nested archive's contents that nothing else in its folder uses ("a.zip" and "a.mcpack" can sit side by side). */
+async function nestedTarget(file: string, claimed: Set<string>): Promise<string> {
+  const base = join(dirname(file), `_nested_${basename(file, extname(file))}`);
+  let candidate = base;
+  for (let counter = 2; claimed.has(candidate.toLowerCase()) || (await stat(candidate).catch(() => null)); counter++)
+    candidate = `${base}_${counter}`;
+  claimed.add(candidate.toLowerCase());
+  return candidate;
+}
+
+/**
+ * Unpack archives inside archives, repeating until none are left. Every archive draws on `budget`, so
+ * the source's limits cover all levels together; running out throws ArchiveTooLargeError (the whole
+ * source is unsafe), while a broken or zip-slip nested archive is only skipped.
+ */
+export async function extractNestedArchives(folder: string, log: JobLog, budget: ArchiveBudget = archiveBudget()): Promise<boolean> {
   let foundAny = false;
+  const claimed = new Set<string>();
   for (let depth = 0; depth < MAX_NESTED_DEPTH; depth++) {
     const nested = (await walkFiles(folder)).filter((path) => ARCHIVE_EXTENSIONS.has(extname(path).toLowerCase()));
     if (!nested.length) break;
@@ -149,8 +192,9 @@ export async function extractNestedArchives(folder: string, log: JobLog): Promis
       foundAny = true;
       info(log, `Found nested archive: ${basename(file)} - extracting`);
       try {
-        await extractZip(file, join(dirname(file), `_nested_${basename(file, extname(file))}`));
+        await extractZip(file, await nestedTarget(file, claimed), budget);
       } catch (error) {
+        if (error instanceof ArchiveTooLargeError) throw error;
         if (error instanceof UnsafeArchiveError)
           warn(log, `Nested file ${basename(file)} is unsafe to extract, skipping it (${error.message})`);
         else warn(log, `Nested file ${basename(file)} is not a valid archive, skipping it`);
@@ -159,6 +203,12 @@ export async function extractNestedArchives(folder: string, log: JobLog): Promis
     }
   }
   return foundAny;
+}
+
+/** Whether `child` is inside `parent` (a child folder may be called "..foo"; only ".." itself leaves). */
+export function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 /** Folders that contain a manifest.json, outermost first. */
@@ -277,12 +327,20 @@ export async function prepareSource(
   scratchDir: string,
   log: JobLog,
   betaEnabled: boolean | null = null,
+  limits: ArchiveLimits = ARCHIVE_LIMITS,
 ): Promise<PreparedSource> {
   const name = basename(entry);
   log.log("section", name);
   const source: PreparedSource = { entry, packs: [], extracted: null, ok: true };
   const info_ = await stat(entry).catch(() => null);
+  // One budget for the archive and everything nested in it.
+  const budget = archiveBudget(limits);
   let searchRoot: string;
+  const tooLarge = async (error: ArchiveTooLargeError): Promise<PreparedSource> => {
+    warn(log, `'${name}' is too large to unpack safely - skipping it (${error.message})`);
+    if (source.extracted) await rm(source.extracted, { recursive: true, force: true });
+    return { ...source, extracted: null, ok: false };
+  };
 
   if (info_?.isFile()) {
     const extension = extname(entry).toLowerCase();
@@ -293,22 +351,27 @@ export async function prepareSource(
     if (!ARCHIVE_EXTENSIONS.has(extension)) info(log, `'${name}' is a zip file with an unusual extension - treating it as an archive`);
     source.extracted = join(scratchDir, `_extracted_${basename(entry, extname(entry))}_${Date.now().toString(36)}`);
     try {
-      await extractZip(entry, source.extracted);
+      await extractZip(entry, source.extracted, budget);
     } catch (error) {
+      if (error instanceof ArchiveTooLargeError) return tooLarge(error);
       if (error instanceof UnsafeArchiveError) warn(log, `'${name}' contains unsafe archive paths - skipping it (${error.message})`);
       else warn(log, `'${name}' is not a valid zip archive - the file may be corrupt`);
       await rm(source.extracted, { recursive: true, force: true });
       source.extracted = null;
       return { ...source, ok: false };
     }
-    await extractNestedArchives(source.extracted, log);
     searchRoot = source.extracted;
   } else if (info_?.isDirectory()) {
-    await extractNestedArchives(entry, log);
     searchRoot = entry;
   } else {
     warn(log, `'${name}' is not a file or folder - skipping`);
     return { ...source, ok: false };
+  }
+  try {
+    await extractNestedArchives(searchRoot, log, budget);
+  } catch (error) {
+    if (error instanceof ArchiveTooLargeError) return tooLarge(error);
+    throw error;
   }
 
   const folders = await findAllPacks(searchRoot);
@@ -331,7 +394,7 @@ export async function prepareSource(
       continue;
     }
     for (const other of folders) {
-      if (other !== folder && !relative(folder, other).startsWith("..")) pack.exclude.add(other);
+      if (other !== folder && isInside(folder, other)) pack.exclude.add(other);
     }
     source.packs.push(pack);
   }

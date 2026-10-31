@@ -13,7 +13,7 @@ import { betaEnabled, readLevelDat } from "../nbt";
 import { PackIndex } from "../packIndex";
 import { saveWorldJson, upsertEntry } from "../worlds";
 import { planInstall, toPlanItem, type PlannedPack } from "./plan";
-import { countUploadFiles, prepareSource, versionText, type PreparedSource } from "./unpack";
+import { countUploadFiles, prepareSource, versionText, type IncomingPack, type PreparedSource } from "./unpack";
 
 export interface CommandContext {
   target: Target;
@@ -42,15 +42,38 @@ async function worldBeta(target: Target, world: string): Promise<boolean | null>
 }
 
 /**
- * Upload a pack. When replacing a same-named folder, upload beside it first so a failed transfer never
- * leaves the server without the pack. Returns where it landed and the old copies that could not be removed
- * (the new copy is in place, so the install still counts; the leftovers are reported).
+ * A temporary folder name beside `finalPath` that is safe to clear first: never a pack the server
+ * has (any world might use it, and plan.keep lists copies that must stay), only a leftover of ours.
  */
-async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => void): Promise<{ path: string; leftovers: string[] }> {
+function uploadTempPath(finalPath: string, plan: PlannedPack, index: PackIndex): string {
+  const lower = (path: string) => path.toLowerCase();
+  const isPack = (candidate: string) =>
+    [...index.packs, ...plan.keep].some(
+      (pack) => lower(pack.path) === lower(candidate) || lower(pack.path).startsWith(`${lower(candidate)}/`),
+    );
+  let candidate = `${finalPath}.bpm-upload`;
+  for (let counter = 2; isPack(candidate); counter++) candidate = `${finalPath}.bpm-upload-${counter}`;
+  return candidate;
+}
+
+/**
+ * Upload a pack. When replacing a same-named folder, upload beside it first so a failed transfer never
+ * leaves the server without the pack. `onUploaded` runs once the new copy is complete, before any old copy
+ * is touched, so the world can point at it even if the job stops while old copies are removed. Returns
+ * where it landed and the old copies that could not be removed (the new copy is in place, so the install
+ * still counts; the leftovers are reported).
+ */
+async function uploadPack(
+  ctx: CommandContext,
+  plan: PlannedPack,
+  index: PackIndex,
+  onFile: () => void,
+  onUploaded: () => void,
+): Promise<{ path: string; leftovers: string[] }> {
   const { storage } = ctx.target;
   const finalPath = join(plan.targetDir, plan.targetFolder);
   const clashes = plan.replace.some((copy) => copy.path.toLowerCase() === finalPath.toLowerCase());
-  let uploadPath = clashes ? `${finalPath}.bpm-upload` : finalPath;
+  let uploadPath = clashes ? uploadTempPath(finalPath, plan, index) : finalPath;
 
   if (clashes) await storage.removeTree(uploadPath);
   const count = await storage.uploadTree(plan.pack.folder, uploadPath, {
@@ -58,6 +81,7 @@ async function uploadPack(ctx: CommandContext, plan: PlannedPack, onFile: () => 
     signal: ctx.signal,
     onProgress: onFile,
   });
+  onUploaded();
   const leftovers: string[] = [];
   for (const copy of plan.replace) {
     try {
@@ -101,54 +125,88 @@ async function applyInstall(
   let doneFiles = 0;
   const onFile = () => log.progress("Uploading", ++doneFiles, totalFiles, "files");
 
-  for (const plan of plans) {
-    throwIfAborted(ctx.signal);
-    const { pack } = plan;
-    section(log, `[${KIND_LABEL[pack.kind]}] ${pack.displayName} (v${versionText(pack)})`);
-    if (plan.action === "skip") {
-      info(log, plan.reason);
-      stats.skipped++;
-      continue;
-    }
-    if (plan.action === "upload") {
-      let uploaded: { path: string; leftovers: string[] };
-      try {
-        uploaded = await uploadPack(ctx, plan, onFile);
-      } catch (error) {
-        if (error instanceof CancelledError) throw error;
-        warn(log, `Upload of '${pack.displayName}' failed: ${(error as Error).message}`);
-        stats.errors++;
-        continue;
-      }
-      for (const copy of plan.replace) if (!uploaded.leftovers.includes(copy.path)) index.remove(copy.path);
-      index.add({
-        uuid: pack.uuid,
-        version: pack.version,
-        name: pack.displayName,
-        kind: pack.kind,
-        dirKind: pack.kind,
-        scope: plan.targetDir.startsWith(`${world}/`) ? "world" : "shared",
-        path: uploaded.path,
-        packDir: plan.targetDir,
-        dependencies: pack.dependencies,
-        moduleDependencies: pack.moduleDependencies,
-        details: pack.details,
-        nested: false,
-        builtin: false,
-      });
-    } else {
-      info(log, plan.reason);
-    }
-
+  const register = (pack: IncomingPack) => {
     const jsonName = basename(target.worldJson(world, pack.kind));
-    const registration = upsertEntry(worldPacks[pack.kind], pack.uuid, pack.version);
+    const entry = worldPacks[pack.kind].find((candidate) => uuidKey(candidate.pack_id) === uuidKey(pack.uuid));
+    const subpackBefore = typeof entry?.subpack === "string" ? entry.subpack : null;
+    const registration = upsertEntry(
+      worldPacks[pack.kind],
+      pack.uuid,
+      pack.version,
+      pack.details.subpacks.map((subpack) => subpack.folder),
+    );
     if (registration !== "unchanged") changed.add(pack.kind);
     if (registration === "added") ok(log, `Registered in ${jsonName}`);
     else if (registration === "updated") info(log, `Updated ${jsonName} to v${versionText(pack)}`);
-    stats.installed++;
-    installed.push(plan);
+    if (subpackBefore !== null && entry?.subpack === undefined)
+      warn(log, `v${versionText(pack)} has no subpack '${subpackBefore}' - the world now uses the pack's default`);
+  };
+  // World JSONs are saved even when the loop stops early (cancel, lost connection): by then old copies may
+  // be gone, and the world must point at the versions that replaced them.
+  let failure: unknown = null;
+  try {
+    for (const plan of plans) {
+      throwIfAborted(ctx.signal);
+      const { pack } = plan;
+      section(log, `[${KIND_LABEL[pack.kind]}] ${pack.displayName} (v${versionText(pack)})`);
+      if (plan.action === "skip") {
+        info(log, plan.reason);
+        stats.skipped++;
+        continue;
+      }
+      if (plan.action === "upload") {
+        let uploaded: { path: string; leftovers: string[] };
+        try {
+          uploaded = await uploadPack(ctx, plan, index, onFile, () => register(pack));
+        } catch (error) {
+          if (error instanceof CancelledError) throw error;
+          warn(log, `Upload of '${pack.displayName}' failed: ${(error as Error).message}`);
+          stats.errors++;
+          continue;
+        }
+        for (const copy of plan.replace) if (!uploaded.leftovers.includes(copy.path)) index.remove(copy.path);
+        index.add({
+          uuid: pack.uuid,
+          version: pack.version,
+          name: pack.displayName,
+          kind: pack.kind,
+          dirKind: pack.kind,
+          // installDir is either the shared folder or the world's own (also when the world is the storage root).
+          scope: plan.targetDir === target.sharedDir(pack.kind) ? "shared" : "world",
+          path: uploaded.path,
+          packDir: plan.targetDir,
+          dependencies: pack.dependencies,
+          moduleDependencies: pack.moduleDependencies,
+          details: pack.details,
+          nested: false,
+          builtin: false,
+          builtinName: false,
+        });
+      } else {
+        info(log, plan.reason);
+        register(pack);
+      }
+      stats.installed++;
+      installed.push(plan);
+    }
+  } catch (error) {
+    failure = error;
   }
-  for (const kind of changed) await saveWorldJson(target.storage, target.worldJson(world, kind), worldPacks[kind]);
+
+  // Try every changed list even if one fails, then report the first problem.
+  const saveErrors: unknown[] = [];
+  for (const kind of ["bp", "rp"] as const) {
+    if (!changed.has(kind)) continue;
+    const path = target.worldJson(world, kind);
+    try {
+      await saveWorldJson(target.storage, path, worldPacks[kind]);
+    } catch (error) {
+      saveErrors.push(error);
+      warn(log, `Could not save ${basename(path)}: ${(error as Error).message}`);
+    }
+  }
+  if (failure) throw failure;
+  if (saveErrors.length) throw saveErrors[0];
 }
 
 function dependencyWarnings(index: PackIndex, worldPacks: WorldPacks, installed: PlannedPack[]): string[] {

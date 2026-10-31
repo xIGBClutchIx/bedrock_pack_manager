@@ -4,17 +4,22 @@ import { join } from "node:path";
 import yazl from "./yazl";
 import { runInstall } from "../src/server/core/install";
 import {
+  ArchiveTooLargeError,
+  archiveBudget,
   cleanSourceName,
   effectivePackName,
   extractNestedArchives,
   extractZip,
   findAllPacks,
+  isInside,
   packFolderName,
   prepareSource,
   readIncomingPack,
   UnsafeArchiveError,
 } from "../src/server/core/install/unpack";
 import { MemoryLog } from "../src/server/core/log";
+import { CancelledError } from "../src/server/storage/errors";
+import { LocalStorage } from "../src/server/storage/local";
 import { BACKENDS, FIXTURES, PACK_UUID, serverSetup, tempDir, writeFile, writeManifest, writeWorldJson } from "./helpers";
 
 const ADDON = join(FIXTURES, "installed", "addon.mcaddon");
@@ -183,6 +188,21 @@ describe("install behaviour", () => {
     expect(existsSync(join(s.root, "behavior_packs", "vanilla_1.21"))).toBe(true);
   });
 
+  it("treats packs installed into a single world at the storage root as the world's own", async () => {
+    const world = tempDir("bpm-world-");
+    try {
+      writeFile(join(world.path, "level.dat"), "x");
+      mkdirSync(join(world.path, "behavior_packs"));
+      const { Target } = await import("../src/server/core/layout");
+      const target = await Target.open(new LocalStorage(world.path));
+      writeManifest(join(src.path, "pack"));
+      const result = await runInstall({ ...s.ctx, target }, { ...options, world: "", sources: [join(src.path, "pack")] });
+      expect(result.status?.packs.map((row) => [row.status, row.scope])).toEqual([["ok", "world"]]);
+    } finally {
+      world.cleanup();
+    }
+  });
+
   it("installs into the world's own folders when scoped to the world", async () => {
     const { Target } = await import("../src/server/core/layout");
     const target = await Target.open(s.storage, { packScope: "world" });
@@ -208,6 +228,95 @@ describe("install behaviour", () => {
     expect(warnings).toContain("not a valid zip archive");
     expect(warnings).toContain("No manifest.json found anywhere inside 'empty folder'");
     expect(warnings).toMatch(/99999999.*not installed/);
+  });
+
+  it("saves the world lists when the job stops after an old copy is gone", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Old"), { version: [1, 0, 0] });
+    writeWorldJson(join(s.worldDir, "world_behavior_packs.json"), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeManifest(join(src.path, "a"), { version: [2, 0, 0] });
+    writeManifest(join(src.path, "b"), { uuid: "33333333-3333-3333-3333-333333333333", name: "Second" });
+    const controller = new AbortController();
+    const storage = s.target.storage;
+    const original = storage.removeTree.bind(storage);
+    storage.removeTree = async (path, opts) => {
+      await original(path, opts);
+      if (path.endsWith("/Old")) controller.abort(); // stop before the second pack
+    };
+    await expect(
+      runInstall(
+        { ...s.ctx, signal: controller.signal },
+        { ...options, world: s.world, sources: [join(src.path, "a"), join(src.path, "b")] },
+      ),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect(existsSync(join(s.root, "behavior_packs", "Old"))).toBe(false);
+    expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [2, 0, 0] }]);
+  });
+
+  it("registers the new copy before old copies are removed, so a cancel there still points at it", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Old"), { version: [1, 0, 0] });
+    writeWorldJson(join(s.worldDir, "world_behavior_packs.json"), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeManifest(join(src.path, "a"), { version: [2, 0, 0] });
+    const storage = s.target.storage;
+    const original = storage.removeTree.bind(storage);
+    storage.removeTree = async (path, opts) => {
+      if (path.endsWith("/Old")) throw new CancelledError();
+      return original(path, opts);
+    };
+    await expect(runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "a")] })).rejects.toBeInstanceOf(CancelledError);
+    expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [2, 0, 0] }]);
+  });
+
+  it("still saves the resource pack list when saving the behavior pack list fails", async () => {
+    const storage = s.target.storage;
+    const original = storage.writeText.bind(storage);
+    storage.writeText = async (path, text) => {
+      if (path.endsWith("world_behavior_packs.json")) throw new Error("disk full");
+      return original(path, text);
+    };
+    await expect(runInstall(s.ctx, { ...options, world: s.world, sources: [ADDON] })).rejects.toThrow(/disk full/);
+    expect(readJson(join(s.worldDir, "world_resource_packs.json"))).toEqual([{ pack_id: ADDON_RP, version: [1, 0, 0] }]);
+    expect(s.log.warnings.join()).toContain("Could not save world_behavior_packs.json");
+  });
+
+  it("installs a release over its prerelease instead of skipping it", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Beta"), { version: "1.0.0-beta.2" });
+    writeWorldJson(join(s.worldDir, "world_behavior_packs.json"), [{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    writeManifest(join(src.path, "release"), { version: [1, 0, 0] });
+    const result = await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "release")] });
+    expect(result.plan[0]).toMatchObject({ action: "replace" });
+    expect(readdirSync(join(s.root, "behavior_packs"))).toEqual(["Test Pack-BP"]);
+    expect(readJson(join(s.worldDir, "world_behavior_packs.json"))).toEqual([{ pack_id: PACK_UUID, version: [1, 0, 0] }]);
+    expect(result.status?.packs.map((row) => row.status)).toEqual(["ok"]);
+  });
+
+  it("warns when a behavior and a resource pack share a UUID", async () => {
+    writeManifest(join(src.path, "bp"), { name: "Thing BP" });
+    writeManifest(join(src.path, "rp"), { name: "Thing RP", type: "resources" });
+    const result = await runInstall(s.ctx, {
+      ...options,
+      dryRun: true,
+      world: s.world,
+      sources: [join(src.path, "bp"), join(src.path, "rp")],
+    });
+    expect(result.plan.map((item) => item.warnings.join())).toEqual([
+      expect.stringContaining("Shares its UUID with the resource pack 'Thing RP'"),
+      expect.stringContaining("Shares its UUID with the behavior pack 'Thing BP'"),
+    ]);
+  });
+
+  it("never clears a pack that happens to sit at the temporary upload name", async () => {
+    writeManifest(join(s.root, "behavior_packs", "Test Pack-BP"), { version: [1, 0, 0] });
+    writeManifest(join(s.root, "behavior_packs", "Test Pack-BP.bpm-upload"), { uuid: "33333333-3333-3333-3333-333333333333" });
+    writeWorldJson(join(s.root, "worlds", "Other", "world_behavior_packs.json"), [
+      { pack_id: "33333333-3333-3333-3333-333333333333", version: [1, 0, 0] },
+    ]);
+    writeManifest(join(src.path, "new"), { version: [2, 0, 0] });
+    await runInstall(s.ctx, { ...options, world: s.world, sources: [join(src.path, "new")] });
+    expect(readdirSync(join(s.root, "behavior_packs")).sort()).toEqual(["Test Pack-BP", "Test Pack-BP.bpm-upload"]);
+    expect(readJson(join(s.root, "behavior_packs", "Test Pack-BP.bpm-upload", "manifest.json")).header.uuid).toBe(
+      "33333333-3333-3333-3333-333333333333",
+    );
+    expect(readJson(join(s.root, "behavior_packs", "Test Pack-BP", "manifest.json")).header.version).toEqual([2, 0, 0]);
   });
 
   it("dedupes the same pack queued twice and avoids folder name clashes", async () => {
@@ -285,6 +394,46 @@ describe("unpacking", () => {
     await yazl.zipEntries(evil, [["../escape.txt", "x"]]);
     await expect(extractZip(evil, join(dir.path, "out"))).rejects.toBeInstanceOf(UnsafeArchiveError);
     expect(existsSync(join(dir.path, "escape.txt"))).toBe(false);
+  });
+
+  it("counts nested archives against one budget for the whole source", async () => {
+    const limits = { maxBytes: 2500, maxEntries: 100 };
+    const bundle = join(dir.path, "bundle");
+    mkdirSync(bundle);
+    // Each inner archive (about 500 bytes, unpacking to 400) is well under the limit; together they are not.
+    for (const name of ["a.zip", "a.mcpack", "b.zip"]) await yazl.zipEntries(join(bundle, name), [["data.bin", Buffer.alloc(400)]]);
+    const outer = join(dir.path, "outer.zip");
+    await yazl.zipFolder(bundle, outer);
+    const log = new MemoryLog();
+    const scratch = join(dir.path, "scratch");
+    const source = await prepareSource(outer, scratch, log, null, limits);
+    expect(source).toMatchObject({ ok: false, packs: [], extracted: null });
+    expect(log.warnings.join()).toContain("too large to unpack safely");
+    expect(readdirSync(scratch)).toEqual([]);
+
+    await expect(extractNestedArchives(bundle, new MemoryLog(), archiveBudget({ maxBytes: 1000, maxEntries: 100 }))).rejects.toBeInstanceOf(
+      ArchiveTooLargeError,
+    );
+  });
+
+  it("unpacks same-named nested archives into separate folders", async () => {
+    const bundle = join(dir.path, "bundle");
+    mkdirSync(bundle);
+    await yazl.zipEntries(join(bundle, "a.zip"), [["from-zip.txt", "z"]]);
+    await yazl.zipEntries(join(bundle, "a.mcpack"), [["from-mcpack.txt", "m"]]);
+    expect(await extractNestedArchives(bundle, new MemoryLog())).toBe(true);
+    const folders = readdirSync(bundle).sort();
+    expect(folders).toEqual(["_nested_a", "_nested_a_2"]);
+    expect(folders.flatMap((folder) => readdirSync(join(bundle, folder))).sort()).toEqual(["from-mcpack.txt", "from-zip.txt"]);
+  });
+
+  it("knows which folders are inside another", () => {
+    const root = join(dir.path, "pack");
+    expect(isInside(root, join(root, "..foo"))).toBe(true);
+    expect(isInside(root, join(root, "sub", "deeper"))).toBe(true);
+    expect(isInside(root, join(dir.path, "other"))).toBe(false);
+    expect(isInside(root, root)).toBe(false);
+    expect(isInside(root, dir.path)).toBe(false);
   });
 
   it("drops broken nested archives with a warning", async () => {

@@ -47,22 +47,43 @@ export function classifyPack(manifest: Manifest): PackKind | null {
   return null;
 }
 
-/** Manifests use [1, 0, 0]; some newer ones use "1.0.0". World JSONs want the list. */
+const versionPart = (part: unknown): number | string =>
+  typeof part === "number" ? part : /^\d+$/.test(String(part)) ? Number(part) : String(part);
+
+/**
+ * Manifests use [1, 0, 0]; some newer ones use "1.0.0" or semver strings such as "1.0.0-beta.2". The result
+ * always has at least three parts; a prerelease follows them, starting with a text part, so that
+ * compareVersions puts 1.0.0-beta.2 before 1.0.0. Build metadata ("+abc") is ignored, as in semver.
+ * World JSONs want only the first three parts: see registrationVersion.
+ */
 export function normalizeVersion(version: unknown): Version {
   // ["1", "0", "0"] is the same version as [1, 0, 0].
-  if (Array.isArray(version))
-    return version.map((part) => (typeof part === "number" ? part : /^\d+$/.test(String(part)) ? Number(part) : String(part)));
-  if (typeof version === "string") {
-    const parts = version
-      .split(/[.+-]/)
-      .slice(0, 3)
-      .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+  if (Array.isArray(version)) {
+    const parts = version.map(versionPart);
     while (parts.length < 3) parts.push(0);
     return parts;
+  }
+  if (typeof version === "string") {
+    const text = version.trim().split("+")[0]!;
+    const dash = text.indexOf("-");
+    const core = (dash < 0 ? text : text.slice(0, dash)).split(".").map(versionPart);
+    while (core.length < 3) core.push(0);
+    if (dash < 0) return core;
+    const pre = text
+      .slice(dash + 1)
+      .split(".")
+      .filter(Boolean)
+      .map(versionPart);
+    // A prerelease must sort before the release, and text parts sort before numbers.
+    if (typeof pre[0] === "number") pre[0] = String(pre[0]);
+    return [...core, ...pre];
   }
   if (typeof version === "number") return [version, 0, 0];
   return [0, 0, 0];
 }
+
+/** The version as world JSONs list it: the first three parts, without any prerelease. */
+export const registrationVersion = (version: unknown): Version => normalizeVersion(version).slice(0, 3);
 
 export const stripFormatting = (text: string): string => text.replace(/§./g, "");
 
@@ -149,8 +170,14 @@ export const uuidKey = (uuid: unknown): string =>
     .trim()
     .toLowerCase();
 
+/** Exact equality, prerelease included: 1.0.0-beta is not 1.0.0. */
 export function versionsEqual(a: Version | unknown, b: Version | unknown): boolean {
   return JSON.stringify(normalizeVersion(a)) === JSON.stringify(normalizeVersion(b));
+}
+
+/** Whether a world entry at version `a` points at a pack of version `b` (world JSONs only hold three numbers). */
+export function registrationMatches(a: Version | unknown, b: Version | unknown): boolean {
+  return JSON.stringify(registrationVersion(a)) === JSON.stringify(registrationVersion(b));
 }
 
 /** Sort key where numbers compare numerically and text parts sort before them. */
