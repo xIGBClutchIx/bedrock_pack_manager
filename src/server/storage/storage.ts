@@ -448,25 +448,38 @@ export abstract class Storage {
     // A sliding window: keep `window` reads in flight (one slow file no longer holds up a whole batch),
     // hand results out in scan order, and never buffer more than `window` files.
     const window = Math.max(1, Math.min(this.concurrency, 32));
+    // Our own signal, so reads still in flight stop when we fail or the consumer stops early, not only on cancel.
+    const local = new AbortController();
+    const onAbort = () => local.abort();
+    if (signal?.aborted) local.abort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
     const read = (file: string): Promise<Buffer | Error> =>
-      signal?.aborted
+      local.signal.aborted
         ? Promise.resolve(new CancelledError())
-        : this.rawRead(file, signal).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+        : this.rawRead(file, local.signal).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
     const pending: Promise<Buffer | Error>[] = [];
     let started = 0;
     const fill = () => {
       while (started < files.length && pending.length < window) pending.push(read(files[started++]!));
     };
-    fill();
-    for (const file of files) {
-      const data = await pending.shift()!;
+    try {
       fill();
-      if (isNotFound(data)) {
-        onSkip?.(relativeTo(file), "disappeared while backing up");
-        continue;
+      for (const file of files) {
+        const data = await pending.shift()!;
+        if (isNotFound(data)) {
+          fill();
+          onSkip?.(relativeTo(file), "disappeared while backing up");
+          continue;
+        }
+        if (data instanceof Error) throw data;
+        fill();
+        yield [relativeTo(file), data];
       }
-      if (data instanceof Error) throw data;
-      yield [relativeTo(file), data];
+    } finally {
+      // Never leave transfers running behind a finished (or failed) backup: the next job could overlap them.
+      local.abort();
+      signal?.removeEventListener("abort", onAbort);
+      await Promise.allSettled(pending);
     }
   }
 }

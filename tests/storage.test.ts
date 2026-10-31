@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { join as joinLocal } from "node:path";
 
+import { LocalStorage } from "../src/server/storage/local";
 import { NotFoundError, StorageError } from "../src/server/storage/errors";
 import { basename, join, parent, relative } from "../src/server/storage/path";
 import { BACKENDS, makeStorage, tempDir, writeFile, type StorageHarness } from "./helpers";
@@ -214,6 +215,50 @@ describe.each(BACKENDS)("%s storage", (backend) => {
 });
 
 // The FTP test server cannot report links, so this runs where links are visible.
+describe("download window", () => {
+  /** Local storage with slow reads that counts reads still running and fails one file. */
+  class SlowStorage extends LocalStorage {
+    active = 0;
+    protected override async rawRead(path: string, signal?: AbortSignal): Promise<Buffer> {
+      this.active++;
+      try {
+        if (path.endsWith("bad.txt")) throw new Error("unreadable");
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 50);
+          signal?.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
+        });
+        signal?.throwIfAborted();
+        return await super.rawRead(path);
+      } finally {
+        this.active--;
+      }
+    }
+  }
+
+  let dir: ReturnType<typeof tempDir>;
+  beforeEach(() => {
+    dir = tempDir();
+    writeFile(joinLocal(dir.path, "w", "a-bad.txt"), "x");
+    for (let index = 0; index < 20; index++) writeFile(joinLocal(dir.path, "w", `f${index}.txt`), "x");
+  });
+  afterEach(() => dir.cleanup());
+
+  it("leaves no reads running after a failed file", async () => {
+    const storage = new SlowStorage(dir.path);
+    await expect(async () => {
+      for await (const _file of storage.downloadFiles("w")) void _file;
+    }).rejects.toThrow("unreadable");
+    expect(storage.active).toBe(0);
+  });
+
+  it("leaves no reads running when the consumer stops early", async () => {
+    rmSync(joinLocal(dir.path, "w", "a-bad.txt"));
+    const storage = new SlowStorage(dir.path);
+    for await (const _file of storage.downloadFiles("w")) break;
+    expect(storage.active).toBe(0);
+  });
+});
+
 describe.each(["local", "sftp"] as const)("%s storage and symlinks", (backend) => {
   let h: StorageHarness;
   beforeEach(async () => {
