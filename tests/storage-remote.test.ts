@@ -1,10 +1,12 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join as joinLocal } from "node:path";
 
+import { FTPError } from "basic-ftp";
+
 import { openStorage } from "../src/server/storage/connect";
-import { HostKeyMismatchError, StorageError, UnknownHostKeyError } from "../src/server/storage/errors";
-import { FtpStorage } from "../src/server/storage/ftp";
-import { fingerprintOf, keyTypeOf } from "../src/server/storage/knownHosts";
+import { CancelledError, HostKeyMismatchError, NotFoundError, StorageError, UnknownHostKeyError } from "../src/server/storage/errors";
+import { FtpStorage, isMissingFtpError } from "../src/server/storage/ftp";
+import { KnownHosts, fingerprintOf, keyTypeOf } from "../src/server/storage/knownHosts";
 import { LocalStorage } from "../src/server/storage/local";
 import { SftpStorage } from "../src/server/storage/sftp";
 import { tempDir, writeFile } from "./helpers";
@@ -231,10 +233,98 @@ describe("openStorage", () => {
 });
 
 describe("known hosts helpers", () => {
+  const keyBlob = (type: string, fill: number) =>
+    Buffer.concat([Buffer.from([0, 0, 0, type.length]), Buffer.from(type), Buffer.alloc(16, fill)]);
+
   it("reads the key type from a public key blob", () => {
-    const blob = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from("ssh-ed25519"), Buffer.alloc(8)]);
+    const blob = keyBlob("ssh-ed25519", 0);
     expect(keyTypeOf(blob)).toBe("ssh-ed25519");
     expect(keyTypeOf(Buffer.alloc(2))).toBe("unknown");
     expect(fingerprintOf(blob)).toMatch(/^SHA256:[A-Za-z0-9+/]+$/);
+  });
+
+  it("compares host keys per key type", () => {
+    const dir = tempDir();
+    try {
+      const hosts = new KnownHosts(joinLocal(dir.path, "known_hosts"));
+      const ed = keyBlob("ssh-ed25519", 1);
+      expect(hosts.check("h", 22, ed)).toBe("unknown");
+      hosts.remember("h", 22, ed);
+      expect(hosts.check("h", 22, ed)).toBe("match");
+      // Same type, different key: refused.
+      expect(hosts.check("h", 22, keyBlob("ssh-ed25519", 2))).toBe("mismatch");
+      // A key type never seen for this host goes back to the user, not reported as a change.
+      const rsa = keyBlob("ssh-rsa", 3);
+      expect(hosts.check("h", 22, rsa)).toBe("unknown");
+      hosts.remember("h", 22, rsa);
+      expect(hosts.check("h", 22, rsa)).toBe("match");
+      expect(hosts.check("h", 22, ed)).toBe("match");
+      expect(hosts.check("h", 2222, ed)).toBe("unknown");
+      expect(hosts.forget("h", 22)).toBe(2);
+      expect(hosts.check("h", 22, ed)).toBe("unknown");
+    } finally {
+      dir.cleanup();
+    }
+  });
+});
+
+describe("ftp missing-file replies", () => {
+  it("only treats not-found replies as missing", () => {
+    expect(isMissingFtpError(new FTPError({ code: 550, message: "550 No such file or directory" }))).toBe(true);
+    expect(isMissingFtpError(new FTPError({ code: 550, message: "550 /x/y: not found" }))).toBe(true);
+    expect(isMissingFtpError(new FTPError({ code: 550, message: "550" }))).toBe(true);
+    expect(isMissingFtpError(new FTPError({ code: 550, message: "550 Permission denied" }))).toBe(false);
+    expect(isMissingFtpError(new FTPError({ code: 553, message: "553 Not allowed" }))).toBe(false);
+    expect(isMissingFtpError(new FTPError({ code: 450, message: "450 File not found (busy)" }))).toBe(false);
+    expect(isMissingFtpError(new FTPError({ code: 451, message: "451 Local error" }))).toBe(false);
+    expect(isMissingFtpError(new Error("connection not found"))).toBe(false);
+    expect(isMissingFtpError(Object.assign(new Error("gone"), { code: "ENOENT" }))).toBe(true);
+  });
+
+  it("maps a missing file on the FTP server to NotFoundError", async () => {
+    const dir = tempDir();
+    const server = await startFtpServer(dir.path);
+    const storage = await FtpStorage.connect({ host: server.host, port: server.port, username: "mc", password: "pw" });
+    try {
+      await expect(storage.readFile("missing.json")).rejects.toBeInstanceOf(NotFoundError);
+      await expect(storage.readFile("nope/missing.json")).rejects.toBeInstanceOf(NotFoundError);
+      // There but unreadable (here: a folder read as a file) is an error, never "missing".
+      mkdirSync(joinLocal(dir.path, "world_behavior_packs.json"));
+      const error = await storage.readFile("world_behavior_packs.json").catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(StorageError);
+      expect(error).not.toBeInstanceOf(NotFoundError);
+    } finally {
+      await storage.close();
+      await server.close();
+      dir.cleanup();
+    }
+  });
+});
+
+describe("cancelling transfers", () => {
+  it("stops an SFTP read between chunks when the job is cancelled", async () => {
+    const dir = tempDir();
+    const server = await startSftpServer(dir.path, { latencyMs: 40 });
+    // 640 chunks of 32 KB: ten rounds of the read window.
+    writeFileSync(joinLocal(dir.path, "big.bin"), Buffer.alloc(640 * 32 * 1024, 1));
+    const storage = await SftpStorage.connect({
+      host: server.host,
+      port: server.port,
+      username: server.username,
+      password: server.password,
+      trustedFingerprint: fingerprintOf(server.hostKey),
+    });
+    try {
+      const controller = new AbortController();
+      server.requests.clear();
+      setTimeout(() => controller.abort(), 150);
+      const results = await storage.readMany(["big.bin"], controller.signal);
+      expect(results.get("big.bin")).toBeInstanceOf(CancelledError);
+      expect(server.requests.get("READ") ?? 0).toBeLessThan(400);
+    } finally {
+      await storage.close();
+      await server.close();
+      dir.cleanup();
+    }
   });
 });

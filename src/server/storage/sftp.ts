@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 // ssh2 is CommonJS without detectable named exports, so Node's ESM loader needs the default import.
 import ssh2, { type ConnectConfig, type FileEntryWithStats, type SFTPWrapper } from "ssh2";
 
-import { HostKeyMismatchError, NotFoundError, StorageError, UnknownHostKeyError } from "./errors";
+import { CancelledError, HostKeyMismatchError, NotFoundError, StorageError, UnknownHostKeyError, throwIfAborted } from "./errors";
 import { KnownHosts, fingerprintOf, keyTypeOf } from "./knownHosts";
 import { join } from "./path";
 import { Storage, type Entry } from "./storage";
@@ -15,6 +15,12 @@ import { Storage, type Entry } from "./storage";
 const NO_SUCH_FILE = 2;
 /** SFTP servers commonly cap a single read at 32-64 KB. */
 const READ_CHUNK = 32 * 1024;
+/** Reads of one file in flight at once. */
+const READ_WINDOW = 64;
+/** Fits the smallest write ssh2 sends without splitting (34000 bytes minus packet overhead). */
+const WRITE_CHUNK = 31 * 1024;
+/** Writes of one file in flight at once. */
+const WRITE_WINDOW = 32;
 
 export interface SftpOptions {
   host: string;
@@ -41,6 +47,34 @@ const EXTRA_CHANNEL_TIMEOUT_MS = 10_000;
 function isMissing(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
   return code === NO_SUCH_FILE || code === "ENOENT";
+}
+
+/** Turn one callback-style SFTP request into a promise. */
+const ask = <T>(fn: (done: (error: Error | null | undefined, value?: T) => void) => void) =>
+  new Promise<T>((resolve, reject) => fn((error, value) => (error ? reject(error) : resolve(value as T))));
+
+/**
+ * Run `fn` for every item with at most `window` calls in flight. Stops starting new ones after the first
+ * failure or an abort, waits for the ones already running, then rejects with the first error.
+ */
+async function windowed<T>(items: readonly T[], window: number, fn: (item: T) => Promise<void>, signal?: AbortSignal): Promise<void> {
+  let next = 0;
+  const state: { failure: Error | null } = { failure: null };
+  const worker = async () => {
+    while (!state.failure && next < items.length) {
+      if (signal?.aborted) {
+        state.failure = new CancelledError();
+        break;
+      }
+      try {
+        await fn(items[next++]!);
+      } catch (error) {
+        state.failure ??= error instanceof Error ? error : new Error(String(error));
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(window, items.length) }, worker));
+  if (state.failure) throw state.failure;
 }
 
 /** Open an SFTP channel, giving up after `timeoutMs`; a channel that opens later is closed again. */
@@ -150,23 +184,35 @@ export class SftpStorage extends Storage {
     if (!password && !keyFile) config.agent = process.platform === "win32" ? "pageant" : process.env.SSH_AUTH_SOCK;
 
     const client = new ssh2.Client();
-    await new Promise<void>((resolve, reject) => {
-      client
-        .on("keyboard-interactive", (_name, _instructions, _lang, prompts, finish) => finish(prompts.map(() => password ?? "")))
-        .once("ready", () => resolve())
-        .once("error", (error: Error & { level?: string }) => {
-          if (hostKeyProblem) return reject(hostKeyProblem);
-          if (error.level === "client-authentication")
-            return reject(new StorageError(`SFTP login failed for ${username}@${host}: ${error.message}`));
-          reject(new StorageError(`Could not connect to ${host}:${port} over SFTP: ${error.message}`, { cause: error }));
-        })
-        .connect(config);
-      // Any bytes from the server count as progress, so a big upload or download is never mistaken
-      // for a stall. ssh2 keeps its socket in `_sock`.
-      (client as unknown as { _sock?: NodeJS.EventEmitter })._sock?.on("data", () => {
-        this.lastHeard = Date.now();
+    // Errors are reported through the requests that hit them (and the connect promise below). This listener
+    // stays for the client's whole life so a late socket error can never become an unhandled 'error' event.
+    client.on("error", () => undefined);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client
+          .on("keyboard-interactive", (_name, _instructions, _lang, prompts, finish) => finish(prompts.map(() => password ?? "")))
+          .once("ready", () => resolve())
+          .once("error", (error: Error & { level?: string }) => {
+            if (hostKeyProblem) return reject(hostKeyProblem);
+            if (error.level === "client-authentication")
+              return reject(new StorageError(`SFTP login failed for ${username}@${host}: ${error.message}`));
+            reject(new StorageError(`Could not connect to ${host}:${port} over SFTP: ${error.message}`, { cause: error }));
+          })
+          // Closed before it was ready without an error (no-op once settled).
+          .once("close", () =>
+            reject(hostKeyProblem ?? new StorageError(`Could not connect to ${host}:${port} over SFTP: connection closed`)),
+          )
+          .connect(config);
+        // Any bytes from the server count as progress, so a big upload or download is never mistaken
+        // for a stall. ssh2 keeps its socket in `_sock`.
+        (client as unknown as { _sock?: NodeJS.EventEmitter })._sock?.on("data", () => {
+          this.lastHeard = Date.now();
+        });
       });
-    });
+    } catch (error) {
+      client.destroy();
+      throw error;
+    }
     this.watchStalls(client);
     client.on("close", () => {
       if (this.client === client) {
@@ -174,7 +220,6 @@ export class SftpStorage extends Storage {
         this.channels = [];
       }
     });
-    client.on("error", () => undefined);
     if (this.closed) {
       client.end();
       throw new StorageError("The connection was closed");
@@ -230,6 +275,8 @@ export class SftpStorage extends Storage {
   private async call<T>(request: (sftp: SFTPWrapper, done: (error: Error | null | undefined, value?: T) => void) => void): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       await this.ensureConnected();
+      // The connection this attempt uses, so a failure only resets that one (another request may already have reconnected).
+      const client = this.client;
       const sftp = this.channels[this.next++ % this.channels.length]!;
       // Time spent idle before this request is not a stall.
       if (this.inFlight++ === 0) this.lastHeard = Date.now();
@@ -240,11 +287,16 @@ export class SftpStorage extends Storage {
         this.stalled = false;
         return value;
       } catch (error) {
-        const dropped = !this.client || /No response from server|Not connected|ECONNRESET|channel/i.test((error as Error).message ?? "");
-        if (attempt === 0 && dropped && !isMissing(error) && !this.closed) {
-          this.client?.end();
-          this.client = null;
-          this.channels = [];
+        const dropped =
+          !this.client ||
+          this.client !== client ||
+          /No response from server|Not connected|ECONNRESET|channel/i.test((error as Error).message ?? "");
+        if (attempt === 0 && dropped && !isMissing(error) && !(error instanceof CancelledError) && !this.closed) {
+          client?.end();
+          if (this.client === client) {
+            this.client = null;
+            this.channels = [];
+          }
           continue;
         }
         if (dropped && this.stalled) {
@@ -306,9 +358,7 @@ export class SftpStorage extends Storage {
    * together, and the close is sent without waiting for it. Small files (manifests, world JSONs)
    * cost two round trips instead of four.
    */
-  private readWhole(sftp: SFTPWrapper, target: string): Promise<Buffer> {
-    const ask = <T>(fn: (done: (error: Error | null | undefined, value?: T) => void) => void) =>
-      new Promise<T>((resolve, reject) => fn((error, value) => (error ? reject(error) : resolve(value as T))));
+  private readWhole(sftp: SFTPWrapper, target: string, signal?: AbortSignal): Promise<Buffer> {
     return ask<Buffer>((done) => sftp.open(target, "r", done)).then(async (handle) => {
       try {
         const first = Buffer.alloc(READ_CHUNK);
@@ -318,7 +368,8 @@ export class SftpStorage extends Storage {
         ]);
         const size = typeof stats.size === "number" ? stats.size : firstRead;
         if (size <= firstRead) return first.subarray(0, firstRead);
-        // Bigger file: fetch the remaining chunks in parallel.
+        // Bigger file: fetch the remaining chunks in parallel, stopping between chunks on abort.
+        throwIfAborted(signal);
         const whole = Buffer.alloc(size);
         first.copy(whole, 0, 0, firstRead);
         const offsets: number[] = [];
@@ -327,9 +378,12 @@ export class SftpStorage extends Storage {
         const readChunk = async (offset: number, length: number): Promise<void> => {
           const bytes = await ask<number>((done) => sftp.read(handle, whole, offset, length, offset, (error, got) => done(error, got)));
           if (bytes <= 0) throw new Error(`file ended early at byte ${offset} of ${size}`);
-          if (bytes < length) await readChunk(offset + bytes, length - bytes);
+          if (bytes < length) {
+            throwIfAborted(signal);
+            await readChunk(offset + bytes, length - bytes);
+          }
         };
-        await Promise.all(offsets.map((offset) => readChunk(offset, Math.min(READ_CHUNK, size - offset))));
+        await windowed(offsets, READ_WINDOW, (offset) => readChunk(offset, Math.min(READ_CHUNK, size - offset)), signal);
         return whole;
       } finally {
         sftp.close(handle, () => undefined);
@@ -337,26 +391,58 @@ export class SftpStorage extends Storage {
     });
   }
 
-  protected async rawRead(path: string): Promise<Buffer> {
+  /**
+   * Write a whole file with its chunks pipelined (ssh2's writeFile waits for each chunk before sending
+   * the next): open, up to WRITE_WINDOW writes in flight, then close. The handle is closed on failure too.
+   */
+  private async writeWhole(sftp: SFTPWrapper, target: string, data: Buffer, signal?: AbortSignal): Promise<void> {
+    const handle = await ask<Buffer>((done) => sftp.open(target, "w", done));
+    try {
+      const offsets: number[] = [];
+      for (let offset = 0; offset < data.length; offset += WRITE_CHUNK) offsets.push(offset);
+      await windowed(
+        offsets,
+        WRITE_WINDOW,
+        (offset) => ask<void>((done) => sftp.write(handle, data, offset, Math.min(WRITE_CHUNK, data.length - offset), offset, done)),
+        signal,
+      );
+    } catch (error) {
+      sftp.close(handle, () => undefined);
+      throw error;
+    }
+    // Wait for the close: some servers only report a failed write (disk full) there.
+    await ask<void>((done) => sftp.close(handle, done));
+  }
+
+  protected async rawRead(path: string, signal?: AbortSignal): Promise<Buffer> {
     const target = this.abs(path);
     try {
+      throwIfAborted(signal);
       return await this.call<Buffer>((sftp, done) => {
-        this.readWhole(sftp, target).then(
+        this.readWhole(sftp, target, signal).then(
           (data) => done(null, data),
           (error: Error) => done(error),
         );
       });
     } catch (error) {
+      if (error instanceof CancelledError) throw error;
       if (isMissing(error)) throw new NotFoundError(target);
       throw new StorageError(`Reading ${target} failed: ${(error as Error).message}`);
     }
   }
 
-  protected async rawWrite(path: string, data: Buffer): Promise<void> {
+  protected async rawWrite(path: string, data: Buffer, signal?: AbortSignal): Promise<void> {
     const target = this.abs(path);
     try {
-      await this.call<void>((sftp, done) => sftp.writeFile(target, data, done));
+      throwIfAborted(signal);
+      await this.call<void>((sftp, done) => {
+        this.writeWhole(sftp, target, data, signal).then(
+          () => done(null),
+          (error: Error) => done(error),
+        );
+      });
     } catch (error) {
+      if (error instanceof CancelledError) throw error;
       throw new StorageError(`Writing ${target} failed: ${(error as Error).message}`);
     }
   }

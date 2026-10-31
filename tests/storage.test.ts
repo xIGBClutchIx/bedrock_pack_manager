@@ -120,6 +120,47 @@ describe.each(BACKENDS)("%s storage", (backend) => {
     }
   });
 
+  it("uploads into an existing tree, creating only the missing folders", async () => {
+    const source = tempDir();
+    try {
+      writeFile(joinLocal(h.root, "packs", "P", "textures", "a", "old.png"), "old");
+      writeFile(joinLocal(source.path, "textures", "a", "x.png"), "x");
+      writeFile(joinLocal(source.path, "textures", "b", "c", "y.png"), "y");
+      writeFile(joinLocal(source.path, "texts", "z.txt"), "z");
+      await h.storage.listDir("packs/P/textures"); // a cached parent listing must not hide the new folders
+      expect(await h.storage.uploadTree(source.path, "packs/P")).toBe(3);
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "a", "x.png"), "utf8")).toBe("x");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "a", "old.png"), "utf8")).toBe("old");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "textures", "b", "c", "y.png"), "utf8")).toBe("y");
+      expect(readFileSync(joinLocal(h.root, "packs", "P", "texts", "z.txt"), "utf8")).toBe("z");
+      expect((await h.storage.listDir("packs/P/textures")).map((e) => e.name)).toEqual(["a", "b"]);
+    } finally {
+      source.cleanup();
+    }
+  });
+
+  it("writes and reads back a file many chunks long", async () => {
+    const big = Buffer.alloc(300_000);
+    for (let index = 0; index < big.length; index++) big[index] = (index * 7) % 251;
+    await h.storage.writeFile("big/data.bin", big);
+    expect(readFileSync(joinLocal(h.root, "big", "data.bin")).equals(big)).toBe(true);
+    expect((await h.storage.readFile("big/data.bin")).equals(big)).toBe(true);
+    await h.storage.writeFile("big/empty.bin", Buffer.alloc(0));
+    expect(readFileSync(joinLocal(h.root, "big", "empty.bin")).length).toBe(0);
+  });
+
+  it("downloads more files than the read window, in scan order", async () => {
+    for (let index = 0; index < 70; index++) writeFile(joinLocal(h.root, "w", `f${String(index).padStart(2, "0")}.txt`), String(index));
+    const seen: string[] = [];
+    for await (const [path, data] of h.storage.downloadFiles("w")) {
+      expect(data.toString()).toBe(String(Number(path.slice(1, 3))));
+      seen.push(path);
+    }
+    const { files } = await h.storage.scanTree("w");
+    expect(seen).toEqual(files.map((file) => file.slice(2)));
+    expect(seen).toHaveLength(70);
+  });
+
   it("downloads files with relative paths and scans trees", async () => {
     writeFile(joinLocal(h.root, "w", "level.dat"), "L");
     writeFile(joinLocal(h.root, "w", "db", "CURRENT"), "C");

@@ -21,25 +21,22 @@ const hostEntry = (host: string, port: number) => (port === 22 ? host : `[${host
 export class KnownHosts {
   constructor(readonly file: string | null) {}
 
-  /** "match", "mismatch" (a different key is stored for this host), or "unknown". */
+  /**
+   * Compared per key type, like OpenSSH: "match", "mismatch" (a different key of the same type is stored
+   * for this host), or "unknown" (nothing stored for this host and key type, so the user must confirm it).
+   */
   check(host: string, port: number, key: Buffer): "match" | "mismatch" | "unknown" {
-    if (!this.file) return "unknown";
-    let text: string;
-    try {
-      text = readFileSync(this.file, "utf8");
-    } catch {
-      return "unknown";
-    }
     const entry = hostEntry(host, port);
     const encoded = key.toString("base64");
-    let seen = false;
-    for (const line of text.split(/\r?\n/)) {
-      const [hostField, , keyField] = line.trim().split(/\s+/);
-      if (!hostField || !keyField || !hostField.split(",").includes(entry)) continue;
+    const type = keyTypeOf(key);
+    let sameTypeSeen = false;
+    for (const line of this.lines()) {
+      const [hostField, typeField, keyField] = line.trim().split(/\s+/);
+      if (!hostField || !keyField || hostField.startsWith("#") || !hostField.split(",").includes(entry)) continue;
       if (keyField === encoded) return "match";
-      seen = true;
+      if (typeField === type) sameTypeSeen = true;
     }
-    return seen ? "mismatch" : "unknown";
+    return sameTypeSeen ? "mismatch" : "unknown";
   }
 
   remember(host: string, port: number, key: Buffer): void {

@@ -6,8 +6,8 @@ import { Readable, Writable } from "node:stream";
 
 import { Client, FTPError, type FileInfo } from "basic-ftp";
 
-import { NotFoundError, StorageError } from "./errors";
-import { join } from "./path";
+import { CancelledError, NotFoundError, StorageError, throwIfAborted } from "./errors";
+import { basename, join, parent } from "./path";
 import { Storage, type Entry } from "./storage";
 
 export interface FtpOptions {
@@ -24,10 +24,30 @@ export interface FtpOptions {
   poolSize?: number;
 }
 
-// Servers disagree on the reply for a missing file (550 is standard; some send 551/553/450), so also read the text.
-const isMissingCode = (error: unknown) =>
-  (error instanceof FTPError && [550, 551, 553, 450, 451].includes(error.code)) ||
-  /^55[0-3]\b|ENOENT|no such file|not found|does not exist|cannot find/i.test((error as Error)?.message ?? "");
+const NOT_FOUND_TEXT = /no such file|not found|does not exist|cannot find|ENOENT/i;
+
+/**
+ * Whether an FTP error means "that file or folder does not exist". 550 also covers "permission denied"
+ * and 45x is "busy" or a local error, so only a 550-553 reply whose text says not-found (or a bare 550)
+ * counts. Treating a failed read as missing could make an unreadable world look empty.
+ */
+export function isMissingFtpError(error: unknown): boolean {
+  if (error instanceof FTPError) {
+    if (error.code < 550 || error.code > 553) return false;
+    const text = (error.message ?? "").replace(/^\d{3}[\s-]*/, "").trim();
+    return (error.code === 550 && !text) || NOT_FOUND_TEXT.test(text);
+  }
+  return (error as { code?: unknown })?.code === "ENOENT";
+}
+
+/**
+ * Replies that may or may not mean "missing": vsftpd answers "550 Failed to open file" for a missing and an
+ * unreadable file alike, and some servers (ftp-srv) send "451 ENOENT". These are settled by listing the parent.
+ */
+const AMBIGUOUS_CODES = new Set([450, 451, 550, 551, 553]);
+
+/** Some servers answer LIST of an empty folder with an error instead of an empty listing. */
+const EMPTY_LISTING = /no files found|directory is empty/i;
 const isDropped = (error: unknown) =>
   !(error instanceof FTPError) && /closed|ECONNRESET|EPIPE|timeout|Client is closed|socket/i.test((error as Error)?.message ?? "");
 
@@ -140,20 +160,32 @@ export class FtpStorage extends Storage {
     else this.idle.push(client);
   }
 
-  /** Run one FTP command on a pooled client, reconnecting once if the server dropped it. */
-  private async call<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+  /**
+   * Run one FTP command on a pooled client, reconnecting once if the server dropped it. When `signal`
+   * aborts mid-transfer the client is closed (FTP has no other way to stop a transfer) and the pool
+   * logs in again the next time it hands that client out.
+   */
+  private async call<T>(fn: (client: Client) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    throwIfAborted(signal);
     let client = await this.acquire();
+    const onAbort = () => client.close();
+    signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (client.closed) client = await this.login();
       try {
         return await fn(client);
       } catch (error) {
+        throwIfAborted(signal);
         if (!isDropped(error)) throw error;
         client.close();
         client = await this.login();
         return await fn(client);
       }
+    } catch (error) {
+      throwIfAborted(signal);
+      throw error;
     } finally {
+      signal?.removeEventListener("abort", onAbort);
       this.release(client);
     }
   }
@@ -175,6 +207,26 @@ export class FtpStorage extends Storage {
     return this.abs(path);
   }
 
+  /**
+   * Whether `error` (from an operation on the absolute path `target`) means the path does not exist. A clear
+   * not-found reply decides it; an ambiguous one is checked against the parent listing, so a file that is
+   * there but unreadable is reported as an error, never as missing.
+   */
+  private async isMissing(error: unknown, target: string): Promise<boolean> {
+    if (isMissingFtpError(error)) return true;
+    if (!(error instanceof FTPError) || !AMBIGUOUS_CODES.has(error.code)) return false;
+    const folder = parent(target);
+    if (!folder || folder === target) return false;
+    let list: FileInfo[];
+    try {
+      list = await this.call((client) => client.list(folder));
+    } catch (inner) {
+      return this.isMissing(inner, folder);
+    }
+    const name = basename(target);
+    return !list.some((info) => basename(info.name) === name);
+  }
+
   // ---- raw operations -----------------------------------------------------------------------------
 
   protected async rawList(path: string): Promise<Entry[]> {
@@ -183,39 +235,53 @@ export class FtpStorage extends Storage {
     try {
       list = await this.call((client) => client.list(target));
     } catch (error) {
-      if (isMissingCode(error)) throw new NotFoundError(target);
+      if (await this.isMissing(error, target)) throw new NotFoundError(target);
+      if (error instanceof FTPError && EMPTY_LISTING.test(error.message ?? "")) return [];
       throw new StorageError(`Listing ${target} failed: ${(error as Error).message}`);
     }
     // basic-ftp lists a file path as that one file; a folder never lists itself.
-    return list
-      .filter((info) => info.name && info.name !== "." && info.name !== "..")
-      .map((info) => {
-        const name = info.name.includes("/") ? info.name.slice(info.name.lastIndexOf("/") + 1) : info.name;
-        // FTP cannot tell where a link points; treat it as a folder for listings, but never follow it.
-        const isDir = info.isDirectory || info.isSymbolicLink;
-        return { name, isDir, size: isDir ? null : info.size, ...(info.isSymbolicLink ? { link: true } : {}) };
-      });
+    return Promise.all(
+      list
+        .filter((info) => info.name && info.name !== "." && info.name !== "..")
+        .map(async (info) => {
+          const name = info.name.includes("/") ? info.name.slice(info.name.lastIndexOf("/") + 1) : info.name;
+          // A listing cannot say where a link points, so ask the server whether it can change into it (like
+          // the SFTP backend's stat). This only answers the question; tree operations still never follow links.
+          const isDir = info.isSymbolicLink ? await this.linkIsDir(join(target, name)) : info.isDirectory;
+          return { name, isDir, size: isDir ? null : info.size, ...(info.isSymbolicLink ? { link: true } : {}) };
+        }),
+    );
   }
 
-  protected async rawRead(path: string): Promise<Buffer> {
+  /** Whether a symlink points at a folder. A broken or unreadable link counts as a file. Paths are absolute, so the CWD is harmless. */
+  private linkIsDir(target: string): Promise<boolean> {
+    return this.call((client) => client.cd(target)).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  protected async rawRead(path: string, signal?: AbortSignal): Promise<Buffer> {
     const target = this.abs(path);
     try {
       return await this.call(async (client) => {
         const sink = new Collector();
         await client.downloadTo(sink, target);
         return Buffer.concat(sink.chunks);
-      });
+      }, signal);
     } catch (error) {
-      if (isMissingCode(error)) throw new NotFoundError(target);
+      if (error instanceof CancelledError) throw error;
+      if (await this.isMissing(error, target)) throw new NotFoundError(target);
       throw new StorageError(`Reading ${target} failed: ${(error as Error).message}`);
     }
   }
 
-  protected async rawWrite(path: string, data: Buffer): Promise<void> {
+  protected async rawWrite(path: string, data: Buffer, signal?: AbortSignal): Promise<void> {
     const target = this.abs(path);
     try {
-      await this.call((client) => client.uploadFrom(Readable.from([data]), target));
+      await this.call((client) => client.uploadFrom(Readable.from([data]), target), signal);
     } catch (error) {
+      if (error instanceof CancelledError) throw error;
       throw new StorageError(`Writing ${target} failed: ${(error as Error).message}`);
     }
   }
@@ -229,7 +295,7 @@ export class FtpStorage extends Storage {
     try {
       await this.call((client) => client.remove(target));
     } catch (error) {
-      if (isMissingCode(error)) throw new NotFoundError(target);
+      if (await this.isMissing(error, target)) throw new NotFoundError(target);
       throw new StorageError(`Deleting ${target} failed: ${(error as Error).message}`);
     }
   }
