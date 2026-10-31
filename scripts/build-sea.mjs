@@ -23,7 +23,8 @@ const config = "sea-config.json";
 writeFileSync(
   config,
   JSON.stringify(
-    { main: server, output: blob, disableExperimentalSEAWarning: true, useCodeCache: false, useSnapshot: false, assets },
+    // The code cache is V8- and platform-specific; this is fine because the exe is always built by the Node binary it ships.
+    { main: server, output: blob, disableExperimentalSEAWarning: true, useCodeCache: true, useSnapshot: false, assets },
     null,
     2,
   ),

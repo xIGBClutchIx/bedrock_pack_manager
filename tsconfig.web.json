@@ -1,0 +1,10 @@
+{
+  // Browser-only type environment: DOM, no Node globals. Checked by `npm run typecheck`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["src/web", "src/shared"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}
