@@ -26,6 +26,7 @@ import {
   setGamemode,
 } from "../src/server/core/nbt";
 import { PackIndex } from "../src/server/core/packIndex";
+import { formatVersion } from "../src/shared/model";
 import {
   WorldJsonError,
   loadWorldJson,
@@ -84,7 +85,7 @@ describe("manifests", () => {
   });
 
   it("keeps prereleases apart from releases, in semver order", () => {
-    expect(normalizeVersion("1.0.0-beta.2")).toEqual([1, 0, 0, "beta", 2]);
+    expect(normalizeVersion("1.0.0-beta.2")).toEqual([1, 0, 0, "beta.2"]);
     expect(normalizeVersion("1.0.0-2+build.5")).toEqual([1, 0, 0, "2"]);
     expect(normalizeVersion("1.0.0+build.5")).toEqual([1, 0, 0]);
     expect(normalizeVersion([1, 0])).toEqual([1, 0, 0]);
@@ -92,13 +93,26 @@ describe("manifests", () => {
     expect(versionsEqual("1.0.0-beta", "1.0.0")).toBe(false);
     expect(registrationVersion("1.0.0-beta.2")).toEqual([1, 0, 0]);
     expect(registrationMatches("1.0.0-beta.2", [1, 0, 0])).toBe(true);
-    const ordered = ["1.0.0", "1.0.0-alpha", "1.0.0-beta.11", "1.0.0-beta.2", "1.0.0-1", "0.9.9"].map(normalizeVersion);
-    expect(ordered.sort(compareVersions).map((version) => version.join("."))).toEqual([
+    const ordered = [
+      "1.0.0",
+      "1.0.0-alpha.beta",
+      "1.0.0-alpha",
+      "1.0.0-beta.11",
+      "1.0.0-10",
+      "1.0.0-beta.2",
+      "1.0.0-alpha.1",
+      "1.0.0-2",
       "0.9.9",
-      "1.0.0.1",
-      "1.0.0.alpha",
-      "1.0.0.beta.2",
-      "1.0.0.beta.11",
+    ].map(normalizeVersion);
+    expect(ordered.sort(compareVersions).map(formatVersion)).toEqual([
+      "0.9.9",
+      "1.0.0-2",
+      "1.0.0-10",
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
       "1.0.0",
     ]);
   });
@@ -133,7 +147,7 @@ describe("world JSON", () => {
 
   it("writes three-number versions and drops a subpack the new version lacks", () => {
     const entries: WorldEntry[] = [{ pack_id: "a", version: [1, 0, 0], subpack: "high" }];
-    expect(upsertEntry(entries, "a", [1, 0, 0, "beta", 2], ["low"])).toBe("unchanged");
+    expect(upsertEntry(entries, "a", [1, 0, 0, "beta.2"], ["low"])).toBe("unchanged");
     expect(upsertEntry(entries, "a", [2, 0, 0, "rc"], ["high"])).toBe("updated");
     expect(entries).toEqual([{ pack_id: "a", version: [2, 0, 0], subpack: "high" }]);
     expect(upsertEntry(entries, "a", [3, 0, 0])).toBe("updated");

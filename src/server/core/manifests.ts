@@ -52,7 +52,7 @@ const versionPart = (part: unknown): number | string =>
 
 /**
  * Manifests use [1, 0, 0]; some newer ones use "1.0.0" or semver strings such as "1.0.0-beta.2". The result
- * always has at least three parts; a prerelease follows them, starting with a text part, so that
+ * always has at least three parts; a prerelease follows them as one text part ([1, 0, 0, "beta.2"]), so that
  * compareVersions puts 1.0.0-beta.2 before 1.0.0. Build metadata ("+abc") is ignored, as in semver.
  * World JSONs want only the first three parts: see registrationVersion.
  */
@@ -69,14 +69,14 @@ export function normalizeVersion(version: unknown): Version {
     const core = (dash < 0 ? text : text.slice(0, dash)).split(".").map(versionPart);
     while (core.length < 3) core.push(0);
     if (dash < 0) return core;
+    // The whole prerelease stays one text part: text sorts before numbers, so it comes before the release,
+    // and compareVersions orders two prereleases by semver rules (1.0.0-2 before 1.0.0-10).
     const pre = text
       .slice(dash + 1)
       .split(".")
       .filter(Boolean)
-      .map(versionPart);
-    // A prerelease must sort before the release, and text parts sort before numbers.
-    if (typeof pre[0] === "number") pre[0] = String(pre[0]);
-    return [...core, ...pre];
+      .join(".");
+    return pre ? [...core, pre] : core;
   }
   if (typeof version === "number") return [version, 0, 0];
   return [0, 0, 0];
@@ -190,7 +190,27 @@ export function compareVersions(a: Version, b: Version): number {
     if (typeof x === "number" && typeof y === "number") return x - y;
     if (typeof x === "number") return 1;
     if (typeof y === "number") return -1;
-    return String(x).localeCompare(String(y));
+    return comparePrerelease(String(x), String(y));
+  }
+  return 0;
+}
+
+/** Semver prerelease order: dot-separated identifiers, numbers numerically and before text, shorter first. */
+function comparePrerelease(a: string, b: string): number {
+  const left = a.split(".");
+  const right = b.split(".");
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const x = left[index];
+    const y = right[index];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumber = /^\d+$/.test(x);
+    const yNumber = /^\d+$/.test(y);
+    if (xNumber && yNumber) return Number(x) - Number(y);
+    if (xNumber) return -1;
+    if (yNumber) return 1;
+    return x < y ? -1 : 1;
   }
   return 0;
 }

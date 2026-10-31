@@ -307,7 +307,7 @@ export const TEST_SERVER = {
 } as const;
 
 export function formatVersion(version: Version | string | undefined): string {
-  // [1, 0, 0, "beta", 2] (a prerelease kept by normalizeVersion) reads as 1.0.0-beta.2.
+  // [1, 0, 0, "beta.2"] (a prerelease kept by normalizeVersion) reads as 1.0.0-beta.2.
   if (Array.isArray(version)) {
     const release = version.slice(0, 3).join(".");
     return version.length > 3 ? `${release}-${version.slice(3).join(".")}` : release;
