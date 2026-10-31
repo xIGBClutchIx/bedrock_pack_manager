@@ -3,7 +3,7 @@
  * zips with odd extensions, and plain folders holding one or many packs.
  */
 import { createWriteStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { cp, mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -363,6 +363,13 @@ export async function prepareSource(
     searchRoot = source.extracted;
   } else if (info_?.isDirectory()) {
     searchRoot = entry;
+    // Nested archives are unpacked (and removed) where they sit, so work on a scratch copy: the upload stays
+    // as dropped, and a source rejected for size cannot pass on a retry with only part of it left to count.
+    if ((await walkFiles(entry)).some((path) => ARCHIVE_EXTENSIONS.has(extname(path).toLowerCase()))) {
+      source.extracted = join(scratchDir, `_copied_${name}_${Date.now().toString(36)}`);
+      await cp(entry, source.extracted, { recursive: true, verbatimSymlinks: true });
+      searchRoot = source.extracted;
+    }
   } else {
     warn(log, `'${name}' is not a file or folder - skipping`);
     return { ...source, ok: false };

@@ -416,6 +416,24 @@ describe("unpacking", () => {
     );
   });
 
+  it("rejects a folder over the nested budget every time and leaves the upload untouched", async () => {
+    const limits = { maxBytes: 1000, maxEntries: 100 };
+    const folder = join(dir.path, "upload", "bundle");
+    mkdirSync(folder, { recursive: true });
+    for (const name of ["a.zip", "b.zip", "c.zip"]) await yazl.zipEntries(join(folder, name), [["data.bin", Buffer.alloc(400)]]);
+    const scratch = join(dir.path, "scratch");
+    mkdirSync(scratch);
+    // A retry must not get a fresh budget for only the archives the first attempt left behind.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const log = new MemoryLog();
+      const source = await prepareSource(folder, scratch, log, null, limits);
+      expect(source).toMatchObject({ ok: false, extracted: null });
+      expect(log.warnings.join()).toContain("too large to unpack safely");
+      expect(readdirSync(folder).sort()).toEqual(["a.zip", "b.zip", "c.zip"]);
+      expect(readdirSync(scratch)).toEqual([]);
+    }
+  });
+
   it("unpacks same-named nested archives into separate folders", async () => {
     const bundle = join(dir.path, "bundle");
     mkdirSync(bundle);
