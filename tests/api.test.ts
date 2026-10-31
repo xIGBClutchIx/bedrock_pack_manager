@@ -471,6 +471,22 @@ describe("instance lock", () => {
     if (taken.ok) taken.release();
     expect(existsSync(file)).toBe(false);
   });
+
+  it("writes the pid before the lock appears and leaves no temp files", () => {
+    const file = join(dir.path, "run", "instance.lock");
+    // Another live instance starting against the same folder is refused while the first holds it.
+    const first = acquireLock(file, process.ppid);
+    expect(first.ok).toBe(true);
+    expect(readFileSync(file, "utf8").trim()).toBe(String(process.ppid));
+    expect(acquireLock(file)).toEqual({ ok: false, pid: process.ppid });
+    expect(readdirSync(join(dir.path, "run")).filter((name) => name.startsWith("instance.lock."))).toEqual([]);
+    if (first.ok) first.release();
+    // An empty lock can only be junk (locks are never half-written), so it is taken over.
+    writeFile(file, "");
+    const taken = acquireLock(file);
+    expect(taken.ok).toBe(true);
+    if (taken.ok) taken.release();
+  });
 });
 
 describe("sftp through the API", () => {
