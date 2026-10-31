@@ -19,32 +19,39 @@ const JUNK = /(^|\/)(__MACOSX|\.DS_Store|Thumbs\.db|desktop\.ini)(\/|$)/;
 const LABELS: Record<PlanAction, string> = { upload: "Upload", replace: "Replace", register: "Register", skip: "Skip" };
 const UPLOAD_CONCURRENCY = 6;
 
-/** Read a dropped folder (and everything inside) as files with relative paths. */
-function walkEntry(entry: FileSystemEntry, prefix = ""): Promise<Item[]> {
+/**
+ * Read a dropped folder (and everything inside) as files with relative paths. Entries the browser cannot read
+ * are skipped and counted in `failed`, so the user hears about them instead of losing them silently.
+ */
+function walkEntry(entry: FileSystemEntry, failed: { count: number }, prefix = ""): Promise<Item[]> {
   if (entry.isFile) {
     return new Promise((resolve) =>
       (entry as FileSystemFileEntry).file(
         (file) => resolve([{ file, path: prefix + file.name }]),
-        () => resolve([]),
+        () => {
+          failed.count++;
+          resolve([]);
+        },
       ),
     );
   }
   if (!entry.isDirectory) return Promise.resolve([]);
   const reader = (entry as FileSystemDirectoryEntry).createReader();
   const children: FileSystemEntry[] = [];
+  const walkChildren = async () => (await Promise.all(children.map((child) => walkEntry(child, failed, `${prefix}${entry.name}/`)))).flat();
   return new Promise((resolve) => {
     const readBatch = () =>
       reader.readEntries(
-        async (batch) => {
-          if (!batch.length) {
-            const nested = await Promise.all(children.map((child) => walkEntry(child, `${prefix}${entry.name}/`)));
-            resolve(nested.flat());
-            return;
-          }
+        (batch) => {
+          if (!batch.length) return void walkChildren().then(resolve);
           children.push(...batch);
           readBatch();
         },
-        () => resolve([]),
+        () => {
+          // The rest of this folder cannot be listed: keep what was read so far.
+          failed.count++;
+          void walkChildren().then(resolve);
+        },
       );
     readBatch();
   });
@@ -62,24 +69,41 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
   const [applied, setApplied] = useState<InstallResult | null>(null);
   // The plan needs (re)building; starts true when packs are already waiting (this tab mounts per world).
   const [stale, setStale] = useState(uploads.length > 0);
+  const [uploading, setUploading] = useState(false);
+  // Bumped whenever what a plan depends on changes (uploads, mode, reupload). A plan only counts if nothing
+  // changed between asking for it and getting it; otherwise it stays stale and is asked for again.
+  const generation = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
 
-  const setUploads = useCallback((next: UploadEntry[]) => state && setState({ ...state, uploads: next }), [state, setState]);
+  const setUploads = useCallback((next: UploadEntry[]) => setState((current) => current && { ...current, uploads: next }), [setState]);
+  /** What will be installed, or how, changed: any plan on screen or in flight no longer matches. */
+  const invalidate = () => {
+    generation.current++;
+    setStale(true);
+  };
 
   const preview = useCallback(
     async (quiet = true) => {
-      if (!uploads.length) return setPlan(null);
+      if (!uploads.length) {
+        setPlan(null);
+        setStale(false);
+        return;
+      }
+      const asked = generation.current;
       try {
         const job = await run<InstallResult>(
           ROUTES.install,
           { world: ctx.world, duplicateMode: mode, reupload, dryRun: true },
           { title: "Planning install", quiet },
         );
+        if (generation.current !== asked) return; // planned for inputs that have changed since; re-plan
         setPlan(job.result);
         setApplied(null);
         setStale(false);
       } catch (error) {
+        if (generation.current !== asked) return;
+        setPlan(null); // an older plan no longer matches the inputs
         setStale(false); // do not retry in a loop; "Refresh plan" tries again
         toast((error as Error).message, true);
       }
@@ -87,16 +111,27 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
     [uploads.length, run, ctx.world, mode, reupload, toast],
   );
 
-  // Re-plan whenever what will be installed, or how, changes (once the server is free).
+  // Re-plan whenever what will be installed, or how, changes (once the server is free and uploads are done).
   useEffect(() => {
-    if (!stale || busy) return;
+    if (!stale || busy || uploading) return;
     const timer = window.setTimeout(() => void preview(), 0);
     return () => window.clearTimeout(timer);
-  }, [stale, busy, preview]);
+  }, [stale, busy, uploading, preview]);
 
-  async function upload(items: Item[]) {
-    items = items.filter((item) => !JUNK.test(item.path));
-    if (!items.length) return;
+  /** Upload what was picked or dropped. `unreadable` counts dropped entries the browser could not read. */
+  async function upload(picked: Item[], unreadable = 0) {
+    const items = picked.filter((item) => !JUNK.test(item.path));
+    if (!items.length) {
+      if (picked.length || unreadable)
+        toast(
+          unreadable
+            ? `Nothing usable was found: ${plural(unreadable, "dropped item")} could not be read`
+            : "Nothing usable was found in what you added (only system files like .DS_Store)",
+          true,
+        );
+      return;
+    }
+    if (unreadable) toast(`${plural(unreadable, "dropped item")} could not be read and ${unreadable === 1 ? "was" : "were"} skipped`, true);
     // Progress per top-level item (a file, or a dropped folder), in bytes, so a big archive moves too.
     const tally: Progress = new Map();
     for (const item of items) {
@@ -107,6 +142,9 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
       tally.set(top, entry);
     }
     setProgress(new Map(tally));
+    // The staged set is changing: a plan in flight or on screen no longer matches, and none is asked for until done.
+    invalidate();
+    setUploading(true);
     const queue = [...items];
     let failed: Error | null = null;
     let lastPaint = 0;
@@ -116,32 +154,40 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
       lastPaint = now;
       setProgress(new Map([...tally].map(([name, entry]) => [name, { ...entry }])));
     };
-    await Promise.all(
-      Array.from({ length: UPLOAD_CONCURRENCY }, async () => {
-        while (queue.length && !failed) {
-          const item = queue.shift()!;
-          const entry = tally.get(item.path.split("/")[0]!)!;
-          let sent = 0;
-          try {
-            await uploadFile(item.path, item.file, (bytes) => {
-              entry.done += bytes - sent;
-              sent = bytes;
-              paint();
-            });
-          } catch (error) {
-            failed = error as Error;
-            return;
+    try {
+      await Promise.all(
+        Array.from({ length: UPLOAD_CONCURRENCY }, async () => {
+          while (queue.length && !failed) {
+            const item = queue.shift()!;
+            const entry = tally.get(item.path.split("/")[0]!)!;
+            let sent = 0;
+            try {
+              await uploadFile(item.path, item.file, (bytes) => {
+                entry.done += bytes - sent;
+                sent = bytes;
+                paint();
+              });
+            } catch (error) {
+              failed = error as Error;
+              return;
+            }
+            entry.filesDone++;
+            paint(true);
           }
-          entry.filesDone++;
-          paint(true);
-        }
-      }),
-    );
-    setProgress(new Map());
-    const { uploads: next } = await getUploads();
-    setUploads(next);
-    if (failed) return toast(`Upload failed: ${(failed as Error).message}`, true);
-    setStale(true);
+        }),
+      );
+    } finally {
+      setProgress(new Map());
+      // Even a failed upload may have staged some files: show what is there and plan again either way.
+      try {
+        setUploads((await getUploads()).uploads);
+      } catch (error) {
+        toast(`Could not read the upload list: ${(error as Error).message}`, true);
+      }
+      invalidate();
+      setUploading(false);
+    }
+    if (failed) toast(`Upload failed: ${(failed as Error).message}`, true);
   }
 
   async function onDrop(event: DragEvent) {
@@ -152,15 +198,22 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
       .map((item) => item.webkitGetAsEntry?.())
       .filter((entry): entry is FileSystemEntry => !!entry);
     const files = [...event.dataTransfer.files];
-    if (entries.length) await upload((await Promise.all(entries.map((entry) => walkEntry(entry)))).flat());
-    else await upload(files.map((file) => ({ file, path: file.name })));
+    if (entries.length) {
+      const failed = { count: 0 };
+      const items = (await Promise.all(entries.map((entry) => walkEntry(entry, failed)))).flat();
+      await upload(items, failed.count);
+    } else await upload(files.map((file) => ({ file, path: file.name })));
   }
 
   async function remove(name?: string) {
-    const { uploads: next } = await deleteUploads(name);
-    setUploads(next);
-    if (next.length) setStale(true);
-    else setPlan(null);
+    try {
+      const { uploads: next } = await deleteUploads(name);
+      setUploads(next);
+      invalidate();
+      if (!next.length) setPlan(null);
+    } catch (error) {
+      toast((error as Error).message, true);
+    }
   }
 
   async function install() {
@@ -299,7 +352,7 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
               value={mode}
               onChange={(e) => {
                 setMode(e.target.value as DuplicateMode);
-                setStale(uploads.length > 0);
+                invalidate();
               }}
             >
               <option value="replace">Replace it</option>
@@ -313,7 +366,7 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
               checked={reupload}
               onChange={(e) => {
                 setReupload(e.target.checked);
-                setStale(uploads.length > 0);
+                invalidate();
               }}
             />
             Upload again when the same version is there
@@ -378,14 +431,14 @@ export function InstallTab({ ctx }: { ctx: WorldContext }) {
             Clear list
           </button>
           <span className="grow" />
-          <button className="btn" type="button" onClick={() => void preview(false)} disabled={busy || !uploads.length}>
+          <button className="btn" type="button" onClick={() => void preview(false)} disabled={busy || uploading || !uploads.length}>
             Refresh plan
           </button>
           <button
             className="btn primary"
             type="button"
             onClick={() => void install()}
-            disabled={busy || !plan || stale || actionable === 0}
+            disabled={busy || uploading || !plan || stale || actionable === 0}
           >
             {actionable ? `Install ${plural(actionable, "pack")}` : "Install"}
           </button>

@@ -1,9 +1,9 @@
 /** The connected view: sidebar with the server and its worlds, the world's tabs, and the activity bar. */
-import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ROUTES } from "../../shared/api";
 import type { ConnectResult, LayoutInfo, LayoutOverrides, WorldStatus, WorldSummary } from "../../shared/model";
-import { backupUrl, disconnect } from "../api/client";
+import { backupUrl, disconnect, downloadInFrame, getState } from "../api/client";
 import { useApp } from "../state/app";
 import { Brand, Icon, Menu, Modal, plural } from "./common";
 import { ConsoleDock } from "./ConsoleDock";
@@ -25,11 +25,23 @@ export interface WorldContext {
   reload: () => Promise<void>;
 }
 
-/** A backup is a download the browser runs; follow its job once the server has started it. */
-export function useBackupLink() {
-  const { busy, watchActive } = useApp();
-  return (event: MouseEvent<HTMLAnchorElement>) => {
-    if (busy) return event.preventDefault();
+/**
+ * A backup is a download the browser runs. It starts in a hidden frame so the page stays put, and an error
+ * answer (busy, disconnected) becomes a toast instead of raw JSON. Its job is followed once the server has
+ * started it. A button, not a link, so a middle or Ctrl click cannot skip the busy check.
+ */
+export function useBackup() {
+  const { busy, watchActive, toast } = useApp();
+  return async (world: string | null) => {
+    if (busy) return;
+    try {
+      // Preflight: the server takes one task at a time, so say so here rather than in a failed download.
+      const current = await getState();
+      if (current.activeJob) return toast(`Wait for "${current.activeJob.title}" to finish first`, true);
+    } catch (error) {
+      return toast((error as Error).message, true);
+    }
+    downloadInFrame(backupUrl(world), (error) => toast(`Backup failed: ${error.message}`, true));
     window.setTimeout(() => void watchActive(), 400);
   };
 }
@@ -50,7 +62,7 @@ export function Dashboard() {
   const [statusFor, setStatusFor] = useState<{ world: string; status: WorldStatus } | null>(null);
   const [tab, setTab] = useState<Tab>("packs");
   const [layoutOpen, setLayoutOpen] = useState(false);
-  const onBackup = useBackupLink();
+  const backup = useBackup();
   const worlds = useMemo(() => state?.worlds ?? [], [state?.worlds]);
 
   // The picked world while it exists, else the server's default, else the first one.
@@ -85,7 +97,7 @@ export function Dashboard() {
       },
     );
     if (job) setStatus(job.result);
-    await refresh();
+    await refresh().catch((error: Error) => toast(error.message, true));
   };
 
   async function leave() {
@@ -181,10 +193,10 @@ export function Dashboard() {
             )}
           </div>
           <div className="head-actions">
-            <a className="btn ghost" href={world ? backupUrl(world) : undefined} aria-disabled={!world || busy} onClick={onBackup}>
+            <button className="btn ghost" type="button" disabled={!world || busy} onClick={() => void backup(world)}>
               <Icon name="download" />
               Backup
-            </a>
+            </button>
             <button className="btn primary" onClick={() => setTab("install")} disabled={!world}>
               <Icon name="plus" />
               Add packs

@@ -16,6 +16,27 @@ export class ApiError extends Error {
   }
 }
 
+/** The server answers a token from an earlier launch (or none) with 403 and this code. */
+export const BAD_TOKEN = "bad_token";
+
+const badTokenListeners = new Set<() => void>();
+
+/**
+ * Called once per answer the server refused for a stale per-launch token, before the error is thrown, so the
+ * app can show one persistent banner instead of a toast per failed call. Returns an unsubscribe function.
+ */
+export function onBadToken(listener: () => void): () => void {
+  badTokenListeners.add(listener);
+  return () => badTokenListeners.delete(listener);
+}
+
+/** Build the ApiError for a failed answer, telling the listeners when the token was the problem. */
+function apiError(status: number, statusText: string, data: { error?: string; code?: string } | null): ApiError {
+  const code = data?.code ?? "error";
+  if (status === 403 && code === BAD_TOKEN) for (const listener of badTokenListeners) listener();
+  return new ApiError(data?.error ?? `${status} ${statusText}`, code, status);
+}
+
 export async function api<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
   const raw = body instanceof Blob || body instanceof ArrayBuffer;
   const response = await fetch(path, {
@@ -24,7 +45,7 @@ export async function api<T>(method: string, path: string, body?: unknown, heade
     body: body === undefined ? undefined : raw ? (body as BodyInit) : JSON.stringify(body),
   });
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new ApiError(data?.error ?? `${response.status} ${response.statusText}`, data?.code ?? "error", response.status);
+  if (!response.ok) throw apiError(response.status, response.statusText, data);
   return data as T;
 }
 
@@ -49,13 +70,53 @@ export const browse = (path: string) => api<BrowseResult>("GET", `${ROUTES.brows
 
 export async function getJobLog(id: string): Promise<string> {
   const response = await fetch(ROUTES.jobLog(id), { headers: { [TOKEN_HEADER]: TOKEN } });
-  if (!response.ok) throw new ApiError(`${response.status} ${response.statusText}`, "error", response.status);
+  if (!response.ok) {
+    const data = response.headers.get("Content-Type")?.includes("json") ? await response.json().catch(() => null) : null;
+    throw apiError(response.status, response.statusText, data);
+  }
   return response.text();
 }
 
 export const backupUrl = (world: string | null) => withToken(ROUTES.backup, world ? { world } : {});
 export const appLogUrl = () => withToken(ROUTES.appLog);
-export const packIconUrl = (path: string) => withToken(ROUTES.packIcon, { path });
+/** `version` busts the browser's image cache when a pack in the same folder is replaced by another version. */
+export const packIconUrl = (path: string, version?: string) => withToken(ROUTES.packIcon, { path, ...(version ? { v: version } : {}) });
+
+/**
+ * Start a download without leaving the page: a hidden frame loads the URL. A real download (an attachment)
+ * never loads a document there; an error answer does, so its JSON message is passed to `onError` instead of
+ * replacing the app with raw JSON.
+ */
+export function downloadInFrame(url: string, onError: (error: ApiError) => void): void {
+  let frame = document.getElementById("download-frame") as HTMLIFrameElement | null;
+  if (!frame) {
+    frame = document.createElement("iframe");
+    frame.id = "download-frame";
+    frame.title = "Downloads";
+    frame.hidden = true;
+    frame.tabIndex = -1;
+    document.body.appendChild(frame);
+  }
+  const target = frame;
+  target.onload = () => {
+    let text = "";
+    try {
+      text = target.contentDocument?.body?.textContent?.trim() ?? "";
+    } catch {
+      // not readable: nothing to report
+    }
+    if (!text) return;
+    let data: { error?: string; code?: string } | null = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // not JSON
+    }
+    // The status code is not visible from here; 403 + bad_token is still recognised by its code.
+    onError(apiError(data?.code === BAD_TOKEN ? 403 : 500, "Download failed", data ?? { error: "The download failed" }));
+  };
+  target.src = url;
+}
 
 /** Upload one file, reporting bytes sent. (fetch cannot report upload progress; XHR can.) */
 export function uploadFile(path: string, file: Blob, onProgress?: (sent: number) => void): Promise<void> {
@@ -76,7 +137,7 @@ export function uploadFile(path: string, file: Blob, onProgress?: (sent: number)
       } catch {
         // not JSON
       }
-      reject(new ApiError(data?.error ?? `${request.status} ${request.statusText}`, data?.code ?? "error", request.status));
+      reject(apiError(request.status, request.statusText, data));
     };
     request.onerror = () => reject(new ApiError("The upload was interrupted", "error", 0));
     request.send(file);

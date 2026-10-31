@@ -68,7 +68,7 @@ function fromProfile(profile: Profile): FormState {
 }
 
 export function ConnectScreen() {
-  const { state, setState, refresh, run, busy, mark, cancel } = useApp();
+  const { state, setState, refresh, run, busy, mark, cancel, confirm, toast } = useApp();
   const profiles = state?.profiles ?? [];
   const [form, setForm] = useState<FormState>(EMPTY);
   const [active, setActive] = useState<string | null>(null);
@@ -161,9 +161,20 @@ export function ConnectScreen() {
   }
 
   async function remove(name: string) {
-    await deleteProfile(name);
-    if (active === name) setActive(null);
-    await refresh();
+    const ok = await confirm({
+      title: `Delete the saved server "${name}"?`,
+      body: <p>Only the saved connection details are removed. Nothing on the server changes.</p>,
+      okLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteProfile(name);
+      if (active === name) setActive(null);
+      await refresh();
+    } catch (caught) {
+      toast((caught as Error).message, true);
+    }
   }
 
   return (
@@ -369,7 +380,7 @@ export function ConnectScreen() {
           )}
 
           {error && (
-            <div className="banner danger">
+            <div className="banner danger" role="alert">
               <div className="grow">
                 {error}
                 {keyChanged && (

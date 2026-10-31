@@ -1,5 +1,5 @@
 /** Small shared pieces: icons, the brand mark, modals, confirmations and toasts. */
-import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 
 import { useApp } from "../state/app";
 
@@ -85,7 +85,13 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/** A button that opens a short list of actions; closes on a pick, Escape, or a click elsewhere. */
+const menuItems = (list: HTMLElement | null) => [...(list?.querySelectorAll<HTMLButtonElement>("[role='menuitem']:not(:disabled)") ?? [])];
+
+/**
+ * A button that opens a short list of actions. Opening focuses the first item; arrow keys, Home and End move
+ * between items; Escape closes and returns focus to the button; a pick, Tab, focus leaving, or a click
+ * elsewhere closes it.
+ */
 export function Menu({
   label,
   items,
@@ -95,20 +101,74 @@ export function Menu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const enabledItems = () => menuItems(list.current);
+
   useEffect(() => {
     if (!open) return;
+    menuItems(list.current)[0]?.focus();
     const onDown = (event: MouseEvent) => !ref.current?.contains(event.target as Node) && setOpen(false);
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setOpen(false);
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
+    return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
+
+  const close = (refocus: boolean) => {
+    setOpen(false);
+    if (refocus) trigger.current?.focus();
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    if (!open) {
+      if (event.key === "ArrowDown" && event.target === trigger.current) {
+        event.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      setOpen(false); // let the browser move focus on as usual
+      return;
+    }
+    const all = enabledItems();
+    if (!all.length) return;
+    const at = all.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === "ArrowDown"
+        ? all[(at + 1) % all.length]
+        : event.key === "ArrowUp"
+          ? all[(at - 1 + all.length) % all.length]
+          : event.key === "Home"
+            ? all[0]
+            : event.key === "End"
+              ? all[all.length - 1]
+              : null;
+    if (next) {
+      event.preventDefault();
+      next.focus();
+    }
+  };
+
   return (
-    <div className="menu" ref={ref}>
+    <div
+      className="menu"
+      ref={ref}
+      onKeyDown={onKeyDown}
+      onBlur={(event) => {
+        // Focus moved to something outside the menu. (No relatedTarget means a click on nothing focusable, or a
+        // browser that does not focus clicked buttons; the mousedown listener handles clicks.)
+        const to = event.relatedTarget as Node | null;
+        if (open && to && !ref.current?.contains(to)) setOpen(false);
+      }}
+    >
       <button
+        ref={trigger}
         type="button"
         className="icon-btn"
         aria-label={label}
@@ -119,16 +179,18 @@ export function Menu({
         <Icon name="more" />
       </button>
       {open && (
-        <div className="menu-list" role="menu">
+        <div className="menu-list" role="menu" aria-label={label} ref={list}>
           {items.map((item) => (
             <button
               key={item.label}
               type="button"
               role="menuitem"
+              tabIndex={-1}
               className={item.danger ? "danger" : ""}
               disabled={item.disabled}
               onClick={() => {
-                setOpen(false);
+                // Focus goes back to the button first, so a dialog the pick opens returns focus there.
+                close(true);
                 item.onSelect();
               }}
             >
@@ -159,6 +221,23 @@ export const lastPart = (path: string) => path.split(/[\\/]/).filter(Boolean).po
 
 const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])";
 
+/**
+ * What a dialog focuses when it opens, tried in this order (a selector list would return the first match in
+ * document order instead): an element marked data-autofocus, then the first form field, then the primary
+ * button, then any other button that is not destructive. A danger button is never focused unless marked, so
+ * Enter or a stray key press cannot confirm a destructive action; ConfirmHost marks Cancel for those.
+ */
+const AUTOFOCUS_ORDER = ["[data-autofocus]", "input:not([type='hidden']), select, textarea", "button.primary", "button:not(.danger)"];
+
+export function autofocusTarget(dialog: HTMLElement | null): HTMLElement | null {
+  if (!dialog) return null;
+  for (const selector of AUTOFOCUS_ORDER) {
+    const match = [...dialog.querySelectorAll<HTMLElement>(selector)].find((element) => !element.hasAttribute("disabled"));
+    if (match) return match;
+  }
+  return null;
+}
+
 export function Modal({
   title,
   children,
@@ -175,8 +254,7 @@ export function Modal({
   const close = useEffectEvent(onClose);
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    const focusable = ref.current?.querySelector<HTMLElement>("[data-autofocus], button.primary, button.danger, input, select, button");
-    focusable?.focus();
+    autofocusTarget(ref.current)?.focus();
     const onKey = (event: KeyboardEvent) => {
       // With dialogs stacked (a confirmation over another dialog), only the top one answers keys.
       const overlays = document.querySelectorAll(".overlay");
@@ -221,10 +299,15 @@ export function ConfirmHost() {
     <Modal title={confirmState.title} onClose={() => close(false)}>
       <div className="modal-body">{confirmState.body}</div>
       <div className="row end">
-        <button className="btn ghost" onClick={() => close(false)}>
+        {/* Destructive confirmations start on Cancel; others on the action (see AUTOFOCUS_ORDER). */}
+        <button className="btn ghost" onClick={() => close(false)} data-autofocus={confirmState.danger ? "" : undefined}>
           Cancel
         </button>
-        <button className={`btn ${confirmState.danger ? "danger" : "primary"}`} onClick={() => close(true)} data-autofocus>
+        <button
+          className={`btn ${confirmState.danger ? "danger" : "primary"}`}
+          onClick={() => close(true)}
+          data-autofocus={confirmState.danger ? undefined : ""}
+        >
           {confirmState.okLabel ?? "Continue"}
         </button>
       </div>
@@ -233,11 +316,29 @@ export function ConfirmHost() {
 }
 
 export function ToastHost() {
-  const { toastState } = useApp();
+  const { toastState, dismissToast } = useApp();
   if (!toastState) return null;
   return (
-    <div id="toast" role="status" className={toastState.error ? "error" : ""}>
-      {toastState.message}
+    // Keyed per message so a repeated message is announced again.
+    <div key={toastState.id} id="toast" role={toastState.error ? "alert" : "status"} className={toastState.error ? "error" : ""}>
+      <span>{toastState.message}</span>
+      {toastState.error && (
+        <button type="button" className="toast-close" aria-label="Dismiss" onClick={dismissToast}>
+          <Icon name="close" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+export const STALE_LINK_MESSAGE = "This page is from an earlier launch of Bedrock Pack Manager. Open the new link from the app window.";
+
+/** Shown once, and kept, when the server refuses this page's token (the app was restarted since it opened). */
+export function StaleLinkBanner({ boot = false }: { boot?: boolean }) {
+  return (
+    <div className={boot ? "boot banner danger" : "stale-link banner danger"} role="alert">
+      <Icon name="warn" />
+      <span>{STALE_LINK_MESSAGE}</span>
     </div>
   );
 }

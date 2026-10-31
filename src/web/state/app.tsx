@@ -1,9 +1,20 @@
 /** App-wide state: server snapshot, the running job and its console, toasts and confirmations. */
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 
 import type { AppStateResponse } from "../../shared/api";
 import type { JobEvent, JobInfo, LogLevel } from "../../shared/events";
-import { ApiError, JobError, api, cancelJob, followJob, getState } from "../api/client";
+import { ApiError, JobError, api, cancelJob, followJob, getState, onBadToken } from "../api/client";
 import type { JobStarted } from "../../shared/api";
 
 export interface ConsoleLine {
@@ -28,6 +39,7 @@ export interface ConfirmOptions {
 }
 
 interface Toast {
+  id: number;
   message: string;
   error: boolean;
 }
@@ -39,7 +51,7 @@ interface RunOptions {
 
 interface AppContextValue {
   state: AppStateResponse | null;
-  setState: (state: AppStateResponse) => void;
+  setState: Dispatch<SetStateAction<AppStateResponse | null>>;
   refresh: () => Promise<AppStateResponse>;
   busy: boolean;
   console: ConsoleState;
@@ -52,8 +64,12 @@ interface AppContextValue {
   /** Bumped when a job this page only watched finishes, so views can re-read what it changed. */
   watchedDone: number;
   cancel: () => void;
+  /** Errors stay until dismissed; other messages fade after a few seconds. */
   toast: (message: string, error?: boolean) => void;
   toastState: Toast | null;
+  dismissToast: () => void;
+  /** The server refused this page's token: it comes from an earlier launch of the app. */
+  staleLink: boolean;
   confirm: (options: ConfirmOptions) => Promise<boolean>;
   confirmState: (ConfirmOptions & { resolve: (ok: boolean) => void }) | null;
 }
@@ -77,8 +93,22 @@ export function AppProvider({ children, initialState = null }: { children: React
   const [toastState, setToast] = useState<Toast | null>(null);
   const [confirmState, setConfirm] = useState<AppContextValue["confirmState"]>(null);
   const [watchedDone, setWatchedDone] = useState(0);
+  const [staleLink, setStaleLink] = useState(false);
   const nextLine = useRef(0);
+  const nextToast = useRef(0);
   const toastTimer = useRef<number | undefined>(undefined);
+  /** Read synchronously by toast(): the listener runs before the failed call's catch block toasts. */
+  const staleLinkRef = useRef(false);
+
+  useEffect(
+    () =>
+      onBadToken(() => {
+        staleLinkRef.current = true;
+        setStaleLink(true);
+        setToast((current) => (current?.error ? null : current));
+      }),
+    [],
+  );
   /** The job being followed, so the same one is never followed twice. */
   const following = useRef<{ id: string; done: Promise<void> } | null>(null);
 
@@ -96,9 +126,17 @@ export function AppProvider({ children, initialState = null }: { children: React
   }, []);
 
   const toast = useCallback((message: string, error = false) => {
-    setToast({ message, error });
+    // With a stale link every call fails the same way; the banner says it once.
+    if (error && staleLinkRef.current) return;
+    setToast({ id: nextToast.current++, message, error });
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), error ? 6000 : 3000);
+    // Errors stay until dismissed, so they are not missed while looking elsewhere.
+    if (!error) toastTimer.current = window.setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const dismissToast = useCallback(() => {
+    window.clearTimeout(toastTimer.current);
+    setToast(null);
   }, []);
 
   /** Show a job in the console until it ends. */
@@ -200,14 +238,15 @@ export function AppProvider({ children, initialState = null }: { children: React
 
   const cancel = useCallback(() => {
     const id = consoleState.jobId;
+    const fail = (error: unknown) => toast(`Could not cancel: ${(error as Error).message}`, true);
     if (id) {
-      void cancelJob(id);
+      cancelJob(id).catch(fail);
       return;
     }
-    void getState().then((current) => {
-      if (current.activeJob) void cancelJob(current.activeJob.id);
-    });
-  }, [consoleState.jobId]);
+    getState()
+      .then((current) => (current.activeJob ? cancelJob(current.activeJob.id) : undefined))
+      .catch(fail);
+  }, [consoleState.jobId, toast]);
 
   const confirm = useCallback((options: ConfirmOptions) => new Promise<boolean>((resolve) => setConfirm({ ...options, resolve })), []);
 
@@ -227,6 +266,8 @@ export function AppProvider({ children, initialState = null }: { children: React
       cancel,
       toast,
       toastState,
+      dismissToast,
+      staleLink,
       confirm,
       confirmState: confirmState && {
         ...confirmState,
@@ -236,7 +277,24 @@ export function AppProvider({ children, initialState = null }: { children: React
         },
       },
     }),
-    [state, refresh, busy, consoleState, lines, run, watchActive, watchedDone, cancel, toast, toastState, confirm, confirmState, append],
+    [
+      state,
+      refresh,
+      busy,
+      consoleState,
+      lines,
+      run,
+      watchActive,
+      watchedDone,
+      cancel,
+      toast,
+      toastState,
+      dismissToast,
+      staleLink,
+      confirm,
+      confirmState,
+      append,
+    ],
   );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

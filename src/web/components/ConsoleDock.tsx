@@ -53,6 +53,22 @@ export function ConsoleDock() {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [lines, open]);
 
+  // Screen readers hear the newest line, at most once a second, from a separate live region. The log itself is
+  // not live: after a reload it replays up to MAX_LINES lines at once, which must not all be read out.
+  const [announced, setAnnounced] = useState("");
+  const latest = useRef("");
+  const announceTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const last = lines.at(-1);
+    latest.current = last ? (last.level === "mark" ? last.text : `${TAGS[last.level] ?? ""}${last.text}`) : "";
+    if (announceTimer.current !== undefined) return;
+    announceTimer.current = window.setTimeout(() => {
+      announceTimer.current = undefined;
+      setAnnounced(latest.current);
+    }, 1000);
+  }, [lines]);
+  useEffect(() => () => window.clearTimeout(announceTimer.current), []);
+
   const copy = async () => {
     const text = lines.map((line) => `${line.level === "mark" ? "— " : (TAGS[line.level] ?? "")}${line.text}`).join("\n");
     try {
@@ -90,10 +106,15 @@ export function ConsoleDock() {
               Clear
             </button>
           </div>
+          <div className="sr" aria-live="polite" aria-atomic="true">
+            {announced}
+          </div>
           <pre
             ref={logRef}
             role="log"
-            aria-live="polite"
+            aria-live="off"
+            aria-label="Activity log"
+            tabIndex={0}
             style={{ height }}
             onScroll={(event) => {
               const el = event.currentTarget;
@@ -120,7 +141,15 @@ export function ConsoleDock() {
         <span className={`dot ${status.status}`} aria-hidden="true" />
         <b className="console-title">{status.title}</b>
         {progress ? (
-          <span className="console-progress" aria-label={`${progress.label} ${progress.done} of ${progress.total}`}>
+          <span
+            className="console-progress"
+            role="progressbar"
+            aria-label={progress.label}
+            aria-valuemin={0}
+            aria-valuemax={progress.total}
+            aria-valuenow={progress.done}
+            aria-valuetext={`${progress.done} of ${progress.total}${progress.unit === "bytes" ? " bytes" : ` ${progress.unit}`}`}
+          >
             <span className="bar">
               <span style={{ width: `${percent}%` }} />
             </span>

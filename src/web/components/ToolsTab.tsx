@@ -1,14 +1,13 @@
 /** Audit, rebuild, cleanup and backup. */
 import { ROUTES } from "../../shared/api";
 import type { CleanupResult, RebuildResult, WorldStatus } from "../../shared/model";
-import { backupUrl } from "../api/client";
 import { useApp } from "../state/app";
 import { plural } from "./common";
-import { useBackupLink, type WorldContext } from "./Dashboard";
+import { useBackup, type WorldContext } from "./Dashboard";
 
 export function ToolsTab({ ctx }: { ctx: WorldContext }) {
   const { run, confirm, toast, refresh, busy, mark } = useApp();
-  const onBackup = useBackupLink();
+  const backup = useBackup();
 
   async function audit() {
     mark("Checking the world");
@@ -73,6 +72,7 @@ export function ToolsTab({ ctx }: { ctx: WorldContext }) {
       if (!ok) return;
       const job = await run<CleanupResult>(ROUTES.cleanup, { world: ctx.world, dryRun: false }, { title: "Cleaning up" });
       if (job.result.status) ctx.setStatus(job.result.status);
+      await refresh().catch(() => undefined); // sidebar pack counts; the cleanup itself is done
       toast("Cleanup done");
     } catch (error) {
       toast((error as Error).message, true);
@@ -115,12 +115,12 @@ export function ToolsTab({ ctx }: { ctx: WorldContext }) {
             <p>Downloads a zip of the world and the pack folders. Stop the server first for a complete copy.</p>
           </div>
           <div className="row tight">
-            <a className="btn" href={backupUrl(ctx.world)} aria-disabled={busy} onClick={onBackup}>
+            <button className="btn" type="button" disabled={busy} onClick={() => void backup(ctx.world)}>
               This world
-            </a>
-            <a className="btn" href={backupUrl(null)} aria-disabled={busy} onClick={onBackup}>
+            </button>
+            <button className="btn" type="button" disabled={busy} onClick={() => void backup(null)}>
               Whole server
-            </a>
+            </button>
           </div>
         </li>
       </ul>
